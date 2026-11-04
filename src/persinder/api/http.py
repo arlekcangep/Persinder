@@ -1,4 +1,4 @@
-"""HTTP-обёртка над сервисом приёма (стандартная библиотека, без зависимостей).
+"""HTTP-обёртка над сервисами Persinder (стандартная библиотека, без зависимостей).
 
 Слушает только локальный интерфейс и запускается по требованию приложением.
 """
@@ -8,23 +8,29 @@ from __future__ import annotations
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
+from urllib.parse import parse_qs, urlsplit
 
 from ..ingest import IngestResult
-from ..interfaces import Ingest
-from .models import IngestPayload, IngestResponse, PayloadError
+from ..interfaces import Ingest, Search
+from ..search import SearchQuery
+from .models import IngestPayload, IngestResponse, PayloadError, SearchResponse
 
 MAX_BODY_BYTES = 32 * 1024 * 1024  # 32 МБ
 
 
-class IngestHTTPServer(ThreadingHTTPServer):
-    """Сервер с привязанным сервисом приёма."""
+class PersinderHTTPServer(ThreadingHTTPServer):
+    """Сервер с привязанными сервисами приёма и поиска."""
 
     daemon_threads = True
-    service: Ingest
+    ingest: Ingest
+    search: Search
 
-    def __init__(self, address: tuple[str, int], service: Ingest) -> None:
+    def __init__(
+        self, address: tuple[str, int], ingest: Ingest, search: Search
+    ) -> None:
         super().__init__(address, _Handler)
-        self.service = service
+        self.ingest = ingest
+        self.search = search
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -38,11 +44,30 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _services(self) -> PersinderHTTPServer:
+        return cast(PersinderHTTPServer, self.server)
+
     def do_GET(self) -> None:  # noqa: N802 (имя задано базовым классом)
-        if self.path == "/health":
+        parsed = urlsplit(self.path)
+        if parsed.path == "/health":
             self._send_json(200, {"status": "ok"})
+        elif parsed.path == "/search":
+            self._handle_search(parsed.query)
         else:
             self._send_json(404, {"error": "not found"})
+
+    def _handle_search(self, raw_query: str) -> None:
+        params = parse_qs(raw_query)
+        text = (params.get("q") or [""])[0]
+        raw_limit = (params.get("limit") or ["20"])[0]
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            self._send_json(400, {"error": "invalid limit"})
+            return
+
+        result = self._services().search.search(SearchQuery(text=text, limit=limit))
+        self._send_json(200, SearchResponse.from_result(result).to_dict())
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path != "/ingest":
@@ -66,8 +91,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
             return
 
-        service = cast(IngestHTTPServer, self.server).service
-        result = service.ingest(payload.to_request())
+        result = self._services().ingest.ingest(payload.to_request())
 
         response = IngestResponse.from_result(result)
         code = 200 if result.status != IngestResult.REJECTED else 422
@@ -78,14 +102,16 @@ class _Handler(BaseHTTPRequestHandler):
         return
 
 
-def make_server(service: Ingest, host: str, port: int) -> IngestHTTPServer:
+def make_server(
+    ingest: Ingest, search: Search, host: str, port: int
+) -> PersinderHTTPServer:
     """Создать HTTP-сервер (без запуска). ``port=0`` выберет свободный порт."""
-    return IngestHTTPServer((host, port), service)
+    return PersinderHTTPServer((host, port), ingest, search)
 
 
-def serve(service: Ingest, host: str, port: int) -> None:
+def serve(ingest: Ingest, search: Search, host: str, port: int) -> None:
     """Запустить сервер и работать до остановки."""
-    server = make_server(service, host, port)
+    server = make_server(ingest, search, host, port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

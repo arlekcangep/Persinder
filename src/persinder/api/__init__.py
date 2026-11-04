@@ -1,13 +1,19 @@
-"""Транспортный адаптер HTTP над сервисом приёма."""
+"""Транспортный адаптер HTTP над сервисами Persinder."""
 
-from .http import IngestHTTPServer, make_server, serve
-from .models import IngestPayload, IngestResponse, PayloadError
+from .http import PersinderHTTPServer, make_server, serve
+from .models import (
+    IngestPayload,
+    IngestResponse,
+    PayloadError,
+    SearchResponse,
+)
 
 __all__ = [
-    "IngestHTTPServer",
+    "PersinderHTTPServer",
     "make_server",
     "serve",
     "IngestPayload",
     "IngestResponse",
+    "SearchResponse",
     "PayloadError",
 ]

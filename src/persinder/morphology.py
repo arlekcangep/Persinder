@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from typing import Any, cast
 
 from .interfaces import Stemmer
@@ -38,17 +38,17 @@ class SnowballStemmer:
         import snowballstemmer  # type: ignore[import-untyped]
 
         module: Any = snowballstemmer
-        self._ru = cast(Callable[[str], str], module.stemmer("russian"))
-        self._en = cast(Callable[[str], str], module.stemmer("english"))
+        self._ru = module.stemmer("russian")
+        self._en = module.stemmer("english")
         self.name = "snowball:ru+en"
 
     def stem(self, tokens: Iterable[str]) -> list[str]:
         out: list[str] = []
         for token in tokens:
-            if _CYRILLIC_RE.search(token):
-                out.append(self._ru(token))
-            else:
-                out.append(self._en(token))
+            stem = (
+                self._ru.stemWord if _CYRILLIC_RE.search(token) else self._en.stemWord
+            )
+            out.append(cast("str", stem(token)))
         return out
 
 

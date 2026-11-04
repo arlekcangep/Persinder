@@ -12,6 +12,7 @@ from typing import Any
 from persinder.api import make_server
 from persinder.ingest import IngestService
 from persinder.morphology import NoopStemmer
+from persinder.search import SearchService
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
 
@@ -21,8 +22,9 @@ class ApiTest(unittest.TestCase):
         self._tmp = TemporaryDirectory()
         root = Path(self._tmp.name)
         self.store = SqliteStore(root / "db.sqlite")
-        service = IngestService(self.store, FsTextStore(root / "texts"), NoopStemmer())
-        self.server = make_server(service, host="127.0.0.1", port=0)
+        ingest = IngestService(self.store, FsTextStore(root / "texts"), NoopStemmer())
+        search = SearchService(self.store, NoopStemmer())
+        self.server = make_server(ingest, search, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         addr = self.server.server_address

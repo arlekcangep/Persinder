@@ -11,6 +11,7 @@ from typing import cast
 
 from ..domain import Area
 from ..ingest import IngestRequest, IngestResult
+from ..search import SearchHit, SearchResult
 
 
 class PayloadError(ValueError):
@@ -81,4 +82,30 @@ class IngestResponse:
             "document_id": self.document_id,
             "chunks": self.chunks,
             "message": self.message,
+        }
+
+
+@dataclass(frozen=True)
+class SearchResponse:
+    """Тело ответа ``GET /search`` (DTO ответа)."""
+
+    query: str
+    hits: tuple[SearchHit, ...] = ()
+
+    @classmethod
+    def from_result(cls, result: SearchResult) -> SearchResponse:
+        """Собрать DTO из результата сервиса поиска."""
+        return cls(query=result.query, hits=result.hits)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "query": self.query,
+            "hits": [
+                {
+                    "document_id": hit.document_id,
+                    "chunk_index": hit.chunk_index,
+                    "score": hit.score,
+                }
+                for hit in self.hits
+            ],
         }

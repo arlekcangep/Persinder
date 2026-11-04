@@ -1,4 +1,4 @@
-"""Запуск HTTP-сервиса приёма: ``python -m persinder``."""
+"""Запуск HTTP-сервиса Persinder: ``python -m persinder``."""
 
 from __future__ import annotations
 
@@ -10,23 +10,28 @@ from .api import serve
 from .config import Settings
 from .ingest import IngestService
 from .morphology import default_stemmer
+from .search import SearchService
 from .store import SqliteStore
 from .textstore import FsTextStore
 
 
-def build_service(settings: Settings) -> tuple[IngestService, SqliteStore]:
-    """Собрать сервис приёма из настроек."""
+def build_service(
+    settings: Settings,
+) -> tuple[IngestService, SearchService, SqliteStore]:
+    """Собрать сервисы приёма и поиска из настроек."""
     settings.ensure()
     store = SqliteStore(settings.db_path)
     textstore = FsTextStore(settings.text_dir)
-    service = IngestService(
+    stemmer = default_stemmer()
+    ingest = IngestService(
         store=store,
         textstore=textstore,
-        stemmer=default_stemmer(),
+        stemmer=stemmer,
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
     )
-    return service, store
+    search = SearchService(store=store, stemmer=stemmer)
+    return ingest, search, store
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,10 +51,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.port:
         settings = replace(settings, port=args.port)
 
-    service, store = build_service(settings)
+    ingest, search, store = build_service(settings)
     print(f"Persinder слушает http://{settings.host}:{settings.port}")
     try:
-        serve(service, settings.host, settings.port)
+        serve(ingest, search, settings.host, settings.port)
     finally:
         store.close()
     return 0

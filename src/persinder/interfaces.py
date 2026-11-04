@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from .domain import Chunk, Document, EmbeddingJob
     from .ingest.models import IngestRequest, IngestResult
+    from .search.models import SearchQuery, SearchResult
     from .store.models import EmbeddingQueueItem, MorphHit, StoreCounts
 
 
@@ -71,3 +72,10 @@ class Ingest(Protocol):
     """Сервис приёма текста и метаданных."""
 
     def ingest(self, request: IngestRequest) -> IngestResult: ...
+
+
+@runtime_checkable
+class Search(Protocol):
+    """Сервис поиска."""
+
+    def search(self, query: SearchQuery) -> SearchResult: ...
