@@ -29,6 +29,29 @@ Persinder ведёт автоматическое каталогизирован
 
 - [Архитектура](docs/architecture.md) — слои данных, сайдкары эмбеддингов, конвейер
   индексации, модель репликации и риски.
+- [Модули](docs/modules.md) — декомпозиция на модули, интерфейсы и поток данных.
+
+## Разработка
+
+Ядро — на стандартной библиотеке Python (без обязательных зависимостей).
+
+```bash
+# тесты
+PYTHONPATH=src python3 -m unittest discover -s tests
+
+# запуск сервиса приёма (модуль 1)
+PYTHONPATH=src python3 -m persinder --data-dir ~/.persinder --port 8756
+
+# проверка
+curl -s localhost:8756/health
+curl -s -X POST localhost:8756/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{"filename":"note.md","area":"personal","text":"Привет мир"}'
+```
+
+Реализован **модуль 1** (`ingest`): приём текста и метаданных, быстрый морфологический
+слой (FTS5), временное хранение текста и очередь на эмбеддинги. Остальные модули —
+заглушки с зафиксированными интерфейсами (см. `docs/modules.md`).
 
 ## Статус
 
