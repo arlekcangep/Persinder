@@ -1,4 +1,4 @@
-"""Тесты экстракторов Markdown/текста и извлечения тэгов."""
+"""Тесты экстракторов: реестр, Markdown/текст, извлечение тэгов."""
 
 from __future__ import annotations
 
@@ -6,7 +6,71 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from persinder.sources import extract, extract_markdown, extract_tags
+from persinder.domain import Area
+from persinder.sources import (
+    AreaConfig,
+    ExtractorRegistry,
+    MarkdownExtractor,
+    TextExtractor,
+    default_registry,
+)
+from persinder.sources.extract import extract_tags
+
+
+def area(root: Path, formats: tuple[str, ...] = ("markdown", "text")) -> AreaConfig:
+    return AreaConfig(path=root, role=Area.PERSONAL, formats=formats)
+
+
+class RegistryTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, name: str, text: str) -> Path:
+        path = self.root / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_registry_maps_suffixes(self):
+        reg = default_registry()
+        mapping = reg.for_area(area(self.root))
+        self.assertIs(mapping[".md"], reg.for_area(area(self.root))[".md"])
+        self.assertEqual({".md", ".markdown", ".txt"}, set(mapping))
+
+    def test_formats_whitelist(self):
+        reg = default_registry()
+        md_only = reg.for_area(area(self.root, ("markdown",)))
+        self.assertEqual(set(md_only), {".md", ".markdown"})
+
+    def test_empty_formats_disables_area(self):
+        reg = default_registry()
+        self.assertEqual(reg.for_area(area(self.root, ())), {})
+
+    def test_unknown_format_not_found(self):
+        reg = default_registry()
+        self.assertEqual(reg.for_area(area(self.root, ("pdf",))), {})
+
+    def test_extract_respects_area_formats(self):
+        reg = default_registry()
+        path = self._write("n.md", "#tag заметка")
+        self.assertIsNotNone(reg.extract(path, area(self.root)))
+        self.assertIsNone(reg.extract(path, area(self.root, ("text",))))
+
+    def test_duplicate_suffix_rejected(self):
+        class Second(MarkdownExtractor):
+            name = "markdown2"
+
+        with self.assertRaises(ValueError):
+            ExtractorRegistry((MarkdownExtractor(), Second()))
+
+    def test_protocol_satisfied(self):
+        from persinder.sources import Extractor
+
+        self.assertIsInstance(MarkdownExtractor(), Extractor)
+        self.assertIsInstance(TextExtractor(), Extractor)
 
 
 class ExtractTest(unittest.TestCase):
@@ -36,14 +100,14 @@ class ExtractTest(unittest.TestCase):
 
     def test_frontmatter_inline_tags(self):
         text = "---\ntitle: T\ntags: [a, B, c]\n---\nтело #d\n"
-        result = extract_markdown(self._write("n.md", text))
+        result = MarkdownExtractor().extract(self._write("n.md", text))
         lowered = {t.lower() for t in result.tags}
         self.assertEqual(lowered, {"a", "b", "c", "d"})
         self.assertNotIn("---", result.text)
 
     def test_frontmatter_list_tags(self):
         text = "---\ntags:\n  - alpha\n  - beta\n---\nтело\n"
-        result = extract_markdown(self._write("n.md", text))
+        result = MarkdownExtractor().extract(self._write("n.md", text))
         self.assertEqual({t.lower() for t in result.tags}, {"alpha", "beta"})
 
     def test_case_dedup(self):
@@ -51,19 +115,12 @@ class ExtractTest(unittest.TestCase):
         self.assertEqual(len(tags), 1)
 
     def test_plain_text(self):
-        result = extract(self._write("n.txt", "просто текст"))
-        assert result is not None
+        result = TextExtractor().extract(self._write("n.txt", "просто текст"))
         self.assertEqual(result.text, "просто текст")
         self.assertEqual(result.tags, ())
 
-    def test_unsupported(self):
-        result = extract(self._write("n.pdf", "%PDF"))
-        self.assertIsNone(result)
-        result_md = extract_markdown(self._write("n.md", "# Заголовок\n#tag"))
-        self.assertEqual(result_md.text, "# Заголовок\n#tag")
-
     def test_markdown_no_frontmatter(self):
-        result = extract_markdown(self._write("n.md", "# Заголовок\n#tag"))
+        result = MarkdownExtractor().extract(self._write("n.md", "# Заголовок\n#tag"))
         self.assertEqual(result.tags, ("tag",))
         self.assertTrue(result.text.startswith("# Заголовок"))
 

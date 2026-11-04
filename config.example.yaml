@@ -1,0 +1,25 @@
+# Пример конфига Persinder: области + watcher.
+# Положите как, например, ~/.persinder/config.yaml и правьте под себя.
+
+# Каталог данных (БД, временные тексты) — НЕ внутри синхронизируемых папок.
+data_dir: ~/.persinder
+
+areas:
+  # Заметки Obsidian: markdown + текст
+  - path: ~/Obsidian/Personal
+    role: personal            # personal | foreign | web
+    formats: [markdown, text] # какие экстракторы применять к файлам
+  # Копии чужого (книги, статьи): пока не индексируем
+  - path: ~/Library/Books
+    role: foreign
+    formats: []               # пусто — область пропускается
+  # Веб-архив (наполняется отдельным проектом-скрапером)
+  - path: ~/WebArchive
+    role: web
+    formats: [markdown, text]
+
+watch:
+  poll_interval: 30   # сек между полными сканами (источник правды)
+  debounce: 2         # сек тишины после изменения, прежде чем брать файл
+  ignore:             # дополнительно к встроенным (.obsidian, .stfolder, ...)
+    - "**/drafts/**"

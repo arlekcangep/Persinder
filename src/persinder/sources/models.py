@@ -20,11 +20,12 @@ class ChangeKind(str, Enum):
 
 @dataclass(frozen=True)
 class AreaConfig:
-    """Одна область из конфига: папка и её роль."""
+    """Одна область из конфига: папка, роль и разрешённые форматы."""
 
     path: Path
     role: Area
     recursive: bool = True
+    formats: tuple[str, ...] = ()  # имена экстракторов; пусто — не индексировать
 
 
 @dataclass(frozen=True)

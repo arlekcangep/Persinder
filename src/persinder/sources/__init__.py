@@ -1,7 +1,14 @@
-"""Модуль `sources`: watcher областей, экстракторы, конфиг."""
+"""Модуль `sources`: watcher областей, экстракторы, конфиг, конвейер."""
 
 from .config import ConfigError, load_config
-from .extract import extract, extract_markdown, extract_tags
+from .extract import (
+    Extracted,
+    Extractor,
+    ExtractorRegistry,
+    MarkdownExtractor,
+    TextExtractor,
+    default_registry,
+)
 from .models import (
     AreaConfig,
     AreaScan,
@@ -10,6 +17,7 @@ from .models import (
     ScanResult,
     WatchConfig,
 )
+from .pipeline import IndexingPipeline, PipelineStats
 from .scanner import BUILTIN_IGNORES, AreaScanner
 from .watcher import Watcher
 
@@ -21,11 +29,16 @@ __all__ = [
     "ChangeEvent",
     "ChangeKind",
     "ConfigError",
+    "Extractor",
+    "Extracted",
+    "ExtractorRegistry",
+    "IndexingPipeline",
+    "MarkdownExtractor",
+    "PipelineStats",
     "ScanResult",
+    "TextExtractor",
     "Watcher",
     "WatchConfig",
-    "extract",
-    "extract_markdown",
-    "extract_tags",
+    "default_registry",
     "load_config",
 ]

@@ -36,15 +36,18 @@ class Watcher:
         self._thread: threading.Thread | None = None
 
     def scan_once(self) -> list[ScanResult]:
-        """Один проход по всем областям (первый скан не даёт событий CREATED
-        для уже существующих файлов — это начальная индексация без событий)."""
+        """Один проход по всем областям: события created/modified/deleted."""
         snaps, results = scan_all(self._areas, self._scanner, self._snapshots)
         self._snapshots = snaps
         return results
 
     def _loop(self) -> None:
-        # Первый проход: снять базовый снапшот без событий.
-        self.scan_once()
+        # Первый проход: все существующие файлы приходят как CREATED —
+        # это начальная индексация. Ingest сам отбросит дубликаты при
+        # повторных прогонах (тот же content_hash → already_indexed).
+        for result in self.scan_once():
+            if result.events:
+                self._on_events(result)
         while not self._stop.wait(self._watch.poll_interval):
             for result in self.scan_once():
                 if result.events:

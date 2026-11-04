@@ -23,7 +23,9 @@ def _expand(path_str: str) -> Path:
     return Path(path_str).expanduser()
 
 
-def load_config(path: Path) -> tuple[tuple[AreaConfig, ...], WatchConfig]:
+def load_config(
+    path: Path, known_formats: frozenset[str] | None = None
+) -> tuple[tuple[AreaConfig, ...], WatchConfig]:
     """Прочитать YAML-конфиг: области + настройки watcher'а.
 
     Формат:
@@ -31,10 +33,14 @@ def load_config(path: Path) -> tuple[tuple[AreaConfig, ...], WatchConfig]:
         areas:
           - path: ~/Obsidian/Personal
             role: personal
+            formats: [markdown, text]   # какие экстракторы применять
         watch:
           poll_interval: 30
           debounce: 2
           ignore: ["**/drafts/**"]
+
+    ``known_formats`` — имена доступных экстракторов; если задан, неизвестное
+    имя в ``formats`` — ошибка конфига.
     """
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -66,7 +72,25 @@ def load_config(path: Path) -> tuple[tuple[AreaConfig, ...], WatchConfig]:
         recursive = entry.get("recursive", True)
         if not isinstance(recursive, bool):
             raise ConfigError(f"areas[{i}].recursive: ожидается bool")
-        area = AreaConfig(path=_expand(path_raw), role=role, recursive=recursive)
+        formats_raw = entry.get("formats", [])
+        if not isinstance(formats_raw, list) or not all(
+            isinstance(f, str) and f.strip() for f in cast("list[object]", formats_raw)
+        ):
+            raise ConfigError(f"areas[{i}].formats: список непустых строк")
+        formats = tuple(cast("list[str]", formats_raw))
+        if known_formats is not None:
+            unknown = set(formats) - set(known_formats)
+            if unknown:
+                raise ConfigError(
+                    f"areas[{i}].formats: неизвестные форматы {sorted(unknown)} "
+                    f"(доступно: {sorted(known_formats)})"
+                )
+        area = AreaConfig(
+            path=_expand(path_raw),
+            role=role,
+            recursive=recursive,
+            formats=tuple(f.strip() for f in formats),
+        )
         if not area.path.is_dir():
             raise ConfigError(f"areas[{i}]: каталог не существует: {area.path}")
         areas.append(area)
