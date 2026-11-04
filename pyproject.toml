@@ -13,6 +13,7 @@ dependencies = []
 stemming = ["snowballstemmer>=2.2"]
 config = ["PyYAML>=6.0"]
 watch = ["watchdog>=4.0"]
+pdf = ["pypdf>=4.0"]
 http = ["fastapi>=0.110", "uvicorn>=0.29"]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
 
@@ -28,6 +29,10 @@ exclude = ["**/__pycache__"]
 pythonVersion = "3.10"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
+# venv проекта (вне vboxfs) — чтобы pyright видел опциональные зависимости
+# (PyYAML, pypdf); при отсутствии venv падает обратно на системный Python.
+venvPath = "/home/appuser/opencodetmp/venvs"
+venv = "persinder"
 
 [tool.ruff]
 line-length = 88

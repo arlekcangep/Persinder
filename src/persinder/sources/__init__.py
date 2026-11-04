@@ -6,6 +6,7 @@ from .extract import (
     Extractor,
     ExtractorRegistry,
     MarkdownExtractor,
+    PdfExtractor,
     TextExtractor,
     default_registry,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "ExtractorRegistry",
     "IndexingPipeline",
     "MarkdownExtractor",
+    "PdfExtractor",
     "PipelineStats",
     "ScanResult",
     "TextExtractor",

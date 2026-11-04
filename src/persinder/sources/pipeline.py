@@ -35,17 +35,24 @@ class IndexingPipeline:
         self._ingest = ingest
         self._registry = registry
 
-    def _handle_file(self, area: AreaConfig, rel_path: str) -> IngestResult | None:
+    def _handle_file(
+        self, area: AreaConfig, rel_path: str
+    ) -> tuple[IngestResult | None, str | None]:
+        """Экстракция + ingest. ``(None, None)`` — формат не обслуживается."""
         path = area.path / rel_path
         extracted = self._registry.extract(path, area)
         if extracted is None:
-            return None
+            return None, None
+        if extracted.error:
+            return None, extracted.error
+        if not extracted.text.strip():
+            return None, None  # нечего индексировать (например, скан без OCR)
         request = IngestRequest(
             filename=rel_path,
             area=area.role,
             text=extracted.text,
         )
-        return self._ingest.ingest(request)
+        return self._ingest.ingest(request), None
 
     def process(self, result: ScanResult) -> PipelineStats:
         """Обработать один результат скана."""
@@ -56,10 +63,14 @@ class IndexingPipeline:
                     # TODO(D13): чистка индекса по (area, rel_path).
                     stats.deleted += 1
                     continue
-                outcome = self._handle_file(result.area, event.rel_path)
+                outcome, extract_error = self._handle_file(result.area, event.rel_path)
             except OSError as exc:
                 stats.errors += 1
                 stats.messages.append(f"{event.rel_path}: {exc}")
+                continue
+            if extract_error:
+                stats.errors += 1
+                stats.messages.append(f"{event.rel_path}: {extract_error}")
                 continue
             if outcome is None:
                 stats.skipped += 1

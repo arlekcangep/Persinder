@@ -50,7 +50,7 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(reg.for_area(area(self.root, ())), {})
 
     def test_unknown_format_not_found(self):
-        reg = default_registry()
+        reg = ExtractorRegistry((MarkdownExtractor(), TextExtractor()))
         self.assertEqual(reg.for_area(area(self.root, ("pdf",))), {})
 
     def test_extract_respects_area_formats(self):

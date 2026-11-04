@@ -14,10 +14,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from .models import AreaConfig
 
@@ -37,10 +38,15 @@ FM_TAGS_LIST_RE = re.compile(
 
 @dataclass(frozen=True)
 class Extracted:
-    """Результат извлечения из одного файла."""
+    """Результат извлечения из одного файла.
+
+    ``error`` — непустой при проблеме разбора; текст в этом случае пуст.
+    """
 
     text: str
     tags: tuple[str, ...] = ()
+    pages: int = 0
+    error: str | None = None
 
 
 @runtime_checkable
@@ -92,6 +98,45 @@ class TextExtractor:
         return Extracted(text=path.read_text(encoding="utf-8", errors="replace"))
 
 
+class PdfExtractor:
+    """PDF через pypdf (extra ``pdf``).
+
+    Текст собирается постранично. Страницы без текстового слоя (сканы)
+    дают пустой фрагмент — ошибки не возникает. OCR таких файлов — задача
+    отдельного экстрактора. При ошибке разбора файла возвращается пустой
+    результат с сообщением, чтобы одно битое тело не валило скан области.
+    """
+
+    name = "pdf"
+
+    def __init__(self) -> None:
+        try:
+            import pypdf
+
+            del pypdf  # доступность extra 'pdf' проверена
+        except ImportError as exc:
+            raise RuntimeError(
+                "PdfExtractor требует extra 'pdf': pip install 'persinder[pdf]'"
+            ) from exc
+
+    def suffixes(self) -> frozenset[str]:
+        return frozenset({".pdf"})
+
+    def extract(self, path: Path) -> Extracted:
+        try:
+            from pypdf import PdfReader
+
+            reader: Any = PdfReader(str(path))  # pyright: ignore[reportUnknownVariableType, reportMissingTypeStubs]
+            raw_pages: list[Any] = list(reader.pages)
+            pages: list[str] = []
+            for page in raw_pages:
+                text: object = page.extract_text()
+                pages.append((str(text) if text else "").strip())
+        except Exception as exc:  # noqa: BLE001 — любое повреждение PDF
+            return Extracted(text="", tags=(), error=f"pdf: {exc}")
+        return Extracted(text="\n\n".join(p for p in pages if p), pages=len(pages))
+
+
 class ExtractorRegistry:
     """Сопоставление суффиксов экстракторам с учётом форматов области.
 
@@ -134,8 +179,11 @@ class ExtractorRegistry:
 
 
 def default_registry() -> ExtractorRegistry:
-    """Стандартный набор первого прототипа: markdown + text."""
-    return ExtractorRegistry((MarkdownExtractor(), TextExtractor()))
+    """Стандартный набор: markdown + text; pdf — если установлен extra."""
+    extractors: list[Extractor] = [MarkdownExtractor(), TextExtractor()]
+    with contextlib.suppress(RuntimeError):
+        extractors.append(PdfExtractor())
+    return ExtractorRegistry(tuple(extractors))
 
 
 def extract_tags(body: str, frontmatter: str | None) -> tuple[str, ...]:
