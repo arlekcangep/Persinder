@@ -10,7 +10,7 @@ import dataclasses
 from dataclasses import dataclass
 
 from ..ingest import IngestRequest, IngestResult
-from ..interfaces import Ingest
+from ..interfaces import Ingest, MetaStore
 from .extract import ExtractorRegistry
 from .models import AreaConfig, ChangeKind, ScanResult
 
@@ -31,9 +31,17 @@ class PipelineStats:
 class IndexingPipeline:
     """События сканера → экстракция → ingest."""
 
-    def __init__(self, ingest: Ingest, registry: ExtractorRegistry) -> None:
+    def __init__(
+        self,
+        ingest: Ingest,
+        registry: ExtractorRegistry,
+        metastore: MetaStore | None = None,
+    ) -> None:
         self._ingest = ingest
         self._registry = registry
+        # Metastore нужен только для удаления; опционален для обратной
+        # совместимости (без него DELETED просто считается).
+        self._metastore = metastore
 
     def _handle_file(
         self, area: AreaConfig, rel_path: str
@@ -54,13 +62,24 @@ class IndexingPipeline:
         )
         return self._ingest.ingest(request), None
 
+    def _handle_deletion(self, area: AreaConfig, rel_path: str) -> bool:
+        """Чистка индекса по удалённому файлу (D13).
+
+        Убирается источник ``(area, filename)``; документ удаляется целиком,
+        если источников не осталось. True — что-то удалено.
+        """
+        if self._metastore is None:
+            return False
+        self._metastore.remove_source(area.role.value, rel_path)
+        return True
+
     def process(self, result: ScanResult) -> PipelineStats:
         """Обработать один результат скана."""
         stats = PipelineStats()
         for event in result.events:
             try:
                 if event.kind is ChangeKind.DELETED:
-                    # TODO(D13): чистка индекса по (area, rel_path).
+                    self._handle_deletion(result.area, event.rel_path)
                     stats.deleted += 1
                     continue
                 outcome, extract_error = self._handle_file(result.area, event.rel_path)

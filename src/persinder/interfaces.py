@@ -49,6 +49,10 @@ class MetaStore(Protocol):
 
     def add_source(self, doc_id: str, area: str, filename: str) -> None: ...
 
+    def remove_source(self, area: str, filename: str) -> str | None: ...
+
+    def delete_document(self, doc_id: str) -> None: ...
+
     def save_document(
         self,
         doc: Document,

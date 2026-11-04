@@ -23,6 +23,7 @@ from .models import (
 )
 from .pipeline import IndexingPipeline, PipelineStats
 from .scanner import BUILTIN_IGNORES, AreaScanner
+from .snapshots import SnapshotStore
 from .watcher import Watcher
 
 __all__ = [
@@ -43,6 +44,7 @@ __all__ = [
     "PdfExtractor",
     "PipelineStats",
     "ScanResult",
+    "SnapshotStore",
     "TextExtractor",
     "Watcher",
     "WatchConfig",

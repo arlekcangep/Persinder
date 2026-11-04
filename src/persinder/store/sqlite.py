@@ -147,6 +147,46 @@ class SqliteStore:
                 (doc_id, area, filename, utcnow()),
             )
 
+    def _purge_document(self, doc_id: str) -> None:
+        """Удалить документ и все производные строки (нужен открытый `with`)."""
+        self._conn.execute("DELETE FROM chunks_fts WHERE doc_id = ?", (doc_id,))
+        self._conn.execute("DELETE FROM embedding_queue WHERE doc_id = ?", (doc_id,))
+        self._conn.execute("DELETE FROM tags WHERE doc_id = ?", (doc_id,))
+        self._conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+
+    def remove_source(self, area: str, filename: str) -> str | None:
+        """Удалить источник ``(area, filename)``.
+
+        Если у документа не осталось источников — документ удаляется целиком
+        (чанки, FTS, очередь эмбеддингов). Возвращает id удалённого документа,
+        если он вычищен полностью, иначе None.
+        """
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT doc_id FROM document_sources WHERE area = ? AND filename = ?",
+                (area, filename),
+            ).fetchone()
+            if row is None:
+                return None
+            doc_id = str(row["doc_id"])
+            self._conn.execute(
+                "DELETE FROM document_sources WHERE area = ? AND filename = ?",
+                (area, filename),
+            )
+            left = self._conn.execute(
+                "SELECT COUNT(*) FROM document_sources WHERE doc_id = ?",
+                (doc_id,),
+            ).fetchone()[0]
+            if int(left) == 0:
+                self._purge_document(doc_id)
+                return doc_id
+            return None
+
+    def delete_document(self, doc_id: str) -> None:
+        """Удалить документ целиком (источники, чанки, FTS, очередь)."""
+        with self._lock, self._conn:
+            self._purge_document(doc_id)
+
     def save_document(
         self,
         doc: Document,

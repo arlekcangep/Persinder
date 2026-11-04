@@ -13,6 +13,7 @@ from .morphology import default_stemmer
 from .search import SearchService
 from .sources import (
     IndexingPipeline,
+    SnapshotStore,
     Watcher,
     default_registry,
     load_config,
@@ -48,11 +49,14 @@ def run_watch(config_path: Path, data_dir: Path | None) -> int:
     if data_dir:
         settings = replace(settings, data_dir=data_dir)
     ingest, _search, store = build_service(settings)
-    pipeline = IndexingPipeline(ingest, registry)
+    pipeline = IndexingPipeline(ingest, registry, metastore=store)
 
     print(f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с")
     watcher = Watcher(
-        areas, watch, lambda result: print_stats(pipeline.process(result))
+        areas,
+        watch,
+        lambda result: print_stats(pipeline.process(result)),
+        snapshots=SnapshotStore(settings.data_dir / "snapshots.json"),
     )
     watcher.start()
     try:

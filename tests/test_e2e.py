@@ -82,7 +82,21 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn(hits[0]["document_id"], {doc_id})
         self.assertEqual(hits[0]["chunk_index"], 0)
 
-    def test_persistence_after_reopen(self):
+    def test_deletion_through_pipeline(self):
+        # Индексируем через HTTP, затем удаляем источник напрямую через
+        # metastore — как это делает watcher при DELETED-событии.
+        with self._post(
+            "/ingest",
+            {"filename": "note.md", "area": "personal", "text": TEXT},
+        ) as resp:
+            doc_id = json.load(resp)["document_id"]
+        self.assertEqual(
+            self.store.counts()["documents"], 1, "документ проиндексирован"
+        )
+        removed = self.store.remove_source("personal", "note.md")
+        self.assertEqual(removed, doc_id)
+        self.assertEqual(self.store.counts()["documents"], 0)
+
         with self._post(
             "/ingest", {"filename": "note.md", "area": "personal", "text": TEXT}
         ) as resp:

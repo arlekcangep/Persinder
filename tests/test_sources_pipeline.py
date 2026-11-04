@@ -42,7 +42,7 @@ class PipelineTest(unittest.TestCase):
             self.store, FsTextStore(self.data / "texts"), NoopStemmer()
         )
         registry = ExtractorRegistry((MarkdownExtractor(), TextExtractor()))
-        self.pipeline = IndexingPipeline(ingest, registry)
+        self.pipeline = IndexingPipeline(ingest, registry, metastore=self.store)
         self.scanner = AreaScanner(WatchConfig(debounce=0.0))
 
     def tearDown(self):
@@ -89,13 +89,50 @@ class PipelineTest(unittest.TestCase):
         stats = self.pipeline.process(self._scan(area))
         self.assertEqual(stats.indexed, 1)
 
-    def test_deleted_counted(self):
-        self._write("note.md", "текст")
+    def test_deleted_removes_document(self):
+        self._write("note.md", "уникальный текст для удаления")
         self.pipeline.process(self._scan())
+        self.assertEqual(self.store.counts()["documents"], 1)
         (self.area.path / "note.md").unlink()
         stats = self.pipeline.process(self._scan())
         self.assertEqual(stats.deleted, 1)
-        self.assertEqual(stats.indexed, 0)
+        counts = self.store.counts()
+        self.assertEqual(counts["documents"], 0)
+        self.assertEqual(counts["chunks"], 0)
+        self.assertEqual(counts["pending_embeddings"], 0)
+
+    def test_deleted_source_keeps_shared_document(self):
+        # Один и тот же текст в двух файлах: один источник убрали —
+        # документ жив, пока жив второй.
+        text = "общий текст двух источников"
+        self._write("a.md", text)
+        self._write("b.md", text)
+        self.pipeline.process(self._scan())
+        self.assertEqual(self.store.counts()["documents"], 1)
+        (self.area.path / "a.md").unlink()
+        stats = self.pipeline.process(self._scan())
+        self.assertEqual(stats.deleted, 1)
+        counts = self.store.counts()
+        self.assertEqual(counts["documents"], 1)  # b.md держит документ
+        (self.area.path / "b.md").unlink()
+        self.pipeline.process(self._scan())
+        self.assertEqual(self.store.counts()["documents"], 0)
+
+    def test_deleted_unknown_file_is_noop(self):
+        self._write("note.md", "текст")
+        self.pipeline.process(self._scan())
+        (self.area.path / "note.md").unlink()
+        self.pipeline.process(self._scan())
+        # Повторное удаление того же пути — без ошибок.
+        from persinder.sources import ChangeEvent, ChangeKind, ScanResult
+
+        phantom = ScanResult(
+            area=self.area,
+            events=(ChangeEvent(ChangeKind.DELETED, self.area, "note.md"),),
+        )
+        stats = self.pipeline.process(phantom)
+        self.assertEqual(stats.deleted, 1)
+        self.assertEqual(stats.errors, 0)
 
     def test_indexed_text_is_searchable(self):
         self._write("note.md", "уникальный квантовый флакс")

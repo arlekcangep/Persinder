@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .models import AreaConfig, AreaScan, ScanResult, WatchConfig
 from .scanner import AreaScanner, scan_all
+from .snapshots import SnapshotStore
 
 EventHandler = Callable[[ScanResult], None]
 
@@ -26,12 +27,16 @@ class Watcher:
         watch: WatchConfig,
         on_events: EventHandler,
         scanner: AreaScanner | None = None,
+        snapshots: SnapshotStore | None = None,
     ) -> None:
         self._areas = areas
         self._watch = watch
         self._on_events = on_events
         self._scanner = scanner or AreaScanner(watch)
-        self._snapshots: dict[Path, AreaScan] = {}
+        self._snapshots_store = snapshots
+        self._snapshots: dict[Path, AreaScan] = (
+            snapshots.load(areas) if snapshots else {}
+        )
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -39,6 +44,8 @@ class Watcher:
         """Один проход по всем областям: события created/modified/deleted."""
         snaps, results = scan_all(self._areas, self._scanner, self._snapshots)
         self._snapshots = snaps
+        if self._snapshots_store is not None:
+            self._snapshots_store.save(snaps)
         return results
 
     def _loop(self) -> None:
