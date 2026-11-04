@@ -1,4 +1,4 @@
-"""Тесты удаления: remove_source, каскад документа, общие источники."""
+"""Тесты удаления и перепривязки источников: remove_source, вытеснение документа."""
 
 from __future__ import annotations
 
@@ -66,6 +66,46 @@ class RemoveSourceTest(unittest.TestCase):
         self.assertFalse(self.store.has_source("web", "a.md"))
         self.store.remove_source("personal", "a.md")
         self.assertFalse(self.store.has_source("personal", "a.md"))
+
+    def test_rebind_purges_previous_document(self):
+        # Файл изменился: save_document нового содержимого вытесняет старый.
+        self._save("d1", "старый текст", "personal", "a.md")
+        self._save("d2", "новый текст", "personal", "a.md")
+        counts = self.store.counts()
+        self.assertEqual(counts["documents"], 1)
+        self.assertEqual(counts["sources"], 1)
+        self.assertEqual(counts["chunks"], 1)
+        self.assertEqual(counts["pending_embeddings"], 1)
+        self.assertEqual(self.store.search_morph("новый", limit=5)[0]["doc_id"], "d2")
+        self.assertEqual(self.store.search_morph("старый", limit=5), [])
+
+    def test_add_source_rebinds_and_purges(self):
+        self._save("d1", "первый текст", "personal", "a.md")
+        self._save("d2", "второй текст", "personal", "b.md")
+        self.store.add_source("d2", "personal", "a.md")  # a.md снова указывает на d2
+        counts = self.store.counts()
+        self.assertEqual(counts["documents"], 1)
+        self.assertEqual(counts["sources"], 2)  # a.md и b.md → d2
+        self.assertEqual(self.store.search_morph("первый", limit=5), [])
+        self.assertEqual(self.store.search_morph("второй", limit=5)[0]["doc_id"], "d2")
+
+    def test_rebind_keeps_document_with_other_sources(self):
+        self._save("d1", "общий текст", "personal", "a.md")
+        self.store.add_source("d1", "personal", "b.md")
+        self._save("d2", "другой текст", "personal", "a.md")
+        counts = self.store.counts()
+        self.assertEqual(counts["documents"], 2)  # d1 держится за b.md
+        self.assertEqual(counts["sources"], 2)
+        self.assertEqual(self.store.search_morph("общий", limit=5)[0]["doc_id"], "d1")
+
+    def test_rebind_touches_only_same_file_and_area(self):
+        self._save("d1", "текст один", "personal", "a.md")
+        self._save("d2", "текст два", "web", "a.md")  # другая область — не трогаем
+        self._save("d3", "текст три", "personal", "a.md")
+        counts = self.store.counts()
+        self.assertEqual(counts["documents"], 2)  # d1 вытеснен, d2 (web) жив
+        self.assertTrue(self.store.has_source("web", "a.md"))
+        self.assertTrue(self.store.has_source("personal", "a.md"))
 
     def test_fts_cleared_after_delete(self):
         self._save("d1", "квантовый флакс", "personal", "a.md")

@@ -82,6 +82,35 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn(hits[0]["document_id"], {doc_id})
         self.assertEqual(hits[0]["chunk_index"], 0)
 
+    def test_modified_file_replaces_document(self):
+        # Файл изменился: старый документ вытесняется, в индексе только новый.
+        with self._post(
+            "/ingest",
+            {
+                "filename": "note.md",
+                "area": "personal",
+                "text": "первый вариант заметки про котиков",
+            },
+        ) as resp:
+            first = json.load(resp)["document_id"]
+        with self._post(
+            "/ingest",
+            {
+                "filename": "note.md",
+                "area": "personal",
+                "text": "второй вариант заметки про флакс",
+            },
+        ) as resp:
+            second = json.load(resp)["document_id"]
+        self.assertNotEqual(first, second)
+        counts = self.store.counts()
+        self.assertEqual(counts["documents"], 1)
+        self.assertEqual(counts["sources"], 1)
+        old_hits = self._get("/search?q=" + urllib.parse.quote("котиков"))["hits"]
+        self.assertEqual(old_hits, [])
+        new_hits = self._get("/search?q=" + urllib.parse.quote("флакс"))["hits"]
+        self.assertEqual(new_hits[0]["document_id"], second)
+
     def test_deletion_through_pipeline(self):
         # Индексируем через HTTP, затем удаляем источник напрямую через
         # metastore — как это делает watcher при DELETED-событии.

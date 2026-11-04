@@ -12,6 +12,7 @@ from .ingest import IngestService
 from .morphology import default_stemmer
 from .search import SearchService
 from .sources import (
+    JOURNAL_RETENTION_DAYS,
     IndexingPipeline,
     Journal,
     Watcher,
@@ -50,6 +51,12 @@ def run_watch(config_path: Path, data_dir: Path | None) -> int:
         settings = replace(settings, data_dir=data_dir)
     ingest, _search, store = build_service(settings)
     journal = Journal(settings.data_dir / "journal.jsonl")
+    dropped = journal.compact()
+    if dropped:
+        print(
+            f"Журнал: обрезано старых записей: {dropped} "
+            f"(старше {JOURNAL_RETENTION_DAYS} дней)"
+        )
     pipeline = IndexingPipeline(ingest, registry, metastore=store, journal=journal)
 
     print(f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с")

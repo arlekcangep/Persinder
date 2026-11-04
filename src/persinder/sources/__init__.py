@@ -13,7 +13,7 @@ from .extract import (
     default_registry,
     extract_html,
 )
-from .journal import Journal, JournalEvent
+from .journal import JOURNAL_RETENTION_DAYS, Journal, JournalEvent
 from .models import (
     AreaConfig,
     AreaScan,
@@ -39,6 +39,7 @@ __all__ = [
     "ExtractorRegistry",
     "IndexingPipeline",
     "HtmlExtractor",
+    "JOURNAL_RETENTION_DAYS",
     "Journal",
     "JournalEvent",
     "MarkdownExtractor",

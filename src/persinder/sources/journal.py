@@ -14,18 +14,27 @@
 ``discovered``/``sent`` — незавершённые состояния: если процесс упал между
 сканом и ingest, файл при следующем запуске обрабатывается заново (в дифф
 такие файлы не попадают). ``deleted`` означает, что файла больше нет.
+
+Журнал периодически обрезается (``compact``): история переходов за
+``JOURNAL_RETENTION_DAYS``, а последнее состояние каждого файла хранится
+всегда — иначе давно не менявшийся файл потерял бы состояние.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import cast
 
 from ..domain import utcnow
 from .models import AreaConfig, AreaScan
+
+#: Сколько дней истории переходов хранить (состояние файлов — всегда).
+JOURNAL_RETENTION_DAYS = 60
 
 
 class JournalEvent(str, Enum):
@@ -62,11 +71,71 @@ class _FileRecord:
     mtime_ns: int | None = None
 
 
+@dataclass(frozen=True)
+class _Entry:
+    """Разобранная строка журнала."""
+
+    root: str
+    rel: str
+    event: JournalEvent
+    ts: datetime | None
+    size: int | None
+    mtime_ns: int | None
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.root, self.rel)
+
+    @property
+    def has_stat(self) -> bool:
+        return self.size is not None and self.mtime_ns is not None
+
+
 def _as_int(value: object) -> int | None:
     """Привести значение из JSON к int (bool — не число)."""
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return None
+
+
+def _parse(line: str) -> _Entry | None:
+    """Разобрать строку журнала; None — битая или чужая запись."""
+    stripped = line.strip()
+    if not stripped:
+        return None
+    try:
+        raw = json.loads(stripped)
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    entry = cast("dict[str, object]", raw)
+    root = entry.get("root")
+    rel = entry.get("file")
+    event_raw = entry.get("event")
+    if not isinstance(root, str) or not isinstance(rel, str):
+        return None
+    if not isinstance(event_raw, str):
+        return None
+    try:
+        event = JournalEvent(event_raw)
+    except ValueError:
+        return None
+    ts: datetime | None = None
+    ts_raw = entry.get("ts")
+    if isinstance(ts_raw, str):
+        try:
+            ts = datetime.fromisoformat(ts_raw)
+        except ValueError:
+            ts = None
+    return _Entry(
+        root=root,
+        rel=rel,
+        event=event,
+        ts=ts,
+        size=_as_int(entry.get("size")),
+        mtime_ns=_as_int(entry.get("mtime_ns")),
+    )
 
 
 def _read(path: Path) -> dict[tuple[str, str], _FileRecord]:
@@ -77,36 +146,19 @@ def _read(path: Path) -> dict[tuple[str, str], _FileRecord]:
     except (FileNotFoundError, OSError):
         return records
     for line in lines:
-        line = line.strip()
-        if not line:
+        entry = _parse(line)
+        if entry is None:
             continue
-        try:
-            raw = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(raw, dict):
-            continue
-        entry = cast("dict[str, object]", raw)
-        root = entry.get("root")
-        rel = entry.get("file")
-        event_raw = entry.get("event")
-        if not isinstance(root, str) or not isinstance(rel, str):
-            continue
-        if not isinstance(event_raw, str):
-            continue
-        try:
-            event = JournalEvent(event_raw)
-        except ValueError:
-            continue
-        key = (root, rel)
-        prev = records.get(key)
-        size = _as_int(entry.get("size"))
-        mtime_ns = _as_int(entry.get("mtime_ns"))
-        records[key] = _FileRecord(
-            event=event,
-            size=size if size is not None else (prev.size if prev else None),
+        prev = records.get(entry.key)
+        records[entry.key] = _FileRecord(
+            event=entry.event,
+            size=entry.size
+            if entry.size is not None
+            else (prev.size if prev else None),
             mtime_ns=(
-                mtime_ns if mtime_ns is not None else (prev.mtime_ns if prev else None)
+                entry.mtime_ns
+                if entry.mtime_ns is not None
+                else (prev.mtime_ns if prev else None)
             ),
         )
     return records
@@ -146,9 +198,8 @@ class Journal:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        key = (str(area.path), rel_path)
-        prev = self._records.get(key)
-        self._records[key] = _FileRecord(
+        prev = self._records.get((str(area.path), rel_path))
+        self._records[(str(area.path), rel_path)] = _FileRecord(
             event=event,
             size=size if size is not None else (prev.size if prev else None),
             mtime_ns=(
@@ -171,3 +222,46 @@ class Journal:
             if files:
                 result[area.path] = AreaScan(area=area, files=dict(files))
         return result
+
+    def compact(self, retention_days: int = JOURNAL_RETENTION_DAYS) -> int:
+        """Обрезать журнал: история переходов + последнее состояние файлов.
+
+        Сохраняются все записи за ``retention_days`` и — независимо от
+        возраста — последняя запись по каждому файлу и последняя запись со
+        слепком ``(size, mtime_ns)``: без них давно не менявшийся файл
+        потерял бы состояние и переиндексировался. Битые строки отбрасываются.
+        Возвращает число удалённых записей.
+        """
+        try:
+            raw_lines = self._path.read_text(encoding="utf-8").splitlines()
+        except (FileNotFoundError, OSError):
+            return 0
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        parsed: list[tuple[str, _Entry]] = []
+        for line in raw_lines:
+            entry = _parse(line)
+            if entry is not None:
+                parsed.append((line.strip(), entry))
+        last: dict[tuple[str, str], int] = {}
+        last_stat: dict[tuple[str, str], int] = {}
+        for index, (_, entry) in enumerate(parsed):
+            last[entry.key] = index
+            if entry.has_stat:
+                last_stat[entry.key] = index
+        keep_indexes: set[int] = set(last.values())
+        for key, index in last_stat.items():
+            # Удалённому файлу слепок не нужен: состояние — «нет файла».
+            if parsed[last[key]][1].event is not JournalEvent.DELETED:
+                keep_indexes.add(index)
+        keep: list[str] = []
+        for index, (line, entry) in enumerate(parsed):
+            fresh = entry.ts is not None and entry.ts >= cutoff
+            if fresh or index in keep_indexes:
+                keep.append(line)
+        removed = len(parsed) - len(keep)
+        if removed or len(parsed) != len(raw_lines):
+            tmp = self._path.with_name(self._path.name + ".tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text("".join(line + "\n" for line in keep), encoding="utf-8")
+            os.replace(tmp, self._path)
+        return removed

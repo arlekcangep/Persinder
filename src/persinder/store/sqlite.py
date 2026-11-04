@@ -139,13 +139,41 @@ class SqliteStore:
 
     # --- запись ---
 
+    def _bind_source(self, doc_id: str, area: str, filename: str) -> None:
+        """Закрепить ``(area, filename)`` за ``doc_id``, вытеснив прежний документ.
+
+        У файла один источник: если за ``(area, filename)`` был закреплён
+        другой документ (файл изменился), связь снимается, а сам документ
+        вычищается, если у него не осталось других источников. Нужен открытый
+        ``with`` (вызывается внутри транзакции).
+        """
+        stale = self._conn.execute(
+            "SELECT DISTINCT doc_id FROM document_sources"
+            " WHERE area = ? AND filename = ? AND doc_id != ?",
+            (area, filename, doc_id),
+        ).fetchall()
+        self._conn.execute(
+            "DELETE FROM document_sources"
+            " WHERE area = ? AND filename = ? AND doc_id != ?",
+            (area, filename, doc_id),
+        )
+        for row in stale:
+            old_id = str(row["doc_id"])
+            left = self._conn.execute(
+                "SELECT COUNT(*) FROM document_sources WHERE doc_id = ?", (old_id,)
+            ).fetchone()[0]
+            if int(left) == 0:
+                self._purge_document(old_id)
+        self._conn.execute(
+            "INSERT OR IGNORE INTO document_sources"
+            "(doc_id, area, filename, created_at) VALUES (?, ?, ?, ?)",
+            (doc_id, area, filename, utcnow()),
+        )
+
     def add_source(self, doc_id: str, area: str, filename: str) -> None:
+        """Закрепить источник за документом; прежний документ файла вытесняется."""
         with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO document_sources"
-                "(doc_id, area, filename, created_at) VALUES (?, ?, ?, ?)",
-                (doc_id, area, filename, utcnow()),
-            )
+            self._bind_source(doc_id, area, filename)
 
     def has_source(self, area: str, filename: str) -> bool:
         """Есть ли в индексе источник ``(area, filename)``."""
@@ -205,7 +233,11 @@ class SqliteStore:
         chunks: list[Chunk],
         jobs: list[EmbeddingJob],
     ) -> None:
-        """Атомарно записать документ, источник, чанки (с FTS5) и очередь."""
+        """Атомарно записать документ, источник, чанки (с FTS5) и очередь.
+
+        Прежний документ того же файла ``(area, filename)`` вытесняется
+        (см. ``_bind_source``).
+        """
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO documents"
@@ -220,11 +252,7 @@ class SqliteStore:
                     doc.created_at,
                 ),
             )
-            self._conn.execute(
-                "INSERT OR IGNORE INTO document_sources"
-                "(doc_id, area, filename, created_at) VALUES (?, ?, ?, ?)",
-                (doc.id, area, filename, utcnow()),
-            )
+            self._bind_source(doc.id, area, filename)
             for chunk in chunks:
                 cur = self._conn.execute(
                     "INSERT INTO chunks(doc_id, chunk_index, char_start, char_end) "

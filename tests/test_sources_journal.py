@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -147,6 +148,127 @@ class JournalTest(unittest.TestCase):
         self.assertEqual(snap[self.vault].files, {"a.txt": (3, 7)})
 
 
+class JournalCompactTest(unittest.TestCase):
+    """Обрезка журнала: история за окно, состояние файлов — всегда."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.vault = self.root / "vault"
+        self.vault.mkdir()
+        self.area = AreaConfig(path=self.vault, role=Area.PERSONAL, formats=("text",))
+        self.path = self.root / "journal.jsonl"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _line(
+        self,
+        rel: str,
+        event: str,
+        *,
+        days_ago: float = 0.0,
+        size: int | None = None,
+        mtime_ns: int | None = None,
+        detail: str | None = None,
+    ) -> str:
+        ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(
+            timespec="seconds"
+        )
+        entry: dict[str, object] = {
+            "ts": ts,
+            "area": "personal",
+            "root": str(self.vault),
+            "file": rel,
+            "event": event,
+        }
+        if size is not None:
+            entry["size"] = size
+        if mtime_ns is not None:
+            entry["mtime_ns"] = mtime_ns
+        if detail:
+            entry["detail"] = detail
+        return json.dumps(entry, ensure_ascii=False)
+
+    def _write(self, lines: list[str]) -> None:
+        self.path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+
+    def _lines(self) -> list[str]:
+        return self.path.read_text(encoding="utf-8").splitlines()
+
+    def test_history_window_and_state_survives(self):
+        self._write(
+            [
+                self._line("a.txt", "discovered", days_ago=90, size=3, mtime_ns=7),
+                self._line("a.txt", "sent", days_ago=90),
+                self._line("a.txt", "sent", days_ago=89),
+                self._line("a.txt", "sent", days_ago=88),
+                self._line("a.txt", "indexed", days_ago=88, detail="документ d1"),
+                self._line("b.txt", "discovered", size=4, mtime_ns=9),
+                self._line("b.txt", "indexed", detail="документ d2"),
+            ]
+        )
+        journal = Journal(self.path)
+        before = journal.snapshot((self.area,))
+        self.assertEqual(journal.compact(), 3)  # три старых «sent» ушли
+        after = Journal(self.path).snapshot((self.area,))
+        self.assertEqual(after, before)
+        self.assertEqual(after[self.vault].files["a.txt"], (3, 7))
+        # деталь последней записи не потерялась
+        self.assertTrue(any("документ d1" in line for line in self._lines()))
+
+    def test_recent_history_kept_as_is(self):
+        lines = [
+            self._line("a.txt", "discovered", days_ago=1, size=1, mtime_ns=2),
+            self._line("a.txt", "sent", days_ago=1),
+            self._line("a.txt", "indexed", days_ago=1),
+        ]
+        self._write(lines)
+        self.assertEqual(Journal(self.path).compact(), 0)
+        self.assertEqual(self._lines(), lines)
+
+    def test_deleted_keeps_last_entry_only(self):
+        self._write(
+            [
+                self._line("a.txt", "discovered", days_ago=100, size=3, mtime_ns=7),
+                self._line("a.txt", "indexed", days_ago=100),
+                self._line("a.txt", "deleted", days_ago=100, detail="убран"),
+            ]
+        )
+        self.assertEqual(Journal(self.path).compact(), 2)
+        lines = self._lines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn('"event": "deleted"', lines[0])
+        self.assertEqual(Journal(self.path).snapshot((self.area,)), {})
+
+    def test_pending_stays_pending(self):
+        self._write(
+            [
+                self._line("a.txt", "discovered", days_ago=100, size=3, mtime_ns=7),
+                self._line("a.txt", "sent", days_ago=100),
+            ]
+        )
+        Journal(self.path).compact()
+        self.assertEqual(Journal(self.path).snapshot((self.area,)), {})
+
+    def test_garbage_dropped(self):
+        self._write(
+            [
+                self._line("a.txt", "discovered", size=3, mtime_ns=7),
+                "{битая строка",
+                '{"root": 5, "file": "b.txt", "event": "indexed"}',
+                self._line("a.txt", "indexed"),
+            ]
+        )
+        journal = Journal(self.path)
+        self.assertEqual(journal.compact(), 0)  # валидных записей не теряли
+        self.assertEqual(len(self._lines()), 2)
+
+    def test_missing_file_is_noop(self):
+        self.assertEqual(Journal(self.path).compact(), 0)
+        self.assertFalse(self.path.exists())
+
+
 class _BoomExtractor:
     """Экстрактор, который всегда сообщает об ошибке разбора."""
 
@@ -219,6 +341,26 @@ class JournalPipelineTest(unittest.TestCase):
         (self.vault / "b.md").write_text("общий текст", encoding="utf-8")
         self.pipeline.process(self._scan())
         self.assertEqual(self._events("b.md"), ["discovered", "sent", "duplicate"])
+
+    def test_modified_file_replaces_document(self):
+        path = self.vault / "note.md"
+        path.write_text("первая версия", encoding="utf-8")
+        self.pipeline.process(self._scan())
+        self.assertEqual(self.store.counts()["documents"], 1)
+        time.sleep(0.01)  # иной mtime_ns при перезаписи
+        path.write_text("вторая версия", encoding="utf-8")
+        stats = self.pipeline.process(self._scan())
+        self.assertEqual(stats.indexed, 1)
+        counts = self.store.counts()
+        self.assertEqual(counts["documents"], 1)  # старый документ вытеснен
+        self.assertEqual(counts["sources"], 1)
+        self.assertEqual(counts["chunks"], 1)
+        self.assertEqual(len(self.store.search_morph("вторая", limit=5)), 1)
+        self.assertEqual(self.store.search_morph("первая", limit=5), [])
+        self.assertEqual(
+            self._events("note.md"),
+            ["discovered", "sent", "indexed", "discovered", "sent", "indexed"],
+        )
 
     def test_skipped_format_chain(self):
         area = AreaConfig(path=self.vault, role=Area.PERSONAL, formats=("text",))
