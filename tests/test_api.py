@@ -21,9 +21,7 @@ class ApiTest(unittest.TestCase):
         self._tmp = TemporaryDirectory()
         root = Path(self._tmp.name)
         self.store = SqliteStore(root / "db.sqlite")
-        service = IngestService(
-            self.store, FsTextStore(root / "texts"), NoopStemmer()
-        )
+        service = IngestService(self.store, FsTextStore(root / "texts"), NoopStemmer())
         self.server = make_server(service, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -61,9 +59,7 @@ class ApiTest(unittest.TestCase):
 
     def test_ingest_bad_area(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
-            self._post(
-                "/ingest", {"filename": "a.txt", "area": "nope", "text": "x"}
-            )
+            self._post("/ingest", {"filename": "a.txt", "area": "nope", "text": "x"})
         self.assertEqual(ctx.exception.code, 400)
 
     def test_ingest_empty_rejected(self):

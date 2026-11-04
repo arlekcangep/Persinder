@@ -35,7 +35,11 @@ class IngestServiceTest(unittest.TestCase):
         self.store = SqliteStore(root / "db.sqlite")
         self.textstore = FsTextStore(root / "texts")
         self.service = IngestService(
-            self.store, self.textstore, NoopStemmer(), chunk_size=1000, chunk_overlap=100
+            self.store,
+            self.textstore,
+            NoopStemmer(),
+            chunk_size=1000,
+            chunk_overlap=100,
         )
 
     def tearDown(self):
@@ -67,7 +71,9 @@ class IngestServiceTest(unittest.TestCase):
 
     def test_duplicate_by_hash(self):
         first = self.service.ingest(self._request())
-        second = self.service.ingest(self._request(area=Area.FOREIGN, filename="copy.txt"))
+        second = self.service.ingest(
+            self._request(area=Area.FOREIGN, filename="copy.txt")
+        )
         self.assertEqual(second.status, IngestResult.ALREADY)
         self.assertEqual(second.document_id, first.document_id)
         counts = self.store.counts()
@@ -88,9 +94,7 @@ class IngestServiceTest(unittest.TestCase):
         )
         self.assertEqual(result.status, IngestResult.INDEXED)
         self.assertGreater(result.chunks, 1)
-        self.assertEqual(
-            len(self.store.pending_embeddings(limit=1000)), result.chunks
-        )
+        self.assertEqual(len(self.store.pending_embeddings(limit=1000)), result.chunks)
 
 
 if __name__ == "__main__":

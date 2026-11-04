@@ -131,6 +131,7 @@ class SqliteStore:
     def counts(self) -> StoreCounts:
         """Служебная информация: сколько чего в базе."""
         with self._lock:
+
             def one(sql: str) -> int:
                 return int(self._conn.execute(sql).fetchone()[0])
 

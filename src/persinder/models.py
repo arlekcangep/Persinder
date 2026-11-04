@@ -21,7 +21,7 @@ class Area(str, Enum):
     WEB = "web"
 
     @classmethod
-    def parse(cls, value: object) -> "Area":
+    def parse(cls, value: object) -> Area:
         """Разобрать строку в Area, иначе ValueError."""
         try:
             return cls(str(value).strip().lower())

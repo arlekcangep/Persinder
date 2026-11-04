@@ -30,7 +30,9 @@ def build_service(settings: Settings) -> tuple[IngestService, SqliteStore]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="persinder", description="Сервис приёма Persinder")
+    parser = argparse.ArgumentParser(
+        prog="persinder", description="Сервис приёма Persinder"
+    )
     parser.add_argument("--data-dir", type=Path, default=None, help="каталог данных")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)

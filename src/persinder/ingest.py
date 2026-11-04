@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 
 from .interfaces import MetaStore, Stemmer, TextStore
-from .morphology import analyze_to_string
 from .models import (
     Chunk,
     Document,
@@ -17,6 +16,7 @@ from .models import (
     IngestResult,
     utcnow,
 )
+from .morphology import analyze_to_string
 
 
 def chunk_text(text: str, size: int, overlap: int) -> list[tuple[int, int]]:

@@ -25,12 +25,12 @@ class Settings:
         """Временный каталог для сырого текста до подсчёта эмбеддингов."""
         return self.data_dir / "pending_texts"
 
-    def ensure(self) -> "Settings":
+    def ensure(self) -> Settings:
         """Создать каталоги, если их нет."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.text_dir.mkdir(parents=True, exist_ok=True)
         return self
 
     @classmethod
-    def default(cls) -> "Settings":
+    def default(cls) -> Settings:
         return cls(data_dir=Path.home() / ".persinder")
