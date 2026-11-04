@@ -10,15 +10,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from .models import (
-    Chunk,
-    Document,
-    EmbeddingJob,
-    EmbeddingQueueItem,
-    MorphHit,
-    StoreCounts,
-    utcnow,
-)
+from ..domain import Chunk, Document, EmbeddingJob, utcnow
+from .models import EmbeddingQueueItem, MorphHit, StoreCounts
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (

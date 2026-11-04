@@ -18,13 +18,13 @@
 | Модуль | Ответственность | Статус |
 |---|---|---|
 | `config` | настройки, каталоги, области | реализован |
-| `models` | доменные типы (Area, Document, Chunk, IngestRequest…) | реализован, разделяется по слоям (ADR D18) |
-| `interfaces` | протоколы (Stemmer, TextStore, MetaStore…) | реализован |
+| `domain` | ядро: доменные модели (Area, Document, Chunk, EmbeddingJob) | реализован |
+| `interfaces` | протоколы/порты (Stemmer, TextStore, MetaStore…) | реализован |
 | `morphology` | нормализация, токенизация, стемминг | реализован |
 | `textstore` | временное хранение сырого текста | реализован |
-| `store` | SQLite: документы, чанки, FTS5, очередь, тэги | реализован |
-| `ingest` | сервис приёма: морфоиндекс + сайдкар + очередь | реализован |
-| `api` | HTTP-обёртка над `ingest` | реализован |
+| `store` | пакет: `models` (модели БД) + `sqlite` (SQLite: документы, FTS5, очередь) | реализован |
+| `ingest` | пакет: `models` (вход/выход) + `service` (морфоиндекс + очередь) | реализован |
+| `api` | пакет: `models` (DTO) + `http` (HTTP-обёртка над `ingest`) | реализован |
 | `embed` | воркер: разбор очереди, векторы, сайдкары | заглушка |
 | `vectorindex` | USearch-сегменты (шардинг, swap) | заглушка |
 | `sources` | watcher'ы и экстракторы областей | заглушка |
@@ -33,27 +33,29 @@
 Заглушки — это модули с зафиксированным интерфейсом и пустой/минимальной логикой,
 чтобы очертить границы.
 
-## Модели по слоям (целевая раскладка)
+## Модели по слоям
 
-По ADR D18 (см. §3.1 архитектуры) каждый слой владеет своими моделями. Целевая
-структура пакетов:
+По ADR D18 (см. §3.1 архитектуры) каждый слой владеет своими моделями. Раскладка:
 
 ```
 src/persinder/
-  domain/            # ядро, без зависимостей
-    models.py        # Area, Document, Chunk, идентификаторы
-  <service>/         # сервис-сценарий: ingest, embed, sources, search
-    models.py        # внутренние модели сервиса (запрос / результат / задача)
-    service.py
-  store/             # адаптер персистентности
-    models.py        # записи/строки SQLite (persistence)
-  api/               # адаптер HTTP
-    models.py        # DTO запроса/ответа (transport)
+  domain/
+    models.py        # Area, Document, Chunk, EmbeddingJob — ядро, без зависимостей
+    clock.py         # utcnow()
+  ingest/
+    models.py        # IngestRequest, IngestResult — внутренние модели сервиса
+    service.py       # IngestService, chunk_text
+  store/
+    models.py        # MorphHit, EmbeddingQueueItem, StoreCounts — модели БД
+    sqlite.py        # SqliteStore
+  api/
+    models.py        # IngestPayload, IngestResponse, PayloadError — DTO транспорта
+    http.py          # IngestHTTPServer, make_server, serve
 ```
 
-Между слоями — только явные мапперы и порты. Текущий общий `models.py` — временный
-компромисс первого прототипа: его типы разъезжаются по адресам выше. До рефакторинга
-это осознанный технический долг.
+Переход между слоями — только через явные мапперы (`IngestPayload.to_request`,
+`IngestResponse.from_result`). Порты (`interfaces.py`) импортируют модели слоёв
+только для аннотаций (`TYPE_CHECKING`), чтобы не создавать циклических зависимостей.
 
 ## Поток данных
 

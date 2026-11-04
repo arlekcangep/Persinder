@@ -7,16 +7,10 @@ from __future__ import annotations
 
 import hashlib
 
-from .interfaces import MetaStore, Stemmer, TextStore
-from .models import (
-    Chunk,
-    Document,
-    EmbeddingJob,
-    IngestRequest,
-    IngestResult,
-    utcnow,
-)
-from .morphology import analyze_to_string
+from ..domain import Chunk, Document, EmbeddingJob, utcnow
+from ..interfaces import MetaStore, Stemmer, TextStore
+from ..morphology import analyze_to_string
+from .models import IngestRequest, IngestResult
 
 
 def chunk_text(text: str, size: int, overlap: int) -> list[tuple[int, int]]:

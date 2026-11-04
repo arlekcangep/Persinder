@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from persinder.models import Chunk, Document, EmbeddingJob
+from persinder.domain import Chunk, Document, EmbeddingJob
 from persinder.store import SqliteStore
 
 

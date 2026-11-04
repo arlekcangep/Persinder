@@ -9,8 +9,9 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 
-from .interfaces import Ingest
-from .models import Area, IngestRequest, IngestResult
+from ..ingest import IngestResult
+from ..interfaces import Ingest
+from .models import IngestPayload, IngestResponse, PayloadError
 
 MAX_BODY_BYTES = 32 * 1024 * 1024  # 32 МБ
 
@@ -58,37 +59,19 @@ class _Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send_json(400, {"error": "invalid json"})
             return
-        if not isinstance(raw, dict):
-            self._send_json(400, {"error": "json object expected"})
-            return
-        data = cast("dict[str, object]", raw)
 
         try:
-            area = Area.parse(data.get("area", ""))
-        except ValueError as exc:
+            payload = IngestPayload.from_json(raw)
+        except PayloadError as exc:
             self._send_json(400, {"error": str(exc)})
             return
 
-        title_raw = data.get("title")
-        request = IngestRequest(
-            filename=str(data.get("filename", "")),
-            area=area,
-            text=str(data.get("text", "")),
-            title=str(title_raw) if title_raw is not None else None,
-        )
         service = cast(IngestHTTPServer, self.server).service
-        result = service.ingest(request)
+        result = service.ingest(payload.to_request())
 
+        response = IngestResponse.from_result(result)
         code = 200 if result.status != IngestResult.REJECTED else 422
-        self._send_json(
-            code,
-            {
-                "status": result.status,
-                "document_id": result.document_id,
-                "chunks": result.chunks,
-                "message": result.message,
-            },
-        )
+        self._send_json(code, response.to_dict())
 
     def log_message(self, format: str, *args: Any) -> None:
         """Тихий лог: не засоряем вывод."""

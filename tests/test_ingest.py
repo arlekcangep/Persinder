@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from persinder.ingest import IngestService, chunk_text
-from persinder.models import Area, IngestRequest, IngestResult
+from persinder.domain import Area
+from persinder.ingest import IngestRequest, IngestResult, IngestService, chunk_text
 from persinder.morphology import NoopStemmer
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore

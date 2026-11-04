@@ -1,23 +1,19 @@
 """Протоколы (интерфейсы) модулей Persinder.
 
 Модули общаются через эти протоколы, а не через конкретные реализации.
+Порты импортируют модели только для аннотаций (``TYPE_CHECKING``), чтобы не
+создавать циклических зависимостей между слоями.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from .models import (
-    Chunk,
-    Document,
-    EmbeddingJob,
-    EmbeddingQueueItem,
-    IngestRequest,
-    IngestResult,
-    MorphHit,
-    StoreCounts,
-)
+if TYPE_CHECKING:
+    from .domain import Chunk, Document, EmbeddingJob
+    from .ingest.models import IngestRequest, IngestResult
+    from .store.models import EmbeddingQueueItem, MorphHit, StoreCounts
 
 
 @runtime_checkable
