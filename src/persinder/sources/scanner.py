@@ -95,9 +95,25 @@ class AreaScanner:
                 continue  # ещё пишется — подождём следующего скана
             prev = old.get(rel)
             if prev is None:
-                events.append(ChangeEvent(ChangeKind.CREATED, after.area, rel))
+                events.append(
+                    ChangeEvent(
+                        ChangeKind.CREATED,
+                        after.area,
+                        rel,
+                        size=stat[0],
+                        mtime_ns=stat[1],
+                    )
+                )
             elif prev != stat:
-                events.append(ChangeEvent(ChangeKind.MODIFIED, after.area, rel))
+                events.append(
+                    ChangeEvent(
+                        ChangeKind.MODIFIED,
+                        after.area,
+                        rel,
+                        size=stat[0],
+                        mtime_ns=stat[1],
+                    )
+                )
 
         for rel in old.keys() - after.files.keys():
             events.append(ChangeEvent(ChangeKind.DELETED, after.area, rel))

@@ -13,6 +13,7 @@ from .extract import (
     default_registry,
     extract_html,
 )
+from .journal import Journal, JournalEvent
 from .models import (
     AreaConfig,
     AreaScan,
@@ -23,7 +24,6 @@ from .models import (
 )
 from .pipeline import IndexingPipeline, PipelineStats
 from .scanner import BUILTIN_IGNORES, AreaScanner
-from .snapshots import SnapshotStore
 from .watcher import Watcher
 
 __all__ = [
@@ -39,12 +39,13 @@ __all__ = [
     "ExtractorRegistry",
     "IndexingPipeline",
     "HtmlExtractor",
+    "Journal",
+    "JournalEvent",
     "MarkdownExtractor",
     "MhtmlExtractor",
     "PdfExtractor",
     "PipelineStats",
     "ScanResult",
-    "SnapshotStore",
     "TextExtractor",
     "Watcher",
     "WatchConfig",

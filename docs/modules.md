@@ -27,8 +27,8 @@
 | `api` | пакет: `models` (DTO) + `http` (HTTP-обёртка над `ingest`) | реализован |
 | `embed` | воркер: разбор очереди, векторы, сайдкары | заглушка |
 | `vectorindex` | USearch-сегменты (шардинг, swap) | заглушка |
-| `sources` | watcher'ы и экстракторы областей | заглушка |
-| `search` | фасад запроса (три группы, порядок) | заглушка |
+| `sources` | watcher'ы, журнал статусов и экстракторы областей | реализован |
+| `search` | фасад запроса (три группы, порядок) | реализован |
 
 Заглушки — это модули с зафиксированным интерфейсом и пустой/минимальной логикой,
 чтобы очертить границы.
@@ -51,6 +51,14 @@ src/persinder/
   api/
     models.py        # IngestPayload, IngestResponse, PayloadError — DTO транспорта
     http.py          # IngestHTTPServer, make_server, serve
+  sources/
+    models.py        # AreaConfig, WatchConfig, AreaScan, ChangeEvent, ScanResult
+    config.py        # загрузка YAML-конфига областей и watcher'а
+    scanner.py       # polling-скан (snapshot + diff + debounce)
+    watcher.py       # цикл скана, запуск по требованию
+    journal.py       # журнал статусов файлов (JSONL) — состояние watcher'а (D21)
+    extract.py       # экстракторы (markdown/text/html/mht/pdf) + реестр
+    pipeline.py      # события → экстракция → ingest → журнал
 ```
 
 Переход между слоями — только через явные мапперы (`IngestPayload.to_request`,

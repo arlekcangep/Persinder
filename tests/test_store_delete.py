@@ -59,6 +59,14 @@ class RemoveSourceTest(unittest.TestCase):
     def test_remove_unknown_source_is_noop(self):
         self.assertIsNone(self.store.remove_source("personal", "ghost.md"))
 
+    def test_has_source(self):
+        self._save("d1", "текст", "personal", "a.md")
+        self.assertTrue(self.store.has_source("personal", "a.md"))
+        self.assertFalse(self.store.has_source("personal", "b.md"))
+        self.assertFalse(self.store.has_source("web", "a.md"))
+        self.store.remove_source("personal", "a.md")
+        self.assertFalse(self.store.has_source("personal", "a.md"))
+
     def test_fts_cleared_after_delete(self):
         self._save("d1", "квантовый флакс", "personal", "a.md")
         self.assertEqual(len(self.store.search_morph("флакс", limit=5)), 1)

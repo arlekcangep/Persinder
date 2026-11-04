@@ -147,6 +147,16 @@ class SqliteStore:
                 (doc_id, area, filename, utcnow()),
             )
 
+    def has_source(self, area: str, filename: str) -> bool:
+        """Есть ли в индексе источник ``(area, filename)``."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM document_sources"
+                " WHERE area = ? AND filename = ? LIMIT 1",
+                (area, filename),
+            ).fetchone()
+        return row is not None
+
     def _purge_document(self, doc_id: str) -> None:
         """Удалить документ и все производные строки (нужен открытый `with`)."""
         self._conn.execute("DELETE FROM chunks_fts WHERE doc_id = ?", (doc_id,))

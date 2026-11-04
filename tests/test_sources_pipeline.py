@@ -16,6 +16,7 @@ from persinder.sources import (
     AreaScanner,
     ExtractorRegistry,
     IndexingPipeline,
+    Journal,
     MarkdownExtractor,
     ScanResult,
     TextExtractor,
@@ -42,7 +43,10 @@ class PipelineTest(unittest.TestCase):
             self.store, FsTextStore(self.data / "texts"), NoopStemmer()
         )
         registry = ExtractorRegistry((MarkdownExtractor(), TextExtractor()))
-        self.pipeline = IndexingPipeline(ingest, registry, metastore=self.store)
+        self.journal = Journal(self.data / "journal.jsonl")
+        self.pipeline = IndexingPipeline(
+            ingest, registry, metastore=self.store, journal=self.journal
+        )
         self.scanner = AreaScanner(WatchConfig(debounce=0.0))
 
     def tearDown(self):

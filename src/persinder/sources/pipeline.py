@@ -2,9 +2,11 @@
 
 ``IndexingPipeline`` обрабатывает события сканера: берёт файл области,
 прогоняет через реестр экстракторов (с учётом форматов области) и отдаёт
-текст в ``IngestService``. Удаления сейчас только логируются в счётчик —
-чистка индекса будет добавлена отдельно (высокий приоритет, D13).
+текст в ``IngestService``. Каждый переход пишется в ``Journal`` — он же
+служит состоянием watcher'а (D21).
 """
+
+from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
@@ -12,7 +14,8 @@ from dataclasses import dataclass
 from ..ingest import IngestRequest, IngestResult
 from ..interfaces import Ingest, MetaStore
 from .extract import ExtractorRegistry
-from .models import AreaConfig, ChangeKind, ScanResult
+from .journal import Journal, JournalEvent
+from .models import AreaConfig, ChangeEvent, ChangeKind, ScanResult
 
 
 @dataclass
@@ -29,77 +32,116 @@ class PipelineStats:
 
 
 class IndexingPipeline:
-    """События сканера → экстракция → ingest."""
+    """События сканера → экстракция → ingest → журнал."""
 
     def __init__(
         self,
         ingest: Ingest,
         registry: ExtractorRegistry,
         metastore: MetaStore | None = None,
+        journal: Journal | None = None,
     ) -> None:
         self._ingest = ingest
         self._registry = registry
-        # Metastore нужен только для удаления; опционален для обратной
-        # совместимости (без него DELETED просто считается).
+        # Metastore нужен для чистки индекса при удалении, журнал — для
+        # фиксации переходов; оба опциональны (тесты, отдельные сценарии).
         self._metastore = metastore
+        self._journal = journal
 
-    def _handle_file(
-        self, area: AreaConfig, rel_path: str
-    ) -> tuple[IngestResult | None, str | None]:
-        """Экстракция + ingest. ``(None, None)`` — формат не обслуживается."""
-        path = area.path / rel_path
-        extracted = self._registry.extract(path, area)
-        if extracted is None:
-            return None, None
-        if extracted.error:
-            return None, extracted.error
-        if not extracted.text.strip():
-            return None, None  # нечего индексировать (например, скан без OCR)
-        request = IngestRequest(
-            filename=rel_path,
-            area=area.role,
-            text=extracted.text,
-        )
-        return self._ingest.ingest(request), None
+    def _record(
+        self,
+        area: AreaConfig,
+        rel_path: str,
+        event: JournalEvent,
+        *,
+        size: int | None = None,
+        mtime_ns: int | None = None,
+        detail: str | None = None,
+    ) -> None:
+        if self._journal is not None:
+            self._journal.record(
+                area, rel_path, event, size=size, mtime_ns=mtime_ns, detail=detail
+            )
 
-    def _handle_deletion(self, area: AreaConfig, rel_path: str) -> bool:
-        """Чистка индекса по удалённому файлу (D13).
+    @staticmethod
+    def _fail(stats: PipelineStats, rel_path: str, message: str) -> None:
+        stats.errors += 1
+        stats.messages.append(f"{rel_path}: {message}")
 
-        Убирается источник ``(area, filename)``; документ удаляется целиком,
-        если источников не осталось. True — что-то удалено.
-        """
+    def _remove_source(self, area: AreaConfig, rel_path: str) -> str:
+        """Убрать источник удалённого файла (D13); деталь — для журнала."""
         if self._metastore is None:
-            return False
-        self._metastore.remove_source(area.role.value, rel_path)
-        return True
+            return "индекс не чистился: метастор недоступен"
+        had_source = self._metastore.has_source(area.role.value, rel_path)
+        purged = self._metastore.remove_source(area.role.value, rel_path)
+        if purged is not None:
+            return f"документ {purged} удалён из индекса"
+        if had_source:
+            return "источник убран, документ сохранён (есть другие источники)"
+        return "источника в индексе не было"
+
+    def _process_event(self, event: ChangeEvent, stats: PipelineStats) -> None:
+        """Обработать одно событие: экстракция, ingest, записи в журнал."""
+        area, rel_path = event.area, event.rel_path
+        if event.kind is ChangeKind.DELETED:
+            detail = self._remove_source(area, rel_path)
+            self._record(area, rel_path, JournalEvent.DELETED, detail=detail)
+            stats.deleted += 1
+            return
+
+        self._record(
+            area,
+            rel_path,
+            JournalEvent.DISCOVERED,
+            size=event.size,
+            mtime_ns=event.mtime_ns,
+        )
+        extracted = self._registry.extract(area.path / rel_path, area)
+        if extracted is None:
+            self._record(
+                area, rel_path, JournalEvent.SKIPPED, detail="формат не обслуживается"
+            )
+            stats.skipped += 1
+            return
+        if extracted.error:
+            self._record(area, rel_path, JournalEvent.ERROR, detail=extracted.error)
+            self._fail(stats, rel_path, extracted.error)
+            return
+        if not extracted.text.strip():
+            self._record(area, rel_path, JournalEvent.SKIPPED, detail="нет текста")
+            stats.skipped += 1
+            return
+
+        self._record(area, rel_path, JournalEvent.SENT)
+        outcome = self._ingest.ingest(
+            IngestRequest(filename=rel_path, area=area.role, text=extracted.text)
+        )
+        if outcome.status == IngestResult.INDEXED:
+            self._record(
+                area,
+                rel_path,
+                JournalEvent.INDEXED,
+                detail=f"документ {outcome.document_id}, чанков: {outcome.chunks}",
+            )
+            stats.indexed += 1
+        elif outcome.status == IngestResult.ALREADY:
+            self._record(area, rel_path, JournalEvent.DUPLICATE)
+            stats.duplicates += 1
+        else:
+            self._record(area, rel_path, JournalEvent.REJECTED, detail=outcome.message)
+            stats.rejected += 1
+            if outcome.message:
+                stats.messages.append(f"{rel_path}: {outcome.message}")
 
     def process(self, result: ScanResult) -> PipelineStats:
         """Обработать один результат скана."""
         stats = PipelineStats()
         for event in result.events:
             try:
-                if event.kind is ChangeKind.DELETED:
-                    self._handle_deletion(result.area, event.rel_path)
-                    stats.deleted += 1
-                    continue
-                outcome, extract_error = self._handle_file(result.area, event.rel_path)
+                self._process_event(event, stats)
             except OSError as exc:
-                stats.errors += 1
-                stats.messages.append(f"{event.rel_path}: {exc}")
-                continue
-            if extract_error:
-                stats.errors += 1
-                stats.messages.append(f"{event.rel_path}: {extract_error}")
-                continue
-            if outcome is None:
-                stats.skipped += 1
-                continue
-            if outcome.status == IngestResult.INDEXED:
-                stats.indexed += 1
-            elif outcome.status == IngestResult.ALREADY:
-                stats.duplicates += 1
-            else:
-                stats.rejected += 1
-                if outcome.message:
-                    stats.messages.append(f"{event.rel_path}: {outcome.message}")
+                self._record(
+                    event.area, event.rel_path, JournalEvent.ERROR, detail=str(exc)
+                )
+                self._fail(stats, event.rel_path, str(exc))
         return stats

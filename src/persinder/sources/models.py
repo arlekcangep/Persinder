@@ -72,11 +72,17 @@ class AreaScan:
 
 @dataclass(frozen=True)
 class ChangeEvent:
-    """Событие изменения файла внутри области."""
+    """Событие изменения файла внутри области.
+
+    ``size``/``mtime_ns`` — слепок файла на момент скана (None у ``DELETED``:
+    файла уже нет).
+    """
 
     kind: ChangeKind
     area: AreaConfig
     rel_path: str
+    size: int | None = None
+    mtime_ns: int | None = None
 
 
 @dataclass(frozen=True)
