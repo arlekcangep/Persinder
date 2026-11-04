@@ -9,14 +9,14 @@ areas:
   - path: ~/Obsidian/Personal
     role: personal            # personal | foreign | web
     formats: [markdown, text] # какие экстракторы применять к файлам
+  # Сохранённые веб-страницы: html и mhtml
+  - path: ~/WebArchive
+    role: web
+    formats: [html, mhtml, markdown, text]  # pdf — если стоит extra 'pdf'
   # Копии чужого (книги, статьи): пока не индексируем
   - path: ~/Library/Books
     role: foreign
     formats: []               # пусто — область пропускается
-  # Веб-архив (наполняется отдельным проектом-скрапером)
-  - path: ~/WebArchive
-    role: web
-    formats: [markdown, text]
 
 watch:
   poll_interval: 30   # сек между полными сканами (источник правды)

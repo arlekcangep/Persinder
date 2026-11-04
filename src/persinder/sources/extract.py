@@ -98,6 +98,134 @@ class TextExtractor:
         return Extracted(text=path.read_text(encoding="utf-8", errors="replace"))
 
 
+class HtmlExtractor:
+    """HTML → текст, стандартная библиотека (``html.parser``).
+
+    Вырезаются ``script``/``style``/``noscript``; блоки (p, div, заголовки,
+    li, br, tr) дают переносы строк, чтобы слова не склеивались. Заголовок
+    ``<title>`` идёт в результат как псевдо-тэг для отображения.
+    """
+
+    name = "html"
+
+    def suffixes(self) -> frozenset[str]:
+        return frozenset({".html", ".htm"})
+
+    def extract(self, path: Path) -> Extracted:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        return extract_html(raw)
+
+
+class MhtmlExtractor:
+    """MHTML (сохранённые веб-страницы, ``.mht``) — стандартная библиотека.
+
+    MHTML — это MIME-посылка: берём первую текстовую HTML-часть, локальные
+    ссылки на ресурсы (cid:, images) вырезаются вместе с разметкой.
+    """
+
+    name = "mhtml"
+
+    def suffixes(self) -> frozenset[str]:
+        return frozenset({".mht", ".mhtml"})
+
+    def extract(self, path: Path) -> Extracted:
+        import email
+        from email import policy
+
+        try:
+            msg = email.message_from_bytes(path.read_bytes(), policy=policy.default)
+            html: str | None = None
+            for part in msg.walk():
+                if part.get_content_type() == "text/html":
+                    payload = part.get_content()
+                    html = payload if isinstance(payload, str) else None
+                    break
+        except Exception as exc:  # noqa: BLE001 — повреждённая MIME-посылка
+            return Extracted(text="", error=f"mhtml: {exc}")
+        if html is None:
+            # Не multipart: иногда это просто HTML с MIME-заголовками.
+            raw = path.read_text(encoding="utf-8", errors="replace")
+            html = raw
+        return extract_html(html)
+
+
+def extract_html(raw: str) -> Extracted:
+    """HTML-строка → текст и тэги (общий движок для html и mhtml)."""
+    from html.parser import HTMLParser
+
+    class _Text(HTMLParser):
+        """Накопитель текста с пропусканием скриптов и блоковыми переносами."""
+
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.chunks: list[str] = []
+            self._skip_depth = 0
+            self.title: str = ""
+
+        SKIP = {"script", "style", "noscript", "template"}
+        BLOCK = {
+            "p",
+            "div",
+            "section",
+            "article",
+            "header",
+            "footer",
+            "li",
+            "tr",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "blockquote",
+            "pre",
+            "table",
+        }
+
+        def handle_starttag(self, tag: str, attrs: Any) -> None:
+            if tag in self.SKIP:
+                self._skip_depth += 1
+            elif tag in self.BLOCK or tag == "br":
+                self.chunks.append("\n")
+            elif tag == "title":
+                self._in_title = True
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag in self.SKIP:
+                self._skip_depth = max(0, self._skip_depth - 1)
+            elif tag in self.BLOCK:
+                self.chunks.append("\n")
+            elif tag == "title":
+                self._in_title = False
+
+        def handle_data(self, data: str) -> None:
+            if self._skip_depth:
+                return
+            if getattr(self, "_in_title", False):
+                self.title += data
+            else:
+                self.chunks.append(data)
+
+    parser = _Text()
+    try:
+        parser.feed(raw)
+    except Exception as exc:  # noqa: BLE001 — повреждённая разметка
+        return Extracted(text="", error=f"html: {exc}")
+
+    # Схлопываем пробельные «простыни» между блоками.
+    lines = [
+        re.sub(r"[ \t\xa0]+", " ", ln).strip()
+        for ln in "".join(parser.chunks).splitlines()
+    ]
+    text = "\n".join(ln for ln in lines if ln)
+    tags = extract_tags(strip_code_inline(text), None)
+    title = parser.title.strip()
+    if title and title.lower() not in {t.lower() for t in tags}:
+        tags = (title[:80], *tags)  # заголовок страницы — первым тэгом
+    return Extracted(text=text, tags=tags)
+
+
 class PdfExtractor:
     """PDF через pypdf (extra ``pdf``).
 
@@ -179,8 +307,13 @@ class ExtractorRegistry:
 
 
 def default_registry() -> ExtractorRegistry:
-    """Стандартный набор: markdown + text; pdf — если установлен extra."""
-    extractors: list[Extractor] = [MarkdownExtractor(), TextExtractor()]
+    """Стандартный набор: markdown + text + html + mhtml; pdf — если extra."""
+    extractors: list[Extractor] = [
+        MarkdownExtractor(),
+        TextExtractor(),
+        HtmlExtractor(),
+        MhtmlExtractor(),
+    ]
     with contextlib.suppress(RuntimeError):
         extractors.append(PdfExtractor())
     return ExtractorRegistry(tuple(extractors))

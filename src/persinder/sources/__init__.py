@@ -5,10 +5,13 @@ from .extract import (
     Extracted,
     Extractor,
     ExtractorRegistry,
+    HtmlExtractor,
     MarkdownExtractor,
+    MhtmlExtractor,
     PdfExtractor,
     TextExtractor,
     default_registry,
+    extract_html,
 )
 from .models import (
     AreaConfig,
@@ -34,7 +37,9 @@ __all__ = [
     "Extracted",
     "ExtractorRegistry",
     "IndexingPipeline",
+    "HtmlExtractor",
     "MarkdownExtractor",
+    "MhtmlExtractor",
     "PdfExtractor",
     "PipelineStats",
     "ScanResult",
@@ -42,5 +47,6 @@ __all__ = [
     "Watcher",
     "WatchConfig",
     "default_registry",
+    "extract_html",
     "load_config",
 ]
