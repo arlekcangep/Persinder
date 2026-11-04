@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .api import serve
 from .config import Settings
+from .gc import collect_orphans
 from .ingest import IngestService
 from .morphology import default_stemmer
 from .search import SearchService
@@ -59,6 +60,11 @@ def run_watch(config_path: Path, data_dir: Path | None) -> int:
         )
     pipeline = IndexingPipeline(ingest, registry, metastore=store, journal=journal)
 
+    textstore = FsTextStore(settings.text_dir)
+    gc_stats = collect_orphans(store, textstore)
+    if gc_stats.removed or gc_stats.missing:
+        print(gc_stats)
+
     print(f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с")
     watcher = Watcher(
         areas,
@@ -84,6 +90,21 @@ def print_stats(stats: object) -> None:
     print(stats)
 
 
+def run_gc(data_dir: Path | None) -> int:
+    """Удалить сырой текст, оставшийся без документа (сироты)."""
+    settings = Settings.default()
+    if data_dir:
+        settings = replace(settings, data_dir=data_dir)
+    settings.ensure()
+    store = SqliteStore(settings.db_path)
+    textstore = FsTextStore(settings.text_dir)
+    try:
+        print(collect_orphans(store, textstore))
+    finally:
+        store.close()
+    return 0
+
+
 def _wait_forever() -> None:
     import time
 
@@ -106,6 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     watch_p.add_argument("--config", type=Path, required=True, help="YAML-конфиг")
     watch_p.add_argument("--data-dir", type=Path, default=None)
 
+    gc_p = sub.add_parser("gc", help="удалить сырой текст без документа (сирот)")
+    gc_p.add_argument("--data-dir", type=Path, default=None)
+
     # Совместимость: без подкоманды — serve с флагами.
     parser.add_argument("--data-dir", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--host", default=None, help=argparse.SUPPRESS)
@@ -114,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "watch":
         return run_watch(args.config, args.data_dir)
+    if args.command == "gc":
+        return run_gc(args.data_dir)
     if args.command == "serve" or args.command is None:
         return _serve_main(parser, args)
     parser.print_help()

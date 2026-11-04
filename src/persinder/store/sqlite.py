@@ -185,6 +185,14 @@ class SqliteStore:
             ).fetchone()
         return row is not None
 
+    def text_keys(self) -> list[str]:
+        """Ключи сырого текста, на которые ссылается хотя бы один документ."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT text_key FROM documents"
+            ).fetchall()
+        return [str(row["text_key"]) for row in rows]
+
     def _purge_document(self, doc_id: str) -> None:
         """Удалить документ и все производные строки (нужен открытый `with`)."""
         self._conn.execute("DELETE FROM chunks_fts WHERE doc_id = ?", (doc_id,))
