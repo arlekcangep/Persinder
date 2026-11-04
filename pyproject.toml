@@ -14,7 +14,7 @@ stemming = ["snowballstemmer>=2.2"]
 config = ["PyYAML>=6.0"]
 watch = ["watchdog>=4.0"]
 http = ["fastapi>=0.110", "uvicorn>=0.29"]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
 
 [project.scripts]
 persinder = "persinder.__main__:main"
