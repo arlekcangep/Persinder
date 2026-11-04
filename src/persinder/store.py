@@ -10,7 +10,15 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from .models import Chunk, Document, EmbeddingJob, utcnow
+from .models import (
+    Chunk,
+    Document,
+    EmbeddingJob,
+    EmbeddingQueueItem,
+    MorphHit,
+    StoreCounts,
+    utcnow,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -86,7 +94,7 @@ class SqliteStore:
             ).fetchone()
         return row["id"] if row else None
 
-    def search_morph(self, stemmed_query: str, limit: int = 20) -> list[dict]:
+    def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]:
         """Морфологический поиск по FTS5 (запрос уже стеммирован)."""
         with self._lock:
             rows = self._conn.execute(
@@ -94,31 +102,46 @@ class SqliteStore:
                 "FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?",
                 (stemmed_query, limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [
+            MorphHit(
+                doc_id=str(row["doc_id"]),
+                chunk_index=int(row["chunk_index"]),
+                score=float(row["score"]),
+            )
+            for row in rows
+        ]
 
-    def pending_embeddings(self, limit: int = 100) -> list[dict]:
+    def pending_embeddings(self, limit: int = 100) -> list[EmbeddingQueueItem]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, doc_id, chunk_index, area FROM embedding_queue "
                 "WHERE status = 'pending' ORDER BY id LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [
+            EmbeddingQueueItem(
+                id=int(row["id"]),
+                doc_id=str(row["doc_id"]),
+                chunk_index=int(row["chunk_index"]),
+                area=str(row["area"]),
+            )
+            for row in rows
+        ]
 
-    def counts(self) -> dict[str, int]:
+    def counts(self) -> StoreCounts:
         """Служебная информация: сколько чего в базе."""
         with self._lock:
             def one(sql: str) -> int:
                 return int(self._conn.execute(sql).fetchone()[0])
 
-            return {
-                "documents": one("SELECT COUNT(*) FROM documents"),
-                "sources": one("SELECT COUNT(*) FROM document_sources"),
-                "chunks": one("SELECT COUNT(*) FROM chunks"),
-                "pending_embeddings": one(
+            return StoreCounts(
+                documents=one("SELECT COUNT(*) FROM documents"),
+                sources=one("SELECT COUNT(*) FROM document_sources"),
+                chunks=one("SELECT COUNT(*) FROM chunks"),
+                pending_embeddings=one(
                     "SELECT COUNT(*) FROM embedding_queue WHERE status = 'pending'"
                 ),
-            }
+            )
 
     # --- запись ---
 

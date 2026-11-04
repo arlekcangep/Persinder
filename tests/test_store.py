@@ -17,7 +17,7 @@ class SqliteStoreTest(unittest.TestCase):
         self.store.close()
         self._tmp.cleanup()
 
-    def _save(self, doc_id="d1", stemmed="привет мир"):
+    def _save(self, doc_id: str = "d1", stemmed: str = "привет мир") -> None:
         doc = Document(
             id=doc_id,
             content_hash=doc_id,

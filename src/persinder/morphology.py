@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from typing import Any, Callable, Iterable, cast
+
+from .interfaces import Stemmer
 
 _TOKEN_RE = re.compile(r"[0-9]+|[^\W\d_]+", re.UNICODE)
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
@@ -32,23 +34,24 @@ class SnowballStemmer:
     """Стеммер Snowball для русского и английского (опциональная зависимость)."""
 
     def __init__(self) -> None:
-        import snowballstemmer
+        import snowballstemmer  # type: ignore[import-untyped]
 
-        self._ru = snowballstemmer.stemmer("russian")
-        self._en = snowballstemmer.stemmer("english")
+        module: Any = snowballstemmer
+        self._ru = cast(Callable[[str], str], module.stemmer("russian"))
+        self._en = cast(Callable[[str], str], module.stemmer("english"))
         self.name = "snowball:ru+en"
 
     def stem(self, tokens: Iterable[str]) -> list[str]:
         out: list[str] = []
         for token in tokens:
             if _CYRILLIC_RE.search(token):
-                out.append(self._ru.stemWord(token))
+                out.append(self._ru(token))
             else:
-                out.append(self._en.stemWord(token))
+                out.append(self._en(token))
         return out
 
 
-def default_stemmer() -> object:
+def default_stemmer() -> Stemmer:
     """Snowball, если доступен, иначе заглушка."""
     try:
         return SnowballStemmer()
@@ -56,11 +59,11 @@ def default_stemmer() -> object:
         return NoopStemmer()
 
 
-def analyze(text: str, stemmer: object) -> list[str]:
+def analyze(text: str, stemmer: Stemmer) -> list[str]:
     """Нормализовать текст: токенизация + стемминг."""
     return stemmer.stem(tokenize(text))
 
 
-def analyze_to_string(text: str, stemmer: object) -> str:
+def analyze_to_string(text: str, stemmer: Stemmer) -> str:
     """Стеммированный текст для FTS5 (токены через пробел)."""
     return " ".join(analyze(text, stemmer))

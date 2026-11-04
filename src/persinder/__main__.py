@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 from .api import serve
@@ -37,17 +38,11 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings.default()
     if args.data_dir:
-        settings = Settings(
-            data_dir=args.data_dir,
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-            host=settings.host,
-            port=settings.port,
-        )
+        settings = replace(settings, data_dir=args.data_dir)
     if args.host:
-        settings = Settings(**{**settings.__dict__, "host": args.host})
+        settings = replace(settings, host=args.host)
     if args.port:
-        settings = Settings(**{**settings.__dict__, "port": args.port})
+        settings = replace(settings, port=args.port)
 
     service, store = build_service(settings)
     print(f"Persinder слушает http://{settings.host}:{settings.port}")

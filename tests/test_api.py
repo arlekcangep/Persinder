@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 
 from persinder.api import make_server
 from persinder.ingest import IngestService
@@ -26,8 +27,8 @@ class ApiTest(unittest.TestCase):
         self.server = make_server(service, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        host, port = self.server.server_address
-        self.base = f"http://{host}:{port}"
+        addr = self.server.server_address
+        self.base = f"http://{addr[0]}:{addr[1]}"
 
     def tearDown(self):
         self.server.shutdown()
@@ -35,7 +36,7 @@ class ApiTest(unittest.TestCase):
         self.store.close()
         self._tmp.cleanup()
 
-    def _post(self, path, payload):
+    def _post(self, path: str, payload: dict[str, object]) -> Any:
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             self.base + path,

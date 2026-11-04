@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 
+from .interfaces import MetaStore, Stemmer, TextStore
 from .morphology import analyze_to_string
 from .models import (
     Chunk,
@@ -41,9 +42,9 @@ class IngestService:
 
     def __init__(
         self,
-        store: object,
-        textstore: object,
-        stemmer: object,
+        store: MetaStore,
+        textstore: TextStore,
+        stemmer: Stemmer,
         chunk_size: int = 1200,
         chunk_overlap: int = 200,
     ) -> None:

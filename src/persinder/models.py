@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from typing import TypedDict
 
 
 def utcnow() -> str:
@@ -85,3 +86,29 @@ class EmbeddingJob:
     chunk_index: int
     area: str
     created_at: str
+
+
+class MorphHit(TypedDict):
+    """Строка результата морфологического поиска."""
+
+    doc_id: str
+    chunk_index: int
+    score: float
+
+
+class EmbeddingQueueItem(TypedDict):
+    """Строка очереди на эмбеддинги."""
+
+    id: int
+    doc_id: str
+    chunk_index: int
+    area: str
+
+
+class StoreCounts(TypedDict):
+    """Счётчики содержимого метастора."""
+
+    documents: int
+    sources: int
+    chunks: int
+    pending_embeddings: int

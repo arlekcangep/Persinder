@@ -7,7 +7,16 @@ from __future__ import annotations
 
 from typing import Iterable, Protocol, runtime_checkable
 
-from .models import Chunk, Document, EmbeddingJob, IngestRequest, IngestResult
+from .models import (
+    Chunk,
+    Document,
+    EmbeddingJob,
+    EmbeddingQueueItem,
+    IngestRequest,
+    IngestResult,
+    MorphHit,
+    StoreCounts,
+)
 
 
 @runtime_checkable
@@ -58,10 +67,13 @@ class MetaStore(Protocol):
     ) -> None:
         ...
 
-    def search_morph(self, stemmed_query: str, limit: int = 20) -> list[dict]:
+    def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]:
         ...
 
-    def pending_embeddings(self, limit: int = 100) -> list[dict]:
+    def pending_embeddings(self, limit: int = 100) -> list[EmbeddingQueueItem]:
+        ...
+
+    def counts(self) -> StoreCounts:
         ...
 
     def close(self) -> None:

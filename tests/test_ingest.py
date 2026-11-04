@@ -42,7 +42,12 @@ class IngestServiceTest(unittest.TestCase):
         self.store.close()
         self._tmp.cleanup()
 
-    def _request(self, text="Привет мир", area=Area.PERSONAL, filename="a.txt"):
+    def _request(
+        self,
+        text: str = "Привет мир",
+        area: Area = Area.PERSONAL,
+        filename: str = "a.txt",
+    ) -> IngestRequest:
         return IngestRequest(filename=filename, area=area, text=text)
 
     def test_indexed(self):
@@ -51,7 +56,9 @@ class IngestServiceTest(unittest.TestCase):
         self.assertEqual(result.chunks, 1)
         self.assertIsNotNone(result.document_id)
         # текст ушёл во временный каталог
-        self.assertTrue(self.textstore.exists(result.document_id))
+        doc_id = result.document_id
+        assert doc_id is not None
+        self.assertTrue(self.textstore.exists(doc_id))
         # морфологический поиск находит документ
         found = self.store.search_morph("привет")
         self.assertEqual(len(found), 1)

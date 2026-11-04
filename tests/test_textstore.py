@@ -10,7 +10,8 @@ from persinder.textstore import FsTextStore
 class FsTextStoreTest(unittest.TestCase):
     def setUp(self):
         self._tmp = TemporaryDirectory()
-        self.store = FsTextStore(Path(self._tmp.name) / "texts")
+        self._root = Path(self._tmp.name) / "texts"
+        self.store = FsTextStore(self._root)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -30,7 +31,7 @@ class FsTextStoreTest(unittest.TestCase):
         self.store.put("k", "второй")
         self.assertEqual(self.store.read("k"), "второй")
         # временный файл не остаётся
-        leftovers = list(self.store._root.glob("*.tmp"))
+        leftovers = list(self._root.glob("*.tmp"))
         self.assertEqual(leftovers, [])
 
     def test_rejects_bad_key(self):
