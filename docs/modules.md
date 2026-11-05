@@ -49,7 +49,9 @@ src/persinder/
   store/
     models.py        # MorphHit, EmbeddingQueueItem, StoreCounts — модели БД
     sqlite.py        # SqliteStore
-  gc.py              # collect_orphans: сырой текст без документа (D22)
+  gc/
+    models.py        # GcStats — результат сборки сирот
+    service.py       # collect_orphans: сырой текст без документа (D22)
   api/
     models.py        # IngestPayload, IngestResponse, PayloadError — DTO транспорта
     http.py          # IngestHTTPServer, make_server, serve

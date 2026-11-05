@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .api import serve
 from .config import Settings
-from .gc import collect_orphans
+from .gc import GcStats, collect_orphans
 from .ingest import IngestService
 from .morphology import default_stemmer
 from .search import SearchService
@@ -63,7 +63,7 @@ def run_watch(config_path: Path, data_dir: Path | None) -> int:
     textstore = FsTextStore(settings.text_dir)
     gc_stats = collect_orphans(store, textstore)
     if gc_stats.removed or gc_stats.missing:
-        print(gc_stats)
+        print(format_gc(gc_stats))
 
     print(f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с")
     watcher = Watcher(
@@ -90,6 +90,15 @@ def print_stats(stats: object) -> None:
     print(stats)
 
 
+def format_gc(stats: GcStats) -> str:
+    """Человекочитаемый отчёт сборки сирот (оформление — на слое CLI)."""
+    return (
+        f"GC: проверено текстов {stats.scanned}, "
+        f"удалено сирот {stats.removed}, "
+        f"документов без текста {stats.missing}"
+    )
+
+
 def run_gc(data_dir: Path | None) -> int:
     """Удалить сырой текст, оставшийся без документа (сироты)."""
     settings = Settings.default()
@@ -99,7 +108,7 @@ def run_gc(data_dir: Path | None) -> int:
     store = SqliteStore(settings.db_path)
     textstore = FsTextStore(settings.text_dir)
     try:
-        print(collect_orphans(store, textstore))
+        print(format_gc(collect_orphans(store, textstore)))
     finally:
         store.close()
     return 0

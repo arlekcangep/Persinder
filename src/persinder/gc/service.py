@@ -8,33 +8,20 @@
 Свежий текст не трогаем: ``IngestService`` пишет файл **до** появления
 документа в сторе, поэтому совсем недавний файл может быть «в полёте»
 (например, параллельно работает ``serve``). Возрастной порог это закрывает.
+
+Сценарий общается только с портами (``MetaStore``, ``TextStore``) — конкретные
+адаптеры подставляет точка сборки (``persinder.__main__``).
 """
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 
-from .interfaces import MetaStore, TextStore
+from ..interfaces import MetaStore, TextStore
+from .models import GcStats
 
 #: Сколько секунд не трогать свежий текст (окно гонки ingest).
 MIN_ORPHAN_AGE_SECONDS = 3600
-
-
-@dataclass(frozen=True)
-class GcStats:
-    """Итоги сборки сирот."""
-
-    scanned: int = 0
-    removed: int = 0
-    missing: int = 0
-
-    def __str__(self) -> str:
-        return (
-            f"GC: проверено текстов {self.scanned}, "
-            f"удалено сирот {self.removed}, "
-            f"документов без текста {self.missing}"
-        )
 
 
 def collect_orphans(
