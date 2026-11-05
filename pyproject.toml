@@ -15,6 +15,7 @@ config = ["PyYAML>=6.0"]
 watch = ["watchdog>=4.0"]
 pdf = ["pypdf>=4.0"]
 http = ["fastapi>=0.110", "uvicorn>=0.29"]
+onnx = ["onnxruntime>=1.19", "tokenizers>=0.19"]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
 
 [project.scripts]

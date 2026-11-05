@@ -365,6 +365,30 @@ class SqliteStore:
                 (area, source_path, utcnow(), doc_id),
             )
 
+    def enqueue_all(self) -> None:
+        """Поставить задачи для всех источников (полный пересчёт).
+
+        Нужно при смене модели эмбеддингов: отпечаток изменился — старые
+        сайдкары непригодны, пересчитываем каждый источник.
+        """
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT DISTINCT doc_id, area, source_path FROM document_sources"
+            ).fetchall()
+            for row in rows:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO embedding_queue"
+                    "(doc_id, chunk_index, area, source_path, status, created_at) "
+                    "SELECT doc_id, chunk_index, ?, ?, 'pending', ?"
+                    " FROM chunks WHERE doc_id = ?",
+                    (
+                        str(row["area"]),
+                        str(row["source_path"]),
+                        utcnow(),
+                        str(row["doc_id"]),
+                    ),
+                )
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

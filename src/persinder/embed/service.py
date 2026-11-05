@@ -6,9 +6,11 @@
 атомарно. Сайдкар — кэш: его отсутствие не страшно, векторы просто считаются
 снова.
 
-Реальный эмбеддер (ONNX e5-small) подключается через порт ``Embedder``;
-сейчас стоит детерминированная заглушка ``PlaceholderEmbedder``, чтобы вся
-механика работала и тестировалась без тяжёлой зависимости.
+Эмбеддер подключается через порт ``Embedder``: реальная модель (ONNX e5-small,
+``OnnxEmbedder``) или детерминированная заглушка ``PlaceholderEmbedder``. Смена
+модели меняет её отпечаток — старые сайдкары непригодны, поэтому воркер следит
+за отпечатком активной модели (``data_dir/embed_fingerprint.json``) и при смене
+ставит на пересчёт все источники (D24).
 """
 
 from __future__ import annotations
@@ -62,6 +64,7 @@ class EmbedWorker:
         chunk_size: int = 1200,
         chunk_overlap: int = 200,
         virtual_dir: Path | None = None,
+        fingerprint_path: Path | None = None,
     ) -> None:
         self._store = store
         self._textstore = textstore
@@ -69,6 +72,8 @@ class EmbedWorker:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._virtual_dir = Path(virtual_dir) if virtual_dir else None
+        # Файл с отпечатком модели, чьи векторы сейчас в сайдкарах (D24).
+        self._fingerprint_path = Path(fingerprint_path) if fingerprint_path else None
 
     def run_once(self, limit: int = 100) -> EmbedStats:
         """Обработать до ``limit`` задач очереди; вернуть итоги.
@@ -76,8 +81,13 @@ class EmbedWorker:
         Документ обрабатывается целиком: если среди порции есть его задачи,
         берутся все его незавершённые задачи (их может быть больше ``limit``).
         Ошибки не валят проход: задачи остаются в очереди и уйдут в следующий.
+
+        Если сменилась модель эмбеддингов (её отпечаток не совпадает с
+        записанным), сначала ставится на пересчёт **вся** очередь (D24); когда
+        она полностью разобрана, отпечаток запоминается.
         """
         stats = EmbedStats()
+        self._maybe_rebuild(stats)
         rows = self._store.pending_embeddings(limit)
         doc_ids = list(dict.fromkeys(str(row["doc_id"]) for row in rows))
         for doc_id in doc_ids:
@@ -86,7 +96,34 @@ class EmbedWorker:
             except OSError as exc:
                 stats.errors += 1
                 stats.messages.append(f"{doc_id}: {exc}")
+        # Очередь полностью разобрана и ошибок не было — векторы в сайдкарах
+        # теперь соответствуют активной модели, запоминаем её отпечаток.
+        if stats.errors == 0 and self._store.counts()["pending_embeddings"] == 0:
+            self._record_fingerprint()
         return stats
+
+    def _maybe_rebuild(self, stats: EmbedStats) -> None:
+        """Сменилась модель — поставить все источники на пересчёт сайдкаров."""
+        if self._fingerprint_path is None:
+            return
+        current = self._embedder.name
+        try:
+            recorded = self._fingerprint_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            recorded = None
+        if recorded == current:
+            return
+        self._store.enqueue_all()
+        stats.messages.append(
+            f"модель сменилась: {recorded!r} → {current!r}; пересчитываю все сайдкары"
+        )
+
+    def _record_fingerprint(self) -> None:
+        """Запомнить модель, чьи векторы сейчас в сайдкарах (после полного прохода)."""
+        if self._fingerprint_path is None:
+            return
+        self._fingerprint_path.parent.mkdir(parents=True, exist_ok=True)
+        self._fingerprint_path.write_text(self._embedder.name + "\n", encoding="utf-8")
 
     def _process_doc(self, doc_id: str, stats: EmbedStats) -> None:
         rows = self._store.pending_for_docs([doc_id])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +34,19 @@ class Settings:
         ``text_dir``.
         """
         return self.data_dir / "virtual"
+
+    @property
+    def model_dir(self) -> Path:
+        """Каталог скачанной модели эмбеддингов (глобальный кэш).
+
+        По умолчанию ``~/.persinder/models/e5-small`` — общий для всех
+        профилей; переопределяется переменной окружения
+        ``PERSINDER_MODEL_DIR`` (модель скачивает ``scripts/download_model.py``).
+        """
+        env = os.environ.get("PERSINDER_MODEL_DIR")
+        if env:
+            return Path(env)
+        return Path.home() / ".persinder" / "models" / "e5-small"
 
     def ensure(self) -> Settings:
         """Создать каталоги, если их нет."""

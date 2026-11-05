@@ -8,8 +8,14 @@ from pathlib import Path
 
 from .api import serve
 from .config import Settings
-from .embed import EmbedStats, EmbedWorker, PlaceholderEmbedder
+from .embed import (
+    EmbedStats,
+    EmbedWorker,
+    OnnxEmbedder,
+    PlaceholderEmbedder,
+)
 from .ingest import IngestJournal, IngestService, RecoveryStats
+from .interfaces import Embedder
 from .morphology import default_stemmer
 from .search import SearchService
 from .sources import (
@@ -109,26 +115,52 @@ def format_embed(stats: EmbedStats) -> str:
     )
 
 
+def build_embed_worker(
+    settings: Settings,
+) -> tuple[EmbedWorker, SqliteStore, str]:
+    """Собрать воркер эмбеддингов; вернуть (воркер, сторе, подпись модели).
+
+    Реальная модель e5-small (ONNX) — если она скачана в ``Settings.model_dir``;
+    иначе детерминированная заглушка ``PlaceholderEmbedder`` (тот же порт
+    ``Embedder``). Отпечаток модели попадает в сайдкары, поэтому смена
+    эмбеддера пересчитает старые векторы.
+    """
+    store = SqliteStore(settings.db_path)
+    textstore = FsTextStore(settings.text_dir)
+    embedder: Embedder
+    if OnnxEmbedder.available(settings.model_dir):
+        embedder = OnnxEmbedder(settings.model_dir)
+        label = f"модель: {embedder.name}"
+    else:
+        embedder = PlaceholderEmbedder()
+        label = (
+            f"модель: {embedder.name} (заглушка; скачай e5-small: "
+            "python scripts/download_model.py)"
+        )
+    worker = EmbedWorker(
+        store=store,
+        textstore=textstore,
+        embedder=embedder,
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+        virtual_dir=settings.virtual_dir,
+        fingerprint_path=settings.data_dir / "embed_fingerprint.json",
+    )
+    return worker, store, label
+
+
 def run_embed(data_dir: Path | None, limit: int) -> int:
     """Эмбеддинги по требованию: очередь → векторы → сайдкары (§7)."""
     settings = Settings.default()
     if data_dir:
         settings = replace(settings, data_dir=data_dir)
     settings.ensure()
-    store = SqliteStore(settings.db_path)
-    textstore = FsTextStore(settings.text_dir)
-    worker = EmbedWorker(
-        store=store,
-        textstore=textstore,
-        embedder=PlaceholderEmbedder(),
-        chunk_size=settings.chunk_size,
-        chunk_overlap=settings.chunk_overlap,
-        virtual_dir=settings.virtual_dir,
-    )
+    worker, store, label = build_embed_worker(settings)
     try:
         stats = worker.run_once(limit)
     finally:
         store.close()
+    print(label)
     print(format_embed(stats))
     return 0
 

@@ -20,7 +20,7 @@ python3 -m venv "$venv"
 echo ">> обновляю pip"
 "$venv/bin/pip" install --quiet --upgrade pip
 
-echo ">> ставлю проект с extras: dev, config, watch, stemming"
-"$venv/bin/pip" install --quiet -e "${here}[dev,config,watch,stemming]"
+echo ">> ставлю проект с extras: dev, config, watch, stemming, onnx"
+"$venv/bin/pip" install --quiet -e "${here}[dev,config,watch,stemming,onnx]"
 
 echo ">> готово. Активировать: source $venv/bin/activate"

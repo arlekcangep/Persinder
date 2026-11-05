@@ -49,7 +49,8 @@ src/persinder/
     journal.py       # журнал вызовов ingest (JSONL) + восстановление (D23)
   embed/
     models.py        # EmbedFingerprint, ChunkParams, EmbedStats
-    service.py       # EmbedWorker, PlaceholderEmbedder
+    service.py       # EmbedWorker (очередь → векторы → сайдкары, пересчёт при смене модели)
+    onnx.py          # OnnxEmbedder — реальная модель e5-small (ONNX INT8)
     sidecar.py       # сайдкары: чтение/запись (бинарный формат, атомарность)
   store/
     models.py        # MorphHit, EmbeddingQueueItem, StoreCounts — модели БД
@@ -179,10 +180,11 @@ class Embedder(Protocol):
   через `IngestRequest.source_path`).
 - Виртуальный элемент (нет файла на диске — web, вставленный текст) → сайдкар в
   отдельной папке `Settings.virtual_dir` (`data_dir/virtual/<doc_id>.pdr`).
-- Сейчас эмбеддер — детерминированная заглушка `PlaceholderEmbedder`
-  (отпечаток `placeholder-v1`, 384 dim). Реальная модель (e5-small, §12.1
-  архитектуры) подключится за тем же портом; смена отпечатка заставит пересчитать
-  старые сайдкары.
+- Эмбеддер — детерминированная заглушка `PlaceholderEmbedder` (`placeholder-v1`)
+  или реальная модель `OnnxEmbedder` (e5-small INT8, §12.1): выбирается
+  автоматически по `Settings.model_dir` (скачивается `scripts/download_model.py`).
+  Отпечаток активной модели пишется в `data_dir/embed_fingerprint.json`; смена
+  модели ставит все источники на пересчёт (D24).
 - Удаление/вытеснение чистит сайдкары в `ingest` (владелец инварианта
   «документ + текст + сайдкары»).
 

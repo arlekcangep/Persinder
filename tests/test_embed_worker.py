@@ -224,6 +224,63 @@ class EmbedWorkerTest(unittest.TestCase):
             hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
+    def test_fingerprint_recorded_and_rebuilt_on_model_switch(self):
+        """Смена модели → пересчёт всех сайдкаров, отпечаток обновляется (D24)."""
+        src = self._file("books/one.md", "текст для проверки смены модели")
+        fp_path = self.data / "embed_fingerprint.json"
+        worker = EmbedWorker(
+            self.store,
+            self.textstore,
+            self.embedder,
+            virtual_dir=self.virtual,
+            fingerprint_path=fp_path,
+        )
+        stats = worker.run_once()
+        self.assertEqual(stats.docs, 1)
+        data = read_sidecar(file_sidecar_path(src))
+        self.assertIsNotNone(data)
+        assert data is not None
+        self.assertEqual(data.fingerprint.model, "placeholder-v1")
+        self.assertTrue(fp_path.exists())
+        self.assertEqual(fp_path.read_text(encoding="utf-8").strip(), "placeholder-v1")
+
+        # другая модель с другим отпечатком — тот же детерминированный алгоритм
+        class NewModel(PlaceholderEmbedder):
+            name = "placeholder-v2"
+
+        worker2 = EmbedWorker(
+            self.store,
+            self.textstore,
+            NewModel(),
+            virtual_dir=self.virtual,
+            fingerprint_path=fp_path,
+        )
+        stats = worker2.run_once()
+        self.assertEqual(stats.docs, 1)
+        data2 = read_sidecar(file_sidecar_path(src))
+        self.assertIsNotNone(data2)
+        assert data2 is not None
+        self.assertEqual(data2.fingerprint.model, "placeholder-v2")
+        self.assertEqual(fp_path.read_text(encoding="utf-8").strip(), "placeholder-v2")
+        self.assertTrue(any("модель сменилась" in m for m in stats.messages))
+
+    def test_no_rebuild_when_model_unchanged(self):
+        """Та же модель и полный проход — вторая итерация простаивает."""
+        self._file("books/one.md", "стабильный текст")
+        fp_path = self.data / "embed_fingerprint.json"
+        worker = EmbedWorker(
+            self.store,
+            self.textstore,
+            self.embedder,
+            virtual_dir=self.virtual,
+            fingerprint_path=fp_path,
+        )
+        worker.run_once()
+        stats = worker.run_once()
+        self.assertEqual((stats.docs, stats.skipped, stats.errors), (0, 0, 0))
+        self.assertFalse(any("модель сменилась" in m for m in stats.messages))
+        self.assertEqual(fp_path.read_text(encoding="utf-8").strip(), "placeholder-v1")
+
 
 if __name__ == "__main__":
     unittest.main()

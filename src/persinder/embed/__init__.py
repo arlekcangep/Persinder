@@ -1,6 +1,7 @@
 """Модуль 2: эмбеддинги — очередь → векторы → сайдкары."""
 
 from .models import ChunkParams, EmbedFingerprint, EmbedStats
+from .onnx import OnnxEmbedder
 from .service import EmbedWorker, PlaceholderEmbedder
 from .sidecar import (
     SidecarChunk,
@@ -14,6 +15,7 @@ from .sidecar import (
 __all__ = [
     "EmbedWorker",
     "PlaceholderEmbedder",
+    "OnnxEmbedder",
     "EmbedFingerprint",
     "ChunkParams",
     "EmbedStats",
