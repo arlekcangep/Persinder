@@ -32,3 +32,19 @@ class IngestResult:
     document_id: str | None = None
     chunks: int = 0
     message: str | None = None
+
+
+@dataclass(frozen=True)
+class RemoveResult:
+    """Итог удаления источника: был ли он и вычищен ли документ целиком."""
+
+    found: bool
+    document_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RecoveryStats:
+    """Итог восстановления по журналу: сколько брошенных текстов убрано."""
+
+    checked: int = 0
+    removed: int = 0

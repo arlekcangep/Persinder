@@ -11,8 +11,8 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from .domain import Chunk, Document, EmbeddingJob
-    from .ingest.models import IngestRequest, IngestResult
+    from .domain import Area, Chunk, Document, EmbeddingJob
+    from .ingest.models import IngestRequest, IngestResult, RemoveResult
     from .search.models import SearchQuery, SearchResult
     from .store.models import EmbeddingQueueItem, MorphHit, StoreCounts
 
@@ -38,14 +38,6 @@ class TextStore(Protocol):
 
     def exists(self, key: str) -> bool: ...
 
-    def keys(self) -> list[str]:
-        """Ключи сохранённых текстов."""
-        ...
-
-    def mtime(self, key: str) -> float | None:
-        """Время последней записи текста (секунды UTC) или None, если нет."""
-        ...
-
     def delete(self, key: str) -> None: ...
 
 
@@ -55,13 +47,13 @@ class MetaStore(Protocol):
 
     def find_document_by_hash(self, content_hash: str) -> str | None: ...
 
-    def add_source(self, doc_id: str, area: str, filename: str) -> None: ...
+    def add_source(self, doc_id: str, area: str, filename: str) -> list[str]:
+        """Закрепить источник; вернуть id вытесненных документов."""
+        ...
 
     def has_source(self, area: str, filename: str) -> bool: ...
 
-    def text_keys(self) -> list[str]:
-        """Ключи сырого текста, на которые ссылаются документы."""
-        ...
+    def source_document(self, area: str, filename: str) -> str | None: ...
 
     def remove_source(self, area: str, filename: str) -> str | None: ...
 
@@ -74,7 +66,9 @@ class MetaStore(Protocol):
         filename: str,
         chunks: list[Chunk],
         jobs: list[EmbeddingJob],
-    ) -> None: ...
+    ) -> list[str]:
+        """Записать документ; вернуть id вытесненных документов."""
+        ...
 
     def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]: ...
 
@@ -90,6 +84,10 @@ class Ingest(Protocol):
     """Сервис приёма текста и метаданных."""
 
     def ingest(self, request: IngestRequest) -> IngestResult: ...
+
+    def remove_source(self, area: Area, filename: str) -> RemoveResult:
+        """Убрать источник и его сырой текст, если документ вычищен целиком."""
+        ...
 
 
 @runtime_checkable

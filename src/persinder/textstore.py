@@ -36,17 +36,6 @@ class FsTextStore:
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
 
-    def keys(self) -> list[str]:
-        """Ключи сохранённых текстов (без служебных ``*.tmp``)."""
-        return sorted(path.stem for path in self._root.glob("*.txt"))
-
-    def mtime(self, key: str) -> float | None:
-        """Время последней записи текста (секунды UTC) или None, если файла нет."""
-        try:
-            return self._path(key).stat().st_mtime
-        except FileNotFoundError:
-            return None
-
     def delete(self, key: str) -> None:
         path = self._path(key)
         if path.exists():

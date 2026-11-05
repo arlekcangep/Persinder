@@ -139,13 +139,14 @@ class SqliteStore:
 
     # --- запись ---
 
-    def _bind_source(self, doc_id: str, area: str, filename: str) -> None:
+    def _bind_source(self, doc_id: str, area: str, filename: str) -> list[str]:
         """Закрепить ``(area, filename)`` за ``doc_id``, вытеснив прежний документ.
 
         У файла один источник: если за ``(area, filename)`` был закреплён
         другой документ (файл изменился), связь снимается, а сам документ
-        вычищается, если у него не осталось других источников. Нужен открытый
-        ``with`` (вызывается внутри транзакции).
+        вычищается, если у него не осталось других источников. Возвращает id
+        вычищенных документов — по ним вызывающий удаляет сырой текст. Нужен
+        открытый ``with`` (вызывается внутри транзакции).
         """
         stale = self._conn.execute(
             "SELECT DISTINCT doc_id FROM document_sources"
@@ -157,6 +158,7 @@ class SqliteStore:
             " WHERE area = ? AND filename = ? AND doc_id != ?",
             (area, filename, doc_id),
         )
+        evicted: list[str] = []
         for row in stale:
             old_id = str(row["doc_id"])
             left = self._conn.execute(
@@ -164,16 +166,18 @@ class SqliteStore:
             ).fetchone()[0]
             if int(left) == 0:
                 self._purge_document(old_id)
+                evicted.append(old_id)
         self._conn.execute(
             "INSERT OR IGNORE INTO document_sources"
             "(doc_id, area, filename, created_at) VALUES (?, ?, ?, ?)",
             (doc_id, area, filename, utcnow()),
         )
+        return evicted
 
-    def add_source(self, doc_id: str, area: str, filename: str) -> None:
-        """Закрепить источник за документом; прежний документ файла вытесняется."""
+    def add_source(self, doc_id: str, area: str, filename: str) -> list[str]:
+        """Закрепить источник; вернуть id вытесненных документов (для чистки текста)."""
         with self._lock, self._conn:
-            self._bind_source(doc_id, area, filename)
+            return self._bind_source(doc_id, area, filename)
 
     def has_source(self, area: str, filename: str) -> bool:
         """Есть ли в индексе источник ``(area, filename)``."""
@@ -185,13 +189,15 @@ class SqliteStore:
             ).fetchone()
         return row is not None
 
-    def text_keys(self) -> list[str]:
-        """Ключи сырого текста, на которые ссылается хотя бы один документ."""
+    def source_document(self, area: str, filename: str) -> str | None:
+        """id документа, закреплённого за источником ``(area, filename)``."""
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT DISTINCT text_key FROM documents"
-            ).fetchall()
-        return [str(row["text_key"]) for row in rows]
+            row = self._conn.execute(
+                "SELECT doc_id FROM document_sources"
+                " WHERE area = ? AND filename = ? LIMIT 1",
+                (area, filename),
+            ).fetchone()
+        return str(row["doc_id"]) if row else None
 
     def _purge_document(self, doc_id: str) -> None:
         """Удалить документ и все производные строки (нужен открытый `with`)."""
@@ -240,11 +246,12 @@ class SqliteStore:
         filename: str,
         chunks: list[Chunk],
         jobs: list[EmbeddingJob],
-    ) -> None:
+    ) -> list[str]:
         """Атомарно записать документ, источник, чанки (с FTS5) и очередь.
 
         Прежний документ того же файла ``(area, filename)`` вытесняется
-        (см. ``_bind_source``).
+        (см. ``_bind_source``). Возвращает id вытесненных документов, чтобы
+        вызывающий удалил их сырой текст.
         """
         with self._lock, self._conn:
             self._conn.execute(
@@ -260,7 +267,7 @@ class SqliteStore:
                     doc.created_at,
                 ),
             )
-            self._bind_source(doc.id, area, filename)
+            evicted = self._bind_source(doc.id, area, filename)
             for chunk in chunks:
                 cur = self._conn.execute(
                     "INSERT INTO chunks(doc_id, chunk_index, char_start, char_end) "
@@ -278,6 +285,7 @@ class SqliteStore:
                 "VALUES (?, ?, ?, 'pending', ?)",
                 [(j.doc_id, j.chunk_index, j.area, j.created_at) for j in jobs],
             )
+        return evicted
 
     def close(self) -> None:
         with self._lock:

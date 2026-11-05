@@ -22,9 +22,8 @@
 | `interfaces` | протоколы/порты (Stemmer, TextStore, MetaStore…) | реализован |
 | `morphology` | нормализация, токенизация, стемминг | реализован |
 | `textstore` | временное хранение сырого текста | реализован |
-| `gc` | сборка сирот: сырой текст без документа | реализован |
 | `store` | пакет: `models` (модели БД) + `sqlite` (SQLite: документы, FTS5, очередь) | реализован |
-| `ingest` | пакет: `models` (вход/выход) + `service` (морфоиндекс + очередь) | реализован |
+| `ingest` | пакет: `models` (вход/выход) + `service` (морфоиндекс + очередь + удаление) + `journal` (журнал вызовов) | реализован |
 | `api` | пакет: `models` (DTO) + `http` (HTTP-обёртка над `ingest`) | реализован |
 | `embed` | воркер: разбор очереди, векторы, сайдкары | заглушка |
 | `vectorindex` | USearch-сегменты (шардинг, swap) | заглушка |
@@ -44,14 +43,12 @@ src/persinder/
     models.py        # Area, Document, Chunk, EmbeddingJob — ядро, без зависимостей
     clock.py         # utcnow()
   ingest/
-    models.py        # IngestRequest, IngestResult — внутренние модели сервиса
+    models.py        # IngestRequest, IngestResult, RemoveResult, RecoveryStats
     service.py       # IngestService, chunk_text
+    journal.py       # журнал вызовов ingest (JSONL) + восстановление (D23)
   store/
     models.py        # MorphHit, EmbeddingQueueItem, StoreCounts — модели БД
     sqlite.py        # SqliteStore
-  gc/
-    models.py        # GcStats — результат сборки сирот
-    service.py       # collect_orphans: сырой текст без документа (D22)
   api/
     models.py        # IngestPayload, IngestResponse, PayloadError — DTO транспорта
     http.py          # IngestHTTPServer, make_server, serve
@@ -128,6 +125,8 @@ src/persinder/
 ```python
 class IngestService:
     def ingest(self, request: IngestRequest) -> IngestResult: ...
+    def remove_source(self, area: Area, filename: str) -> RemoveResult: ...
+    def recover(self) -> RecoveryStats: ...
 
 class Stemmer(Protocol):
     name: str
@@ -137,16 +136,20 @@ class TextStore(Protocol):
     def put(self, key: str, text: str) -> str: ...
     def read(self, key: str) -> str: ...
     def exists(self, key: str) -> bool: ...
-    def keys(self) -> list[str]: ...
-    def mtime(self, key: str) -> float | None: ...
     def delete(self, key: str) -> None: ...
 
 class MetaStore(Protocol):
     def find_document_by_hash(self, content_hash: str) -> str | None: ...
-    def save_document(self, doc, source, chunks, jobs) -> None: ...
+    def add_source(self, doc_id, area, filename) -> list[str]: ...      # вытесненные
+    def source_document(self, area: str, filename: str) -> str | None: ...
+    def remove_source(self, area: str, filename: str) -> str | None: ...
+    def save_document(self, doc, source, chunks, jobs) -> list[str]: ...  # вытесненные
     def search_morph(self, stemmed_query: str, limit: int) -> list[dict]: ...
-    def text_keys(self) -> list[str]: ...
 ```
+
+Сервис `ingest` — единственная точка доступа к БД и хранилищу текста: правка и
+удаление возвращают вытесненные документы, и их сырой текст удаляется **тут же**
+(D22). Брошенное крахом подчищает `recover()` по журналу вызовов (D23).
 
 ## Примечание о HTTP-сервисе и ресурсах
 

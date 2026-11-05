@@ -304,9 +304,7 @@ class JournalPipelineTest(unittest.TestCase):
             (MarkdownExtractor(), TextExtractor(), _BoomExtractor())
         )
         self.journal = Journal(self.data / "journal.jsonl")
-        self.pipeline = IndexingPipeline(
-            ingest, registry, metastore=self.store, journal=self.journal
-        )
+        self.pipeline = IndexingPipeline(ingest, registry, journal=self.journal)
         self.scanner = AreaScanner(WatchConfig(debounce=0.0))
         self._snaps: dict[Path, AreaScan] = {}
 
@@ -414,9 +412,7 @@ class JournalWatcherTest(unittest.TestCase):
         )
         registry = ExtractorRegistry((MarkdownExtractor(), TextExtractor()))
         journal = Journal(self.journal_path)
-        pipeline = IndexingPipeline(
-            ingest, registry, metastore=self.store, journal=journal
-        )
+        pipeline = IndexingPipeline(ingest, registry, journal=journal)
         seen: list[str] = []
 
         def on_events(result: ScanResult) -> None:

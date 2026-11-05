@@ -38,21 +38,6 @@ class FsTextStoreTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.put("../escape", "x")
 
-    def test_keys_and_mtime(self):
-        self.assertEqual(self.store.keys(), [])
-        self.store.put("b", "два")
-        self.store.put("a", "один")
-        self.assertEqual(self.store.keys(), ["a", "b"])
-        self.assertIsNone(self.store.mtime("nope"))
-        self.assertIsInstance(self.store.mtime("a"), float)
-        self.store.delete("a")
-        self.assertEqual(self.store.keys(), ["b"])
-
-    def test_keys_ignore_tmp(self):
-        self.store.put("a", "текст")
-        (self._root / "b.txt.tmp").write_text("недописанное", encoding="utf-8")
-        self.assertEqual(self.store.keys(), ["a"])
-
 
 if __name__ == "__main__":
     unittest.main()

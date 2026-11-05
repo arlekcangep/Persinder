@@ -4,6 +4,9 @@
 прогоняет через реестр экстракторов (с учётом форматов области) и отдаёт
 текст в ``IngestService``. Каждый переход пишется в ``Journal`` — он же
 служит состоянием watcher'а (D21).
+
+В БД конвейер напрямую не ходит: и приём, и удаление — операции
+``IngestService`` (единая точка доступа к хранилищам).
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import dataclasses
 from dataclasses import dataclass
 
 from ..ingest import IngestRequest, IngestResult
-from ..interfaces import Ingest, MetaStore
+from ..interfaces import Ingest
 from .extract import ExtractorRegistry
 from .journal import Journal, JournalEvent
 from .models import AreaConfig, ChangeEvent, ChangeKind, ScanResult
@@ -38,14 +41,10 @@ class IndexingPipeline:
         self,
         ingest: Ingest,
         registry: ExtractorRegistry,
-        metastore: MetaStore | None = None,
         journal: Journal | None = None,
     ) -> None:
         self._ingest = ingest
         self._registry = registry
-        # Metastore нужен для чистки индекса при удалении, журнал — для
-        # фиксации переходов; оба опциональны (тесты, отдельные сценарии).
-        self._metastore = metastore
         self._journal = journal
 
     def _record(
@@ -70,13 +69,10 @@ class IndexingPipeline:
 
     def _remove_source(self, area: AreaConfig, rel_path: str) -> str:
         """Убрать источник удалённого файла (D13); деталь — для журнала."""
-        if self._metastore is None:
-            return "индекс не чистился: метастор недоступен"
-        had_source = self._metastore.has_source(area.role.value, rel_path)
-        purged = self._metastore.remove_source(area.role.value, rel_path)
-        if purged is not None:
-            return f"документ {purged} удалён из индекса"
-        if had_source:
+        result = self._ingest.remove_source(area.role, rel_path)
+        if result.document_id is not None:
+            return f"документ {result.document_id} удалён из индекса"
+        if result.found:
             return "источник убран, документ сохранён (есть другие источники)"
         return "источника в индексе не было"
 

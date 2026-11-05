@@ -19,6 +19,7 @@ from typing import Any
 from persinder.__main__ import build_service
 from persinder.api import make_server
 from persinder.config import Settings
+from persinder.domain import Area
 from persinder.store import SqliteStore
 
 TEXT = (
@@ -110,10 +111,12 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(old_hits, [])
         new_hits = self._get("/search?q=" + urllib.parse.quote("флакс"))["hits"]
         self.assertEqual(new_hits[0]["document_id"], second)
+        # у вытесненного старого документа удалён и сырой текст
+        self.assertEqual(len(list((self.data_dir / "pending_texts").iterdir())), 1)
 
     def test_deletion_through_pipeline(self):
-        # Индексируем через HTTP, затем удаляем источник напрямую через
-        # metastore — как это делает watcher при DELETED-событии.
+        # Индексируем через HTTP, затем удаляем источник через ingest-сервис —
+        # как это делает watcher при DELETED-событии.
         with self._post(
             "/ingest",
             {"filename": "note.md", "area": "personal", "text": TEXT},
@@ -122,9 +125,11 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(
             self.store.counts()["documents"], 1, "документ проиндексирован"
         )
-        removed = self.store.remove_source("personal", "note.md")
-        self.assertEqual(removed, doc_id)
+        result = self.ingest.remove_source(Area.PERSONAL, "note.md")
+        self.assertEqual(result.document_id, doc_id)
         self.assertEqual(self.store.counts()["documents"], 0)
+        # сырой текст удалён вместе с документом
+        self.assertEqual(list((self.data_dir / "pending_texts").iterdir()), [])
 
         with self._post(
             "/ingest", {"filename": "note.md", "area": "personal", "text": TEXT}

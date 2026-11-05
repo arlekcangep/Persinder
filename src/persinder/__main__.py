@@ -8,8 +8,7 @@ from pathlib import Path
 
 from .api import serve
 from .config import Settings
-from .gc import GcStats, collect_orphans
-from .ingest import IngestService
+from .ingest import IngestJournal, IngestService, RecoveryStats
 from .morphology import default_stemmer
 from .search import SearchService
 from .sources import (
@@ -38,6 +37,7 @@ def build_service(
         stemmer=stemmer,
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
+        journal=IngestJournal(settings.data_dir / "ingest.jsonl"),
     )
     search = SearchService(store=store, stemmer=stemmer)
     return ingest, search, store
@@ -58,12 +58,10 @@ def run_watch(config_path: Path, data_dir: Path | None) -> int:
             f"Журнал: обрезано старых записей: {dropped} "
             f"(старше {JOURNAL_RETENTION_DAYS} дней)"
         )
-    pipeline = IndexingPipeline(ingest, registry, metastore=store, journal=journal)
-
-    textstore = FsTextStore(settings.text_dir)
-    gc_stats = collect_orphans(store, textstore)
-    if gc_stats.removed or gc_stats.missing:
-        print(format_gc(gc_stats))
+    recovery = ingest.recover()
+    if recovery.removed:
+        print(format_recovery(recovery))
+    pipeline = IndexingPipeline(ingest, registry, journal=journal)
 
     print(f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с")
     watcher = Watcher(
@@ -90,28 +88,12 @@ def print_stats(stats: object) -> None:
     print(stats)
 
 
-def format_gc(stats: GcStats) -> str:
-    """Человекочитаемый отчёт сборки сирот (оформление — на слое CLI)."""
+def format_recovery(stats: RecoveryStats) -> str:
+    """Человекочитаемый отчёт восстановления (оформление — на слое CLI)."""
     return (
-        f"GC: проверено текстов {stats.scanned}, "
-        f"удалено сирот {stats.removed}, "
-        f"документов без текста {stats.missing}"
+        f"Ingest: проверено незавершённых вызовов {stats.checked}, "
+        f"убрано брошенных текстов {stats.removed}"
     )
-
-
-def run_gc(data_dir: Path | None) -> int:
-    """Удалить сырой текст, оставшийся без документа (сироты)."""
-    settings = Settings.default()
-    if data_dir:
-        settings = replace(settings, data_dir=data_dir)
-    settings.ensure()
-    store = SqliteStore(settings.db_path)
-    textstore = FsTextStore(settings.text_dir)
-    try:
-        print(format_gc(collect_orphans(store, textstore)))
-    finally:
-        store.close()
-    return 0
 
 
 def _wait_forever() -> None:
@@ -136,9 +118,6 @@ def main(argv: list[str] | None = None) -> int:
     watch_p.add_argument("--config", type=Path, required=True, help="YAML-конфиг")
     watch_p.add_argument("--data-dir", type=Path, default=None)
 
-    gc_p = sub.add_parser("gc", help="удалить сырой текст без документа (сирот)")
-    gc_p.add_argument("--data-dir", type=Path, default=None)
-
     # Совместимость: без подкоманды — serve с флагами.
     parser.add_argument("--data-dir", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--host", default=None, help=argparse.SUPPRESS)
@@ -147,8 +126,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "watch":
         return run_watch(args.config, args.data_dir)
-    if args.command == "gc":
-        return run_gc(args.data_dir)
     if args.command == "serve" or args.command is None:
         return _serve_main(parser, args)
     parser.print_help()
@@ -165,6 +142,9 @@ def _serve_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
         settings = replace(settings, port=args.port)
 
     ingest, search, store = build_service(settings)
+    recovery = ingest.recover()
+    if recovery.removed:
+        print(format_recovery(recovery))
     print(f"Persinder слушает http://{settings.host}:{settings.port}")
     try:
         serve(ingest, search, settings.host, settings.port)

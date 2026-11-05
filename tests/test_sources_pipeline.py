@@ -39,14 +39,11 @@ class PipelineTest(unittest.TestCase):
         self.area.path.mkdir(parents=True)
         self.data.mkdir(parents=True)
         self.store = SqliteStore(self.data / "db.sqlite")
-        ingest = IngestService(
-            self.store, FsTextStore(self.data / "texts"), NoopStemmer()
-        )
+        self.texts = self.data / "texts"
+        ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
         registry = ExtractorRegistry((MarkdownExtractor(), TextExtractor()))
         self.journal = Journal(self.data / "journal.jsonl")
-        self.pipeline = IndexingPipeline(
-            ingest, registry, metastore=self.store, journal=self.journal
-        )
+        self.pipeline = IndexingPipeline(ingest, registry, journal=self.journal)
         self.scanner = AreaScanner(WatchConfig(debounce=0.0))
 
     def tearDown(self):
@@ -57,6 +54,9 @@ class PipelineTest(unittest.TestCase):
         path = self.area.path / name
         path.write_text(text, encoding="utf-8")
         return path
+
+    def _texts(self) -> list[str]:
+        return sorted(p.name for p in self.texts.glob("*.txt"))
 
     def _scan(self, area: AreaConfig | None = None) -> ScanResult:
         area = area or self.area
@@ -97,6 +97,7 @@ class PipelineTest(unittest.TestCase):
         self._write("note.md", "уникальный текст для удаления")
         self.pipeline.process(self._scan())
         self.assertEqual(self.store.counts()["documents"], 1)
+        self.assertEqual(len(self._texts()), 1)
         (self.area.path / "note.md").unlink()
         stats = self.pipeline.process(self._scan())
         self.assertEqual(stats.deleted, 1)
@@ -104,6 +105,17 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(counts["documents"], 0)
         self.assertEqual(counts["chunks"], 0)
         self.assertEqual(counts["pending_embeddings"], 0)
+        self.assertEqual(self._texts(), [])  # сырой текст убран вместе с документом
+
+    def test_modified_removes_old_text(self):
+        self._write("note.md", "версия номер один")
+        self.pipeline.process(self._scan())
+        self.assertEqual(len(self._texts()), 1)
+        time.sleep(0.01)
+        self._write("note.md", "версия номер два")
+        self.pipeline.process(self._scan())
+        self.assertEqual(self.store.counts()["documents"], 1)
+        self.assertEqual(len(self._texts()), 1)  # старый текст вытеснен
 
     def test_deleted_source_keeps_shared_document(self):
         # Один и тот же текст в двух файлах: один источник убрали —

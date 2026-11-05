@@ -47,9 +47,6 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 # запуск сервиса приёма (модуль 1)
 PYTHONPATH=src python3 -m persinder --data-dir ~/.persinder --port 8756
 
-# сборка сирот: удалить сырой текст, оставшийся без документа
-PYTHONPATH=src python3 -m persinder gc --data-dir ~/.persinder
-
 # проверка
 curl -s localhost:8756/health
 curl -s -X POST localhost:8756/ingest \
