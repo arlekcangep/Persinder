@@ -25,6 +25,16 @@ class EmbeddingQueueItem(TypedDict):
     chunk_index: int
     area: str
     source_path: str  # пусто — виртуальный элемент (нет файла на диске)
+    model: str  # модель, чей вектор считается (сайдкар на модель)
+
+
+class SourceRow(TypedDict):
+    """Источник: для удаления сайдкаров модели (D24)."""
+
+    doc_id: str
+    area: str
+    filename: str
+    source_path: str
 
 
 class StoreCounts(TypedDict):

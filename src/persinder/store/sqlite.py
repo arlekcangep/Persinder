@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 
 from ..domain import Chunk, Document, EmbeddingJob, utcnow
-from .models import EmbeddingQueueItem, MorphHit, StoreCounts
+from .models import EmbeddingQueueItem, MorphHit, SourceRow, StoreCounts
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -55,9 +55,10 @@ CREATE TABLE IF NOT EXISTS embedding_queue (
     chunk_index INTEGER NOT NULL,
     area        TEXT NOT NULL,
     source_path TEXT NOT NULL DEFAULT '',
+    model       TEXT NOT NULL DEFAULT 'placeholder-v1',
     status      TEXT NOT NULL DEFAULT 'pending',
     created_at  TEXT NOT NULL,
-    UNIQUE(doc_id, chunk_index, source_path)
+    UNIQUE(doc_id, chunk_index, source_path, model)
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -95,6 +96,43 @@ class SqliteStore:
                 self._conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
+        self._migrate_queue_model()
+
+    def _migrate_queue_model(self) -> None:
+        """Очередь теперь модельная (колонка ``model`` + новый UNIQUE).
+
+        Старая UNIQUE была ``(doc_id, chunk_index, source_path)`` — без модели
+        сайдкары разных моделей конфликтовали бы. Таблица пересоздаётся,
+        существующие задачи считаются моделью ``placeholder-v1``.
+        """
+        cols = [
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(embedding_queue)")
+        ]
+        if "model" in cols:
+            return
+        self._conn.executescript(
+            """
+            ALTER TABLE embedding_queue RENAME TO embedding_queue_old;
+            CREATE TABLE embedding_queue (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id      TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                area        TEXT NOT NULL,
+                source_path TEXT NOT NULL DEFAULT '',
+                model       TEXT NOT NULL DEFAULT 'placeholder-v1',
+                status      TEXT NOT NULL DEFAULT 'pending',
+                created_at  TEXT NOT NULL,
+                UNIQUE(doc_id, chunk_index, source_path, model)
+            );
+            INSERT INTO embedding_queue
+                (id, doc_id, chunk_index, area, source_path, model, status, created_at)
+            SELECT id, doc_id, chunk_index, area, source_path, 'placeholder-v1',
+                   status, created_at
+              FROM embedding_queue_old;
+            DROP TABLE embedding_queue_old;
+            """
+        )
 
     # --- чтение ---
 
@@ -125,7 +163,7 @@ class SqliteStore:
     def pending_embeddings(self, limit: int = 100) -> list[EmbeddingQueueItem]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, doc_id, chunk_index, area, source_path "
+                "SELECT id, doc_id, chunk_index, area, source_path, model "
                 "FROM embedding_queue WHERE status = 'pending' "
                 "ORDER BY id LIMIT ?",
                 (limit,),
@@ -139,7 +177,7 @@ class SqliteStore:
         placeholders = ",".join("?" for _ in doc_ids)
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT id, doc_id, chunk_index, area, source_path "
+                f"SELECT id, doc_id, chunk_index, area, source_path, model "
                 f"FROM embedding_queue WHERE status = 'pending' "
                 f"AND doc_id IN ({placeholders}) ORDER BY id",
                 doc_ids,
@@ -156,6 +194,11 @@ class SqliteStore:
                 f"DELETE FROM embedding_queue WHERE id IN ({placeholders})", ids
             )
 
+    def drop_queue_model(self, model: str) -> None:
+        """Убрать задачи модели из очереди (модель удалена)."""
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM embedding_queue WHERE model = ?", (model,))
+
     @staticmethod
     def _queue_item(row: sqlite3.Row) -> EmbeddingQueueItem:
         return EmbeddingQueueItem(
@@ -164,6 +207,7 @@ class SqliteStore:
             chunk_index=int(row["chunk_index"]),
             area=str(row["area"]),
             source_path=str(row["source_path"]),
+            model=str(row["model"]),
         )
 
     def counts(self) -> StoreCounts:
@@ -341,53 +385,88 @@ class SqliteStore:
                 )
             self._conn.executemany(
                 "INSERT OR IGNORE INTO embedding_queue"
-                "(doc_id, chunk_index, area, source_path, status, created_at) "
-                "VALUES (?, ?, ?, ?, 'pending', ?)",
+                "(doc_id, chunk_index, area, source_path, model, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
                 [
-                    (j.doc_id, j.chunk_index, j.area, j.source_path, j.created_at)
+                    (
+                        j.doc_id,
+                        j.chunk_index,
+                        j.area,
+                        j.source_path,
+                        j.model,
+                        j.created_at,
+                    )
                     for j in jobs
                 ],
             )
         return evicted
 
-    def enqueue_document(self, doc_id: str, area: str, source_path: str = "") -> None:
+    def enqueue_document(
+        self,
+        doc_id: str,
+        area: str,
+        source_path: str = "",
+        models: list[str] | None = None,
+    ) -> None:
         """Поставить задачи для уже проиндексированного документа (дубликат).
 
         Документ повторяется в другом источнике: строки с ``(doc_id, chunk)``
-        уже были, но у нового источника свой сайдкар — ставим его задачи.
+        уже были, но у нового источника свой сайдкар — ставим его задачи под
+        каждой из ``models`` (по умолчанию — placeholder-v1).
         """
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO embedding_queue"
-                "(doc_id, chunk_index, area, source_path, status, created_at) "
-                "SELECT doc_id, chunk_index, ?, ?, 'pending', ?"
-                " FROM chunks WHERE doc_id = ?",
-                (area, source_path, utcnow(), doc_id),
-            )
-
-    def enqueue_all(self) -> None:
-        """Поставить задачи для всех источников (полный пересчёт).
-
-        Нужно при смене модели эмбеддингов: отпечаток изменился — старые
-        сайдкары непригодны, пересчитываем каждый источник.
-        """
-        with self._lock, self._conn:
-            rows = self._conn.execute(
-                "SELECT DISTINCT doc_id, area, source_path FROM document_sources"
-            ).fetchall()
-            for row in rows:
+        for model in models or ["placeholder-v1"]:
+            with self._lock, self._conn:
                 self._conn.execute(
                     "INSERT OR IGNORE INTO embedding_queue"
-                    "(doc_id, chunk_index, area, source_path, status, created_at) "
-                    "SELECT doc_id, chunk_index, ?, ?, 'pending', ?"
+                    "(doc_id, chunk_index, area, source_path, model, "
+                    "status, created_at) "
+                    "SELECT doc_id, chunk_index, ?, ?, ?, 'pending', ?"
                     " FROM chunks WHERE doc_id = ?",
-                    (
-                        str(row["area"]),
-                        str(row["source_path"]),
-                        utcnow(),
-                        str(row["doc_id"]),
-                    ),
+                    (area, source_path, model, utcnow(), doc_id),
                 )
+
+    def enqueue_all(self, models: list[str]) -> None:
+        """Поставить задачи для всех источников под указанными моделями.
+
+        Нужно при установке новой модели (миграция): по ней пересчитываются
+        все существующие источники — пакетами, обычными запусками embed.
+        """
+        for model in models:
+            with self._lock, self._conn:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT doc_id, area, source_path FROM document_sources"
+                ).fetchall()
+                for row in rows:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO embedding_queue"
+                        "(doc_id, chunk_index, area, source_path, model, "
+                        "status, created_at) "
+                        "SELECT doc_id, chunk_index, ?, ?, ?, 'pending', ?"
+                        " FROM chunks WHERE doc_id = ?",
+                        (
+                            str(row["area"]),
+                            str(row["source_path"]),
+                            model,
+                            utcnow(),
+                            str(row["doc_id"]),
+                        ),
+                    )
+
+    def all_sources(self) -> list[SourceRow]:
+        """Все источники (для удаления сайдкаров модели)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT doc_id, area, filename, source_path FROM document_sources"
+            ).fetchall()
+        return [
+            SourceRow(
+                doc_id=str(row["doc_id"]),
+                area=str(row["area"]),
+                filename=str(row["filename"]),
+                source_path=str(row["source_path"]),
+            )
+            for row in rows
+        ]
 
     def close(self) -> None:
         with self._lock:

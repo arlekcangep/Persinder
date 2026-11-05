@@ -1,9 +1,10 @@
 """Реальный эмбеддер на ONNX: multilingual-e5-small (INT8).
 
 Адаптер за портом ``Embedder`` (см. ``interfaces.py``). Модель и токенизатор
-берутся из локального каталога (см. ``scripts/download_model.py`` и
-``Settings.model_dir``) — скачиваются один раз, вне репозитория; на Windows
-работает так же, Docker не нужен.
+берутся из подпапки ``<модель>/`` глобального каталога моделей
+(``~/.persinder/models/<ключ>/``, см. ``Settings.models_dir`` и реестр
+``embed/registry.py``) — скачиваются один раз, вне репозитория, командой
+``persinder model install``; на Windows работает так же, Docker не нужен.
 
 Требования модели e5 (см. §12.1 архитектуры): к тексту приписывается
 ``passage:`` (к запросу — ``query:``, это понадобится на слое поиска).
@@ -37,7 +38,7 @@ class OnnxEmbedder:
         if not model_path.is_file():
             raise FileNotFoundError(
                 f"модель не найдена: {model_path}\n"
-                "скачай её: python scripts/download_model.py"
+                "скачай её: persinder model install e5-small-int8-v1"
             )
         self._session: Any = onnxruntime.InferenceSession(
             str(model_path), providers=["CPUExecutionProvider"]

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from .domain import Area, Chunk, Document, EmbeddingJob
     from .ingest.models import IngestRequest, IngestResult, RemoveResult
     from .search.models import SearchQuery, SearchResult
-    from .store.models import EmbeddingQueueItem, MorphHit, StoreCounts
+    from .store.models import EmbeddingQueueItem, MorphHit, SourceRow, StoreCounts
 
 
 @runtime_checkable
@@ -90,14 +90,28 @@ class MetaStore(Protocol):
         """Записать документ; вернуть id вытесненных документов."""
         ...
 
-    def enqueue_document(self, doc_id: str, area: str, source_path: str = "") -> None:
+    def enqueue_document(
+        self,
+        doc_id: str,
+        area: str,
+        source_path: str = "",
+        models: list[str] | None = None,
+    ) -> None:
         """Поставить задачи на эмбеддинги для уже проиндексированного документа
-        (дубликат с другим источником — сайдкар нужен и ему)."""
+        (дубликат с другим источником — сайдкар нужен и ему, под каждой моделью)."""
         ...
 
-    def enqueue_all(self) -> None:
-        """Поставить задачи на эмбеддинги для всех источников
-        (смена модели — пересчёт старых сайдкаров)."""
+    def enqueue_all(self, models: list[str]) -> None:
+        """Поставить задачи на эмбеддинги для всех источников под моделями
+        (установка новой модели — миграция, D24)."""
+        ...
+
+    def drop_queue_model(self, model: str) -> None:
+        """Убрать задачи модели из очереди (модель удалена)."""
+        ...
+
+    def all_sources(self) -> list[SourceRow]:
+        """Все источники (для удаления сайдкаров модели)."""
         ...
 
     def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]: ...

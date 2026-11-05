@@ -36,17 +36,22 @@ class Settings:
         return self.data_dir / "virtual"
 
     @property
-    def model_dir(self) -> Path:
-        """Каталог скачанной модели эмбеддингов (глобальный кэш).
+    def models_dir(self) -> Path:
+        """Глобальный каталог моделей эмбеддингов (корень, не отдельная модель).
 
-        По умолчанию ``~/.persinder/models/e5-small`` — общий для всех
-        профилей; переопределяется переменной окружения
-        ``PERSINDER_MODEL_DIR`` (модель скачивает ``scripts/download_model.py``).
+        Каждая модель — своя подпапка ``<models_dir>/<ключ>/`` (веса +
+        токенизатор). По умолчанию ``~/.persinder/models`` — общий для всех
+        профилей; переопределяется переменной окружения ``PERSINDER_MODEL_DIR``.
         """
         env = os.environ.get("PERSINDER_MODEL_DIR")
         if env:
             return Path(env)
-        return Path.home() / ".persinder" / "models" / "e5-small"
+        return Path.home() / ".persinder" / "models"
+
+    @property
+    def models_state_path(self) -> Path:
+        """Файл активных моделей профиля (``embedding``/``search``, D24)."""
+        return self.data_dir / "models.json"
 
     def ensure(self) -> Settings:
         """Создать каталоги, если их нет."""

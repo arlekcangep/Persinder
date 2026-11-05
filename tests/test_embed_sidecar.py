@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from persinder.embed import (
     ChunkParams,
     EmbedFingerprint,
+    delete_model_sidecars,
     file_sidecar_path,
     read_sidecar,
     virtual_sidecar_path,
@@ -92,13 +93,35 @@ class SidecarTest(unittest.TestCase):
 
     def test_path_derivation(self):
         self.assertEqual(
-            file_sidecar_path("/vault/books/deep.pdf"),
-            Path("/vault/books/.persinder/deep.pdf.pdr"),
+            file_sidecar_path("/vault/books/deep.pdf", "placeholder-v1"),
+            Path("/vault/books/.persinder/placeholder-v1/deep.pdf.pdr"),
         )
         self.assertEqual(
-            virtual_sidecar_path("/data/virtual", "abc123"),
-            Path("/data/virtual/abc123.pdr"),
+            virtual_sidecar_path("/data/virtual", "abc123", "placeholder-v1"),
+            Path("/data/virtual/placeholder-v1/abc123.pdr"),
         )
+
+    def test_delete_model_sidecars_only_that_model(self):
+        """model remove убирает сайдкары одной модели, другие не трогает (D24)."""
+        src = self.root / "vault" / "a.md"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("текст", encoding="utf-8")
+        fp = EmbedFingerprint(model="m1", dim=4, quant="f16")
+        params = ChunkParams(size=1200, overlap=200)
+        write_sidecar(file_sidecar_path(src, "m1"), fp, params, [(0, 5, [1.0] * 4)])
+        write_sidecar(file_sidecar_path(src, "m2"), fp, params, [(0, 5, [1.0] * 4)])
+        virtual = self.root / "virtual"
+        write_sidecar(
+            virtual_sidecar_path(virtual, "doc1", "m2"), fp, params, [(0, 5, [1.0] * 4)]
+        )
+
+        delete_model_sidecars(virtual, "m2", [{"source_path": str(src)}])
+
+        self.assertFalse(file_sidecar_path(src, "m2").exists())
+        self.assertTrue(file_sidecar_path(src, "m1").exists(), "чужая модель жива")
+        self.assertFalse(virtual_sidecar_path(virtual, "doc1", "m2").exists())
+        # повторное удаление не падает (файлов уже нет)
+        delete_model_sidecars(virtual, "m2", [{"source_path": str(src)}])
 
 
 if __name__ == "__main__":

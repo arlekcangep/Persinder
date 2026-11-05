@@ -10,12 +10,11 @@
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 from pathlib import Path
 
 from ..domain import Area, Chunk, Document, EmbeddingJob, chunk_text, utcnow
-from ..embed.sidecar import file_sidecar_path, virtual_sidecar_path
+from ..embed.sidecar import delete_file_sidecars, delete_virtual_sidecars
 from ..interfaces import MetaStore, Stemmer, TextStore
 from ..morphology import analyze_to_string
 from .journal import IngestEntry, IngestEvent, IngestJournal
@@ -34,6 +33,7 @@ class IngestService:
         chunk_overlap: int = 200,
         journal: IngestJournal | None = None,
         virtual_dir: Path | None = None,
+        embedding_models: tuple[str, ...] = ("placeholder-v1",),
     ) -> None:
         self._store = store
         self._textstore = textstore
@@ -43,6 +43,8 @@ class IngestService:
         self._journal = journal
         # Папка для данных, которых нет на диске: их сайдкары и сам текст.
         self._virtual_dir = virtual_dir
+        # Модели, под которыми считаем эмбеды новых/изменённых файлов (D24).
+        self._embedding_models = embedding_models
 
     # --- служебное ---
 
@@ -71,12 +73,6 @@ class IngestService:
         for doc_id in doc_ids:
             self._textstore.delete(doc_id)
 
-    @staticmethod
-    def _delete_sidecar(path: Path) -> None:
-        """Удалить сайдкар; отсутствие файла — не ошибка."""
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-
     def _drop_sidecars(
         self,
         evicted: list[str],
@@ -87,14 +83,15 @@ class IngestService:
         """Убрать сайдкары, ставшие неактуальными (D24).
 
         Источник ``(area, filename)`` перепривязан к другому документу — его
-        прежний сайдкар больше не соответствует содержимому: удаляем. Плюс
-        виртуальные сайдкары вытесненных документов (их данных на диске нет).
+        прежние сайдкары (по всем моделям) больше не соответствуют
+        содержимому: удаляем. Плюс виртуальные сайдкары вытесненных
+        документов (их данных на диске нет).
         """
         if previous is not None and previous != doc_id and source_path:
-            self._delete_sidecar(file_sidecar_path(source_path))
+            delete_file_sidecars(source_path)
         if self._virtual_dir is not None:
             for old_id in evicted:
-                self._delete_sidecar(virtual_sidecar_path(self._virtual_dir, old_id))
+                delete_virtual_sidecars(self._virtual_dir, old_id)
 
     # --- приём ---
 
@@ -132,8 +129,11 @@ class IngestService:
             )
             self._drop_texts(evicted)
             self._drop_sidecars(evicted, previous, source_path, existing)
-            # У нового источника свой сайдкар — ставим его задачи в очередь.
-            self._store.enqueue_document(existing, area, source_path)
+            # У нового источника свои сайдкары — ставим его задачи под каждой
+            # активной моделью (D24: пока embedding ≠ search, файл считается обеими).
+            self._store.enqueue_document(
+                existing, area, source_path, models=list(self._embedding_models)
+            )
             self._log(
                 IngestEvent.DUPLICATED,
                 doc_id=existing,
@@ -183,8 +183,10 @@ class IngestService:
                 area=area,
                 created_at=now,
                 source_path=source_path,
+                model=model,
             )
             for chunk in chunks
+            for model in self._embedding_models
         ]
 
         evicted = self._store.save_document(
@@ -209,7 +211,7 @@ class IngestService:
     # --- удаление ---
 
     def remove_source(self, area: Area, filename: str) -> RemoveResult:
-        """Убрать источник, его сырой текст и сайдкар (если документ вычищен)."""
+        """Убрать источник, его сырой текст и сайдкары (если документ вычищен)."""
         area_name = area.value
         doc_id = self._store.source_document(area_name, filename)
         if doc_id is None:
@@ -220,9 +222,9 @@ class IngestService:
         if purged is not None:
             self._textstore.delete(purged)
         if source_path:
-            self._delete_sidecar(file_sidecar_path(source_path))
+            delete_file_sidecars(source_path)
         elif purged is not None and self._virtual_dir is not None:
-            self._delete_sidecar(virtual_sidecar_path(self._virtual_dir, purged))
+            delete_virtual_sidecars(self._virtual_dir, purged)
         self._log(IngestEvent.REMOVED, doc_id=doc_id, area=area_name, filename=filename)
         return RemoveResult(found=True, document_id=purged)
 

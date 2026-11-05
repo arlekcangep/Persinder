@@ -53,15 +53,21 @@ class Chunk:
 
 @dataclass(frozen=True)
 class EmbeddingJob:
-    """Задача на подсчёт эмбеддингов для чанка."""
+    """Задача на подсчёт эмбеддингов для чанка.
+
+    ``model`` — модель, чей вектор считается: у файла могут одновременно
+    жить сайдкары нескольких моделей (миграция, D24), поэтому задача
+    привязана к модели.
+    """
 
     doc_id: str
     chunk_index: int
     area: str
     created_at: str
     source_path: str = ""
+    model: str = "placeholder-v1"
 
     @property
     def key(self) -> str:
-        """Ключ задачи в очереди: документ + источник."""
-        return f"{self.doc_id}\x00{self.source_path}"
+        """Ключ задачи в очереди: документ + источник + модель."""
+        return f"{self.doc_id}\x00{self.source_path}\x00{self.model}"

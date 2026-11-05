@@ -16,8 +16,8 @@ from persinder.embed import OnnxEmbedder
 
 
 def model_dir() -> Path:
-    """Тот же каталог, что у Settings (env-переопределяемый)."""
-    return Settings.default().model_dir
+    """Каталог реальной модели e5: ``models_dir / e5-small-int8-v1``."""
+    return Settings.default().models_dir / "e5-small-int8-v1"
 
 
 HAVE_MODEL = OnnxEmbedder.available(model_dir())

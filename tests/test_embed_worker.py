@@ -1,4 +1,4 @@
-"""Тесты воркера эмбеддингов: очередь → векторы → сайдкары."""
+"""Тесты воркера эмбеддингов: очередь → векторы → сайдкары (на модель, D24)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from persinder.embed import (
     virtual_sidecar_path,
 )
 from persinder.ingest import IngestRequest, IngestService
+from persinder.interfaces import Embedder
 from persinder.morphology import NoopStemmer
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
@@ -38,12 +39,27 @@ class EmbedWorkerTest(unittest.TestCase):
             NoopStemmer(),
             virtual_dir=self.virtual,
         )
-        self.worker = EmbedWorker(
+        self.worker = self._worker()
+
+    def _worker(
+        self,
+        *,
+        chunk_size: int = 1200,
+        chunk_overlap: int = 200,
+        embedder: Embedder | None = None,
+    ) -> EmbedWorker:
+        embedder = embedder if embedder is not None else self.embedder
+
+        def factory(model: str) -> Embedder:
+            # ключ задачи → эмбеддер: по умолчанию один и тот же на любую модель
+            return embedder
+
+        return EmbedWorker(
             self.store,
             self.textstore,
-            self.embedder,
-            chunk_size=1200,
-            chunk_overlap=200,
+            factory,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
             virtual_dir=self.virtual,
         )
 
@@ -70,7 +86,7 @@ class EmbedWorkerTest(unittest.TestCase):
         self.assertEqual(self.store.counts()["pending_embeddings"], 1)
         stats = self.worker.run_once(limit=10)
         self.assertEqual((stats.docs, stats.sidecars, stats.errors), (1, 1, 0))
-        data = read_sidecar(file_sidecar_path(src))
+        data = read_sidecar(file_sidecar_path(src, "placeholder-v1"))
         self.assertIsNotNone(data)
         assert data is not None
         self.assertEqual(data.fingerprint.model, "placeholder-v1")
@@ -87,7 +103,9 @@ class EmbedWorkerTest(unittest.TestCase):
         stats = self.worker.run_once()
         self.assertEqual(stats.sidecars, 1)
         assert doc_id is not None
-        self.assertIsNotNone(read_sidecar(virtual_sidecar_path(self.virtual, doc_id)))
+        self.assertIsNotNone(
+            read_sidecar(virtual_sidecar_path(self.virtual, doc_id, "placeholder-v1"))
+        )
         # рядом с файлом сайдкара нет — файла нет
         self.assertEqual(list(self.root.glob("**/.persinder")), [])
 
@@ -95,12 +113,12 @@ class EmbedWorkerTest(unittest.TestCase):
         text = "общий текст про котиков и васильки"
         src1 = self._file("books/a.md", text)
         src2 = self._file("books/b.md", text)
-        # два источника — по очереди на каждый (уникальная пара doc+path)
+        # два источника — по очереди на каждый (уникальная пара doc+path+model)
         self.assertEqual(self.store.counts()["pending_embeddings"], 2)
         stats = self.worker.run_once()
         self.assertEqual(stats.sidecars, 2)
-        self.assertIsNotNone(read_sidecar(file_sidecar_path(src1)))
-        self.assertIsNotNone(read_sidecar(file_sidecar_path(src2)))
+        self.assertIsNotNone(read_sidecar(file_sidecar_path(src1, "placeholder-v1")))
+        self.assertIsNotNone(read_sidecar(file_sidecar_path(src2, "placeholder-v1")))
 
     def test_missing_text_drops_queue(self):
         text = "документ, чей текст пропал до обработки"
@@ -133,7 +151,7 @@ class EmbedWorkerTest(unittest.TestCase):
             )
         )
         self.worker.run_once()
-        before = read_sidecar(file_sidecar_path(src))
+        before = read_sidecar(file_sidecar_path(src, "placeholder-v1"))
         self.assertIsNotNone(before)
 
         src.write_text("вторая версия, совсем другая", encoding="utf-8")
@@ -146,7 +164,7 @@ class EmbedWorkerTest(unittest.TestCase):
             )
         )
         self.worker.run_once()
-        after = read_sidecar(file_sidecar_path(src))
+        after = read_sidecar(file_sidecar_path(src, "placeholder-v1"))
         self.assertIsNotNone(after)
         assert before is not None and after is not None
         # сайдкар перезаписан: содержимое вектора соответствует новой версии
@@ -157,7 +175,7 @@ class EmbedWorkerTest(unittest.TestCase):
     def test_remove_source_deletes_sidecar(self):
         src = self._file("books/one.md", "удаляемый документ")
         self.worker.run_once()
-        sidecar = file_sidecar_path(src)
+        sidecar = file_sidecar_path(src, "placeholder-v1")
         self.assertTrue(sidecar.exists())
         result = self.ingest.remove_source(Area.PERSONAL, "books/one.md")
         self.assertIsNotNone(result.document_id)
@@ -172,7 +190,7 @@ class EmbedWorkerTest(unittest.TestCase):
         doc_id = outcome.document_id
         assert doc_id is not None
         self.worker.run_once()
-        sidecar = virtual_sidecar_path(self.virtual, doc_id)
+        sidecar = virtual_sidecar_path(self.virtual, doc_id, "placeholder-v1")
         self.assertTrue(sidecar.exists())
         self.ingest.remove_source(Area.PERSONAL, "note.md")
         self.assertFalse(sidecar.exists())
@@ -187,14 +205,7 @@ class EmbedWorkerTest(unittest.TestCase):
             chunk_overlap=2,
             virtual_dir=self.virtual,
         )
-        worker = EmbedWorker(
-            self.store,
-            self.textstore,
-            self.embedder,
-            chunk_size=10,
-            chunk_overlap=2,
-            virtual_dir=self.virtual,
-        )
+        worker = self._worker(chunk_size=10, chunk_overlap=2)
         text = "очень длинный текст, который точно нарежется на несколько чанков"
         src = self.root / "books/multi.md"
         src.parent.mkdir(parents=True, exist_ok=True)
@@ -208,7 +219,7 @@ class EmbedWorkerTest(unittest.TestCase):
         )
         stats = worker.run_once()
         self.assertGreater(stats.chunks, 1)
-        data = read_sidecar(file_sidecar_path(src))
+        data = read_sidecar(file_sidecar_path(src, "placeholder-v1"))
         assert data is not None
         self.assertGreater(len(data.chunks), 1)
         # диапазоны чанков покрывают текст
@@ -224,62 +235,100 @@ class EmbedWorkerTest(unittest.TestCase):
             hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
-    def test_fingerprint_recorded_and_rebuilt_on_model_switch(self):
-        """Смена модели → пересчёт всех сайдкаров, отпечаток обновляется (D24)."""
-        src = self._file("books/one.md", "текст для проверки смены модели")
-        fp_path = self.data / "embed_fingerprint.json"
-        worker = EmbedWorker(
-            self.store,
-            self.textstore,
-            self.embedder,
-            virtual_dir=self.virtual,
-            fingerprint_path=fp_path,
-        )
-        stats = worker.run_once()
-        self.assertEqual(stats.docs, 1)
-        data = read_sidecar(file_sidecar_path(src))
-        self.assertIsNotNone(data)
-        assert data is not None
-        self.assertEqual(data.fingerprint.model, "placeholder-v1")
-        self.assertTrue(fp_path.exists())
-        self.assertEqual(fp_path.read_text(encoding="utf-8").strip(), "placeholder-v1")
+    def test_dual_model_sidecars_live_side_by_side(self):
+        """Миграция (D24): файл считается двумя моделями — два сайдкара рядом."""
 
-        # другая модель с другим отпечатком — тот же детерминированный алгоритм
-        class NewModel(PlaceholderEmbedder):
+        class V2(PlaceholderEmbedder):
             name = "placeholder-v2"
 
-        worker2 = EmbedWorker(
+        ingest = IngestService(
             self.store,
             self.textstore,
-            NewModel(),
+            NoopStemmer(),
             virtual_dir=self.virtual,
-            fingerprint_path=fp_path,
+            embedding_models=("placeholder-v1", "placeholder-v2"),
         )
-        stats = worker2.run_once()
-        self.assertEqual(stats.docs, 1)
-        data2 = read_sidecar(file_sidecar_path(src))
-        self.assertIsNotNone(data2)
-        assert data2 is not None
-        self.assertEqual(data2.fingerprint.model, "placeholder-v2")
-        self.assertEqual(fp_path.read_text(encoding="utf-8").strip(), "placeholder-v2")
-        self.assertTrue(any("модель сменилась" in m for m in stats.messages))
+        src = self.root / "migrate.md"
+        text = "файл, который живёт под двумя моделями сразу"
+        src.write_text(text, encoding="utf-8")
+        ingest.ingest(
+            IngestRequest(
+                filename="migrate.md",
+                area=Area.PERSONAL,
+                text=text,
+                source_path=str(src),
+            )
+        )
+        # по задаче на модель на чанк
+        self.assertEqual(self.store.counts()["pending_embeddings"], 2)
 
-    def test_no_rebuild_when_model_unchanged(self):
-        """Та же модель и полный проход — вторая итерация простаивает."""
-        self._file("books/one.md", "стабильный текст")
-        fp_path = self.data / "embed_fingerprint.json"
+        v2 = V2()
+
+        def factory(model: str) -> Embedder:
+            return v2 if model == "placeholder-v2" else self.embedder
+
         worker = EmbedWorker(
             self.store,
             self.textstore,
-            self.embedder,
+            factory,
             virtual_dir=self.virtual,
-            fingerprint_path=fp_path,
         )
-        worker.run_once()
         stats = worker.run_once()
-        self.assertEqual((stats.docs, stats.skipped, stats.errors), (0, 0, 0))
-        self.assertFalse(any("модель сменилась" in m for m in stats.messages))
-        self.assertEqual(fp_path.read_text(encoding="utf-8").strip(), "placeholder-v1")
+        self.assertEqual(stats.sidecars, 2)
+
+        data1 = read_sidecar(file_sidecar_path(src, "placeholder-v1"))
+        data2 = read_sidecar(file_sidecar_path(src, "placeholder-v2"))
+        self.assertIsNotNone(data1)
+        self.assertIsNotNone(data2)
+        assert data1 is not None and data2 is not None
+        self.assertEqual(data1.fingerprint.model, "placeholder-v1")
+        self.assertEqual(data2.fingerprint.model, "placeholder-v2")
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_search_switch_keeps_old_model_sidecar(self):
+        """После переключения search старый сайдкар остаётся (до remove модели)."""
+        src = self._file("books/one.md", "текст под старой моделью")
+        self.worker.run_once()
+        old = file_sidecar_path(src, "placeholder-v1")
+        self.assertTrue(old.exists())
+
+        # новые файлы после `model use` пишут только новую модель, старый
+        # сайдкар не трогается — его уберёт только `model remove`
+        ingest = IngestService(
+            self.store,
+            self.textstore,
+            NoopStemmer(),
+            virtual_dir=self.virtual,
+            embedding_models=("placeholder-v2",),
+        )
+
+        class V2(PlaceholderEmbedder):
+            name = "placeholder-v2"
+
+        src2 = self.root / "books/two.md"
+        src2.write_text("новый файл под новой моделью", encoding="utf-8")
+        ingest.ingest(
+            IngestRequest(
+                filename="books/two.md",
+                area=Area.PERSONAL,
+                text="новый файл под новой моделью",
+                source_path=str(src2),
+            )
+        )
+
+        def factory(model: str) -> Embedder:
+            return V2()
+
+        worker = EmbedWorker(
+            self.store,
+            self.textstore,
+            factory,
+            virtual_dir=self.virtual,
+        )
+        stats = worker.run_once()
+        self.assertEqual(stats.sidecars, 1)
+        self.assertTrue(old.exists(), "старый сайдкар живёт, пока модель установлена")
+        self.assertIsNotNone(read_sidecar(file_sidecar_path(src2, "placeholder-v2")))
 
 
 if __name__ == "__main__":

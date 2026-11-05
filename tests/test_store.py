@@ -53,6 +53,35 @@ class SqliteStoreTest(unittest.TestCase):
         pending = self.store.pending_embeddings()
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["doc_id"], "d1")
+        self.assertEqual(pending[0]["model"], "placeholder-v1")
+
+    def test_enqueue_document_for_models(self):
+        self._save()
+        self.store.enqueue_document("d1", "personal", "b.txt", models=["m1", "m2"])
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual(len(pending), 3)  # placeholder-v1 + m1 + m2
+        models = sorted(item["model"] for item in pending)
+        self.assertEqual(models, ["m1", "m2", "placeholder-v1"])
+
+    def test_drop_queue_model(self):
+        self._save()
+        self.store.enqueue_document("d1", "personal", "b.txt", models=["m1"])
+        self.store.drop_queue_model("m1")
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual([item["model"] for item in pending], ["placeholder-v1"])
+
+    def test_enqueue_all_for_models(self):
+        self._save()
+        self.store.enqueue_all(["m1", "m2"])
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual(len(pending), 3)  # placeholder-v1 + m1 + m2
+
+    def test_all_sources(self):
+        self._save()
+        self.store.add_source("d1", "personal", "b.txt", source_path="/x/b.txt")
+        sources = self.store.all_sources()
+        self.assertTrue(any(row["source_path"] == "/x/b.txt" for row in sources))
+        self.assertTrue(any(row["source_path"] == "" for row in sources))
 
     def test_counts(self):
         self._save()

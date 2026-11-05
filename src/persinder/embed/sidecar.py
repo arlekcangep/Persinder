@@ -1,9 +1,11 @@
 """Сайдкары эмбеддингов: чтение и атомарная запись (§7).
 
-Один сайдкар на один исходный файл — ``.persinder/<файл>.pdr`` рядом с ним
-(папка ``.persinder/`` игнорируется индексацией и уезжает в Syncthing).
-Для данных, которых на диске нет (web, вставленный текст), сайдкары живут в
-отдельной виртуальной папке: ``virtual_dir/<doc_id>.pdr``.
+Один сайдкар на один исходный файл и **одну модель** —
+``.persinder/<модель>/<файл>.pdr`` рядом с источником (папка ``.persinder/``
+игнорируется индексацией и уезжает в Syncthing). У файла могут одновременно
+жить сайдкары нескольких моделей (миграция, D24). Для данных, которых на
+диске нет (web, вставленный текст), сайдкары живут в отдельной виртуальной
+папке: ``virtual_dir/<модель>/<doc_id>.pdr``.
 
 Формат — компактный бинарный: текст не хранится (он у источника), только
 отпечаток модели, параметры чанкинга и векторы чанков (f16).
@@ -11,8 +13,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import struct
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,15 +52,69 @@ class SidecarData:
     chunks: list[SidecarChunk]
 
 
-def file_sidecar_path(source_path: str | Path) -> Path:
-    """Путь сайдкара для реального файла: ``<каталог>/.persinder/<файл>.pdr``."""
+def file_sidecar_path(source_path: str | Path, model: str) -> Path:
+    """Путь сайдкара реального файла под моделью.
+
+    ``<каталог>/.persinder/<модель>/<файл>.pdr`` — по модели своя подпапка,
+    чтобы у файла одновременно жили эмбеды нескольких моделей (D24).
+    """
     src = Path(source_path)
-    return src.parent / ".persinder" / f"{src.name}.pdr"
+    return src.parent / ".persinder" / model / f"{src.name}.pdr"
 
 
-def virtual_sidecar_path(virtual_dir: str | Path, doc_id: str) -> Path:
-    """Путь сайдкара виртуального элемента (нет файла на диске)."""
-    return Path(virtual_dir) / f"{doc_id}.pdr"
+def virtual_sidecar_path(virtual_dir: str | Path, doc_id: str, model: str) -> Path:
+    """Путь сайдкара виртуального элемента (нет файла на диске) под моделью."""
+    return Path(virtual_dir) / model / f"{doc_id}.pdr"
+
+
+def delete_file_sidecars(source_path: str | Path) -> None:
+    """Удалить все сайдкары файла (по всем моделям): источник ушёл — они неактуальны."""
+    root = Path(source_path).parent / ".persinder"
+    if not root.is_dir():
+        return
+    name = Path(source_path).name + ".pdr"
+    for model_dir in root.iterdir():
+        if model_dir.is_dir():
+            with contextlib.suppress(FileNotFoundError):
+                (model_dir / name).unlink()
+
+
+def delete_virtual_sidecars(virtual_dir: str | Path, doc_id: str) -> None:
+    """Удалить все сайдкары виртуального элемента (по всем моделям)."""
+    root = Path(virtual_dir)
+    if not root.is_dir():
+        return
+    name = f"{doc_id}.pdr"
+    for model_dir in root.iterdir():
+        if model_dir.is_dir():
+            with contextlib.suppress(FileNotFoundError):
+                (model_dir / name).unlink()
+
+
+def delete_model_sidecars(
+    virtual_dir: str | Path, model: str, sources: Sequence[Mapping[str, object]]
+) -> None:
+    """Удалить все сайдкары модели (``model remove``): веса и эмбеды уходят вместе.
+
+    ``sources`` — строки ``document_sources`` (см. ``MetaStore.all_sources``).
+    """
+    virtual_root = Path(virtual_dir) / model
+    with contextlib.suppress(FileNotFoundError):
+        for path in virtual_root.iterdir():
+            if path.is_file():
+                path.unlink()
+    for row in sources:
+        raw = row.get("source_path")
+        if raw:
+            source_path = str(raw)
+            path = (
+                Path(source_path).parent
+                / ".persinder"
+                / model
+                / f"{Path(source_path).name}.pdr"
+            )
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
 
 
 def write_sidecar(

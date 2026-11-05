@@ -27,7 +27,7 @@
 | `store` | пакет: `models` (модели БД) + `sqlite` (SQLite: документы, FTS5, очередь) | реализован |
 | `ingest` | пакет: `models` (вход/выход) + `service` (морфоиндекс + очередь + удаление) + `journal` (журнал вызовов) | реализован |
 | `api` | пакет: `models` (DTO) + `http` (HTTP-обёртка над `ingest`) | реализован |
-| `embed` | пакет: `models` + `service` (воркер: очередь → векторы) + `sidecar` (сайдкары) | реализован |
+| `embed` | пакет: `models` + `service` (воркер: очередь → векторы) + `sidecar` (сайдкары на модель) + `registry` (каталог/установка моделей) + `state` (embedding/search, D24) | реализован |
 | `vectorindex` | USearch-сегменты (шардинг, swap) | заглушка |
 | `sources` | watcher'ы, журнал статусов и экстракторы областей | реализован |
 | `search` | фасад запроса (три группы, порядок) | реализован |
@@ -51,9 +51,11 @@ src/persinder/
     journal.py       # журнал вызовов ingest (JSONL) + восстановление (D23)
   embed/
     models.py        # EmbedFingerprint, ChunkParams, EmbedStats
-    service.py       # EmbedWorker (очередь → векторы → сайдкары, пересчёт при смене модели)
+    service.py       # EmbedWorker (очередь → векторы → сайдкары, по моделям) + PlaceholderEmbedder
     onnx.py          # OnnxEmbedder — реальная модель e5-small (ONNX INT8)
-    sidecar.py       # сайдкары: чтение/запись (бинарный формат, атомарность)
+    sidecar.py       # сайдкары: чтение/запись (бинарный формат, атомарность), удаление по моделям
+    registry.py      # каталог моделей, install/remove весов, build_embedder (D24)
+    state.py         # ModelState: embedding/search (data_dir/models.json), queue_models (D24)
   store/
     models.py        # MorphHit, EmbeddingQueueItem, StoreCounts — модели БД
     sqlite.py        # SqliteStore
@@ -136,15 +138,19 @@ class IngestService:
     def remove_source(self, area: Area, filename: str) -> RemoveResult: ...
     def recover(self) -> RecoveryStats: ...
 
+
 class Stemmer(Protocol):
     name: str
+
     def stem(self, tokens: Iterable[str]) -> list[str]: ...
+
 
 class TextStore(Protocol):
     def put(self, key: str, text: str) -> str: ...
     def read(self, key: str) -> str: ...
     def exists(self, key: str) -> bool: ...
     def delete(self, key: str) -> None: ...
+
 
 class MetaStore(Protocol):
     def find_document_by_hash(self, content_hash: str) -> str | None: ...
@@ -159,9 +165,11 @@ class MetaStore(Protocol):
     def drop_queue_rows(self, ids: list[int]) -> None: ...
     def search_morph(self, stemmed_query: str, limit: int) -> list[dict]: ...
 
+
 class Embedder(Protocol):
     name: str
     dim: int
+
     def embed(self, texts: list[str]) -> list[list[float]]: ...
 ```
 
@@ -178,17 +186,27 @@ class Embedder(Protocol):
 порт `Embedder` и пишет **сайдкар** (§7) атомарно. Запускается по требованию
 (`persinder embed`), ноль ресурсов в простое.
 
-- Реальный файл → сайдкар `.<каталог>/.persinder/<файл>.pdr` (путь источника идёт
-  через `IngestRequest.source_path`).
+- Реальный файл → сайдкар `.<каталог>/.persinder/<модель>/<файл>.pdr` (путь
+  источника идёт через `IngestRequest.source_path`; подпапка на модель — у файла
+  живут эмбеды нескольких моделей одновременно, D24).
 - Виртуальный элемент (нет файла на диске — web, вставленный текст) → сайдкар в
-  отдельной папке `Settings.virtual_dir` (`data_dir/virtual/<doc_id>.pdr`).
-- Эмбеддер — детерминированная заглушка `PlaceholderEmbedder` (`placeholder-v1`)
-  или реальная модель `OnnxEmbedder` (e5-small INT8, §12.1): выбирается
-  автоматически по `Settings.model_dir` (скачивается `scripts/download_model.py`).
-  Отпечаток активной модели пишется в `data_dir/embed_fingerprint.json`; смена
-  модели ставит все источники на пересчёт (D24).
-- Удаление/вытеснение чистит сайдкары в `ingest` (владелец инварианта
-  «документ + текст + сайдкары»).
+  отдельной папке `Settings.virtual_dir` (`data_dir/virtual/<модель>/<doc_id>.pdr`).
+- **Модель-менеджмент (D24):** реестр `embed/registry.py` (каталог `CATALOG`,
+  установка/удаление весов, фабрика `build_embedder`), состояние на профиль
+  `embed/state.py` (`data_dir/models.json`): `embedding` (чем считаем новые файлы)
+  и `search` (чем ищем). CLI: `persinder model list/install/use/remove`,
+  `persinder embed --all/--background`. Миграция стартует при `install`
+  (`embedding` переключается, все источники ставятся на пересчёт), поиск
+  переключается отдельным `use`; пока хендлы разные, новые файлы индексируются
+  обеими моделями.
+- Эмбеддер — детерминированная заглушка `PlaceholderEmbedder` (`placeholder-v1`,
+  встроена) или реальная модель `OnnxEmbedder` (e5-small INT8, §12.1) из
+  `~/.persinder/models/<ключ>/` (`PERSINDER_MODEL_DIR` — корень). Эмбеддер
+  подбирается **фабрикой по ключу задачи** очереди — один проход уживает задачи
+  разных моделей.
+- Удаление модели (`model remove`) убирает веса и **все её сайдкары в один момент**
+  (не раньше); удаление/вытеснение источника чистит его сайдкары по всем моделям
+  в `ingest` (владелец инварианта «документ + текст + сайдкары»).
 
 ## Примечание о HTTP-сервисе и ресурсах
 
