@@ -7,7 +7,10 @@ name = "persinder"
 version = "0.0.1"
 description = "Персональный индексатор: поисковый движок для личной базы знаний"
 requires-python = ">=3.10"
-dependencies = []
+# onnxruntime — обязательная зависимость (есть официальные колеса для
+# Windows/Linux/macOS): Persinder работает «из коробки», Docker не нужен.
+# Сама модель весит ~120 МБ и управляется отдельно (persinder model install).
+dependencies = ["onnxruntime>=1.19", "tokenizers>=0.19"]
 
 [project.optional-dependencies]
 stemming = ["snowballstemmer>=2.2"]
@@ -15,7 +18,6 @@ config = ["PyYAML>=6.0"]
 watch = ["watchdog>=4.0"]
 pdf = ["pypdf>=4.0"]
 http = ["fastapi>=0.110", "uvicorn>=0.29"]
-onnx = ["onnxruntime>=1.19", "tokenizers>=0.19"]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
 
 [project.scripts]
