@@ -10,6 +10,7 @@ from .extract import (
     MhtmlExtractor,
     PdfExtractor,
     TextExtractor,
+    ZipExtractor,
     default_registry,
     extract_html,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "TextExtractor",
     "Watcher",
     "WatchConfig",
+    "ZipExtractor",
     "default_registry",
     "extract_html",
     "load_config",

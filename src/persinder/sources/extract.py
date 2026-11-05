@@ -9,13 +9,18 @@
 
 Минимальный набор первого прототипа: Markdown/текстовые заметки Obsidian
 с извлечением тэгов (D5: тэги остаются внутри заметок, извлекаются, не
-дублируются). PDF/DOCX/EPUB/OCR — добавляются как новые реализации порта.
+дублируются), HTML/MHTML, PDF, а также ZIP (``ZipExtractor`` — декоратор:
+распаковывает архив и делегирует записи другим экстракторам по суффиксу).
+DOCX/EPUB/OCR — добавляются как новые реализации порта.
 """
 
 from __future__ import annotations
 
 import contextlib
 import re
+import tempfile
+import zipfile
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -265,6 +270,84 @@ class PdfExtractor:
         return Extracted(text="\n\n".join(p for p in pages if p), pages=len(pages))
 
 
+# Пределы распаковки ZIP — защита от архивов-бомб (много записей / огромные).
+ZIP_MAX_ENTRIES = 1000
+ZIP_MAX_ENTRY_BYTES = 32 * 1024 * 1024
+ZIP_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+
+
+class ZipExtractor:
+    """ZIP-архив — экстрактор-декоратор: распаковывает и делегирует по суффиксу.
+
+    Архив — один документ: содержимое поддерживаемых файлов извлекается
+    штатными экстракторами (по расширению) и склеивается в текст под строкой с
+    именем файла; тэги объединяются, ``pages`` суммируются. Неподдерживаемые
+    форматы и вложенные архивы пропускаются (защита от рекурсии и бомб); лимиты
+    по числу и размеру распакованных записей — от бомб. Битая запись/архив не
+    валит область: у архивной ошибки текст пуст, у ошибки записи — пропуск.
+    """
+
+    name = "zip"
+
+    def __init__(self, inner: Mapping[str, Extractor]) -> None:
+        self._inner = dict(inner)
+
+    def suffixes(self) -> frozenset[str]:
+        return frozenset({".zip"})
+
+    def extract(self, path: Path) -> Extracted:
+        parts: list[str] = []
+        tags: list[str] = []
+        pages = 0
+        total = 0
+        try:
+            with zipfile.ZipFile(path) as archive:
+                entries = archive.infolist()
+                with tempfile.TemporaryDirectory() as tmp:
+                    for index, info in enumerate(entries):
+                        if index >= ZIP_MAX_ENTRIES:
+                            break
+                        if info.is_dir():
+                            continue
+                        suffix = Path(info.filename).suffix.lower()
+                        extractor = self._inner.get(suffix)
+                        if extractor is None:
+                            continue  # формат не поддержан (в т.ч. вложенный zip)
+                        if info.file_size > ZIP_MAX_ENTRY_BYTES:
+                            continue
+                        if total + info.file_size > ZIP_MAX_TOTAL_BYTES:
+                            break
+                        try:
+                            data = archive.read(info)
+                        except Exception:  # noqa: BLE001 — шифрование/битая запись
+                            continue
+                        total += len(data)
+                        result = self._extract_entry(
+                            extractor, Path(tmp) / f"{index}{suffix}", data
+                        )
+                        if result is None:
+                            continue
+                        if result.text.strip():
+                            parts.append(f"{info.filename}\n{result.text}")
+                        tags.extend(result.tags)
+                        pages += result.pages
+        except (zipfile.BadZipFile, OSError) as exc:
+            return Extracted(text="", error=f"zip: {exc}")
+        return Extracted(text="\n\n".join(parts), tags=dedup_tags(tags), pages=pages)
+
+    @staticmethod
+    def _extract_entry(
+        extractor: Extractor, entry: Path, data: bytes
+    ) -> Extracted | None:
+        """Развернуть одну запись во временный файл и отдать экстрактору."""
+        entry.write_bytes(data)
+        try:
+            result = extractor.extract(entry)
+        except Exception:  # noqa: BLE001 — битая запись не валит весь архив
+            return None
+        return None if result.error else result
+
+
 class ExtractorRegistry:
     """Сопоставление суффиксов экстракторам с учётом форматов области.
 
@@ -307,7 +390,12 @@ class ExtractorRegistry:
 
 
 def default_registry() -> ExtractorRegistry:
-    """Стандартный набор: markdown + text + html + mhtml; pdf — если extra."""
+    """Стандартный набор: markdown + text + html + mhtml + zip; pdf — если extra.
+
+    ZIP-экстрактор получает карту «суффикс → экстрактор» из уже собранных
+    экстракторов — он делегирует им распакованные записи. Вложенные zip в карту
+    не попадают: архивы внутри архивов не раскрываются (защита от бомб).
+    """
     extractors: list[Extractor] = [
         MarkdownExtractor(),
         TextExtractor(),
@@ -316,7 +404,23 @@ def default_registry() -> ExtractorRegistry:
     ]
     with contextlib.suppress(RuntimeError):
         extractors.append(PdfExtractor())
+    inner = {
+        suffix: extractor for extractor in extractors for suffix in extractor.suffixes()
+    }
+    extractors.append(ZipExtractor(inner))
     return ExtractorRegistry(tuple(extractors))
+
+
+def dedup_tags(tags: Iterable[str]) -> tuple[str, ...]:
+    """Убрать дубликаты тэгов без учёта регистра, сохранив порядок появления."""
+    seen: set[str] = set()
+    unique: list[str] = []
+    for tag in tags:
+        low = tag.lower()
+        if low and low not in seen:
+            seen.add(low)
+            unique.append(tag)
+    return tuple(unique)
 
 
 def extract_tags(body: str, frontmatter: str | None) -> tuple[str, ...]:
@@ -333,14 +437,7 @@ def extract_tags(body: str, frontmatter: str | None) -> tuple[str, ...]:
                     item = line.strip().lstrip("-").strip()
                     if item:
                         tags.append(item.lstrip("#"))
-    seen: set[str] = set()
-    unique: list[str] = []
-    for tag in tags:
-        low = tag.lower()
-        if low and low not in seen:
-            seen.add(low)
-            unique.append(tag)
-    return tuple(unique)
+    return dedup_tags(tags)
 
 
 def strip_code_inline(body: str) -> str:

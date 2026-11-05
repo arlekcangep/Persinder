@@ -69,7 +69,7 @@ src/persinder/
     watcher.py       # цикл скана, запуск по требованию
     journal.py       # журнал статусов файлов (JSONL) — состояние watcher'а (D21),
                      # обрезка истории переходов
-    extract.py       # экстракторы (markdown/text/html/mht/pdf) + реестр
+    extract.py       # экстракторы (markdown/text/html/mht/pdf/zip) + реестр
     pipeline.py      # события → экстракция → ingest → журнал
 ```
 

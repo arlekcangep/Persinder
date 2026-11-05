@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -21,6 +22,7 @@ from persinder.sources import (
     ScanResult,
     TextExtractor,
     WatchConfig,
+    ZipExtractor,
 )
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
@@ -156,6 +158,34 @@ class PipelineTest(unittest.TestCase):
         counts = self.store.counts()
         self.assertEqual(counts["documents"], 1)
         self.assertEqual(counts["chunks"], 1)
+
+    def test_zip_archive_indexed_through_pipeline(self):
+        # Область допускает zip; внутреннее содержимое — markdown/text.
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("zip", "markdown", "text"),
+        )
+        md = MarkdownExtractor()
+        txt = TextExtractor()
+        registry = ExtractorRegistry(
+            (md, txt, ZipExtractor({".md": md, ".markdown": md, ".txt": txt}))
+        )
+        ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
+        pipeline = IndexingPipeline(ingest, registry, journal=self.journal)
+
+        archive_path = self.area.path / "bundle.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("inside.md", "#tag содержимое архива")
+
+        stats = pipeline.process(self._scan(area))
+        self.assertEqual(stats.indexed, 1)
+        self.assertEqual(self.store.counts()["documents"], 1)
+        # в хранилище лёг склеенный текст всех записей архива
+        stored = "".join(
+            p.read_text(encoding="utf-8") for p in self.texts.glob("*.txt")
+        )
+        self.assertIn("содержимое архива", stored)
 
 
 if __name__ == "__main__":
