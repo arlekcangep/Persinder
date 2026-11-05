@@ -3,35 +3,23 @@
 Быстрый морфологический слой индексации + откладывание эмбеддингов в очередь.
 Единственная точка доступа к метастору и хранилищу текста: остальные модули
 (в том числе watcher) ходят в БД только через этот сервис.
+
+Владелец инварианта «документ + его сырой текст + его сайдкары» (D22, D24):
+при вытеснении и удалении документа тут же убираются и текст, и сайдкары.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+from pathlib import Path
 
-from ..domain import Area, Chunk, Document, EmbeddingJob, utcnow
+from ..domain import Area, Chunk, Document, EmbeddingJob, chunk_text, utcnow
+from ..embed.sidecar import file_sidecar_path, virtual_sidecar_path
 from ..interfaces import MetaStore, Stemmer, TextStore
 from ..morphology import analyze_to_string
 from .journal import IngestEntry, IngestEvent, IngestJournal
 from .models import IngestRequest, IngestResult, RecoveryStats, RemoveResult
-
-
-def chunk_text(text: str, size: int, overlap: int) -> list[tuple[int, int]]:
-    """Нарезать текст на диапазоны ``(start, end)`` с перекрытием."""
-    if size <= 0:
-        raise ValueError("размер чанка должен быть положительным")
-    if overlap < 0 or overlap >= size:
-        raise ValueError("перекрытие должно быть в диапазоне [0, размер чанка)")
-    length = len(text)
-    spans: list[tuple[int, int]] = []
-    start = 0
-    while start < length:
-        end = min(start + size, length)
-        spans.append((start, end))
-        if end >= length:
-            break
-        start = end - overlap
-    return spans
 
 
 class IngestService:
@@ -45,6 +33,7 @@ class IngestService:
         chunk_size: int = 1200,
         chunk_overlap: int = 200,
         journal: IngestJournal | None = None,
+        virtual_dir: Path | None = None,
     ) -> None:
         self._store = store
         self._textstore = textstore
@@ -52,6 +41,8 @@ class IngestService:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._journal = journal
+        # Папка для данных, которых нет на диске: их сайдкары и сам текст.
+        self._virtual_dir = virtual_dir
 
     # --- служебное ---
 
@@ -80,11 +71,37 @@ class IngestService:
         for doc_id in doc_ids:
             self._textstore.delete(doc_id)
 
+    @staticmethod
+    def _delete_sidecar(path: Path) -> None:
+        """Удалить сайдкар; отсутствие файла — не ошибка."""
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+
+    def _drop_sidecars(
+        self,
+        evicted: list[str],
+        previous: str | None,
+        source_path: str,
+        doc_id: str,
+    ) -> None:
+        """Убрать сайдкары, ставшие неактуальными (D24).
+
+        Источник ``(area, filename)`` перепривязан к другому документу — его
+        прежний сайдкар больше не соответствует содержимому: удаляем. Плюс
+        виртуальные сайдкары вытесненных документов (их данных на диске нет).
+        """
+        if previous is not None and previous != doc_id and source_path:
+            self._delete_sidecar(file_sidecar_path(source_path))
+        if self._virtual_dir is not None:
+            for old_id in evicted:
+                self._delete_sidecar(virtual_sidecar_path(self._virtual_dir, old_id))
+
     # --- приём ---
 
     def ingest(self, request: IngestRequest) -> IngestResult:
         text = request.text or ""
         area = request.area.value
+        source_path = request.source_path or ""
         if not text.strip():
             self._log(
                 IngestEvent.REJECTED,
@@ -110,8 +127,13 @@ class IngestService:
                 area=area,
                 filename=request.filename,
             )
-            evicted = self._store.add_source(existing, area, request.filename)
+            evicted = self._store.add_source(
+                existing, area, request.filename, source_path=source_path
+            )
             self._drop_texts(evicted)
+            self._drop_sidecars(evicted, previous, source_path, existing)
+            # У нового источника свой сайдкар — ставим его задачи в очередь.
+            self._store.enqueue_document(existing, area, source_path)
             self._log(
                 IngestEvent.DUPLICATED,
                 doc_id=existing,
@@ -160,14 +182,21 @@ class IngestService:
                 chunk_index=chunk.index,
                 area=area,
                 created_at=now,
+                source_path=source_path,
             )
             for chunk in chunks
         ]
 
         evicted = self._store.save_document(
-            document, area, request.filename, chunks, jobs
+            document,
+            area,
+            request.filename,
+            chunks,
+            jobs,
+            source_path=source_path,
         )
         self._drop_texts(evicted)
+        self._drop_sidecars(evicted, previous, source_path, doc_id)
         self._log(
             IngestEvent.INDEXED,
             doc_id=doc_id,
@@ -180,17 +209,21 @@ class IngestService:
     # --- удаление ---
 
     def remove_source(self, area: Area, filename: str) -> RemoveResult:
-        """Убрать источник и его сырой текст (если документ вычищен целиком)."""
-        doc_id = self._store.source_document(area.value, filename)
+        """Убрать источник, его сырой текст и сайдкар (если документ вычищен)."""
+        area_name = area.value
+        doc_id = self._store.source_document(area_name, filename)
         if doc_id is None:
             return RemoveResult(found=False)
-        self._log(IngestEvent.REMOVE, doc_id=doc_id, area=area.value, filename=filename)
-        purged = self._store.remove_source(area.value, filename)
+        source_path = self._store.source_path(area_name, filename)
+        self._log(IngestEvent.REMOVE, doc_id=doc_id, area=area_name, filename=filename)
+        purged = self._store.remove_source(area_name, filename)
         if purged is not None:
             self._textstore.delete(purged)
-        self._log(
-            IngestEvent.REMOVED, doc_id=doc_id, area=area.value, filename=filename
-        )
+        if source_path:
+            self._delete_sidecar(file_sidecar_path(source_path))
+        elif purged is not None and self._virtual_dir is not None:
+            self._delete_sidecar(virtual_sidecar_path(self._virtual_dir, purged))
+        self._log(IngestEvent.REMOVED, doc_id=doc_id, area=area_name, filename=filename)
         return RemoveResult(found=True, document_id=purged)
 
     # --- восстановление ---

@@ -110,7 +110,12 @@ class IndexingPipeline:
 
         self._record(area, rel_path, JournalEvent.SENT)
         outcome = self._ingest.ingest(
-            IngestRequest(filename=rel_path, area=area.role, text=extracted.text)
+            IngestRequest(
+                filename=rel_path,
+                area=area.role,
+                text=extracted.text,
+                source_path=str(area.path / rel_path),
+            )
         )
         if outcome.status == IngestResult.INDEXED:
             self._record(

@@ -24,11 +24,12 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 
 CREATE TABLE IF NOT EXISTS document_sources (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    doc_id     TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    area       TEXT NOT NULL,
-    filename   TEXT NOT NULL,
-    created_at TEXT NOT NULL,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id      TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    area        TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    source_path TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
     UNIQUE(doc_id, area, filename)
 );
 
@@ -53,9 +54,10 @@ CREATE TABLE IF NOT EXISTS embedding_queue (
     doc_id      TEXT NOT NULL,
     chunk_index INTEGER NOT NULL,
     area        TEXT NOT NULL,
+    source_path TEXT NOT NULL DEFAULT '',
     status      TEXT NOT NULL DEFAULT 'pending',
     created_at  TEXT NOT NULL,
-    UNIQUE(doc_id, chunk_index)
+    UNIQUE(doc_id, chunk_index, source_path)
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -76,7 +78,23 @@ class SqliteStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Добавить новые колонки в существующие базы (прототип, без версий)."""
+        for table, column in (
+            ("document_sources", "source_path"),
+            ("embedding_queue", "source_path"),
+        ):
+            cols = [
+                str(row["name"])
+                for row in self._conn.execute(f"PRAGMA table_info({table})")
+            ]
+            if column not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
 
     # --- чтение ---
 
@@ -107,19 +125,46 @@ class SqliteStore:
     def pending_embeddings(self, limit: int = 100) -> list[EmbeddingQueueItem]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, doc_id, chunk_index, area FROM embedding_queue "
-                "WHERE status = 'pending' ORDER BY id LIMIT ?",
+                "SELECT id, doc_id, chunk_index, area, source_path "
+                "FROM embedding_queue WHERE status = 'pending' "
+                "ORDER BY id LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [
-            EmbeddingQueueItem(
-                id=int(row["id"]),
-                doc_id=str(row["doc_id"]),
-                chunk_index=int(row["chunk_index"]),
-                area=str(row["area"]),
+        return [self._queue_item(row) for row in rows]
+
+    def pending_for_docs(self, doc_ids: list[str]) -> list[EmbeddingQueueItem]:
+        """Все незавершённые задачи по документам (обработка целиком)."""
+        if not doc_ids:
+            return []
+        placeholders = ",".join("?" for _ in doc_ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id, doc_id, chunk_index, area, source_path "
+                f"FROM embedding_queue WHERE status = 'pending' "
+                f"AND doc_id IN ({placeholders}) ORDER BY id",
+                doc_ids,
+            ).fetchall()
+        return [self._queue_item(row) for row in rows]
+
+    def drop_queue_rows(self, ids: list[int]) -> None:
+        """Убрать выполненные/брошенные задачи из очереди."""
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"DELETE FROM embedding_queue WHERE id IN ({placeholders})", ids
             )
-            for row in rows
-        ]
+
+    @staticmethod
+    def _queue_item(row: sqlite3.Row) -> EmbeddingQueueItem:
+        return EmbeddingQueueItem(
+            id=int(row["id"]),
+            doc_id=str(row["doc_id"]),
+            chunk_index=int(row["chunk_index"]),
+            area=str(row["area"]),
+            source_path=str(row["source_path"]),
+        )
 
     def counts(self) -> StoreCounts:
         """Служебная информация: сколько чего в базе."""
@@ -139,14 +184,16 @@ class SqliteStore:
 
     # --- запись ---
 
-    def _bind_source(self, doc_id: str, area: str, filename: str) -> list[str]:
+    def _bind_source(
+        self, doc_id: str, area: str, filename: str, source_path: str
+    ) -> list[str]:
         """Закрепить ``(area, filename)`` за ``doc_id``, вытеснив прежний документ.
 
         У файла один источник: если за ``(area, filename)`` был закреплён
         другой документ (файл изменился), связь снимается, а сам документ
         вычищается, если у него не осталось других источников. Возвращает id
-        вычищенных документов — по ним вызывающий удаляет сырой текст. Нужен
-        открытый ``with`` (вызывается внутри транзакции).
+        вычищенных документов — по ним вызывающий удаляет сырой текст и
+        сайдкары. Нужен открытый ``with`` (вызывается внутри транзакции).
         """
         stale = self._conn.execute(
             "SELECT DISTINCT doc_id FROM document_sources"
@@ -169,15 +216,17 @@ class SqliteStore:
                 evicted.append(old_id)
         self._conn.execute(
             "INSERT OR IGNORE INTO document_sources"
-            "(doc_id, area, filename, created_at) VALUES (?, ?, ?, ?)",
-            (doc_id, area, filename, utcnow()),
+            "(doc_id, area, filename, source_path, created_at) VALUES (?, ?, ?, ?, ?)",
+            (doc_id, area, filename, source_path, utcnow()),
         )
         return evicted
 
-    def add_source(self, doc_id: str, area: str, filename: str) -> list[str]:
+    def add_source(
+        self, doc_id: str, area: str, filename: str, source_path: str = ""
+    ) -> list[str]:
         """Закрепить источник; вернуть id вытесненных документов (для чистки текста)."""
         with self._lock, self._conn:
-            return self._bind_source(doc_id, area, filename)
+            return self._bind_source(doc_id, area, filename, source_path)
 
     def has_source(self, area: str, filename: str) -> bool:
         """Есть ли в индексе источник ``(area, filename)``."""
@@ -198,6 +247,16 @@ class SqliteStore:
                 (area, filename),
             ).fetchone()
         return str(row["doc_id"]) if row else None
+
+    def source_path(self, area: str, filename: str) -> str:
+        """Путь источника (пусто — виртуальный элемент)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT source_path FROM document_sources"
+                " WHERE area = ? AND filename = ? LIMIT 1",
+                (area, filename),
+            ).fetchone()
+        return str(row["source_path"]) if row else ""
 
     def _purge_document(self, doc_id: str) -> None:
         """Удалить документ и все производные строки (нужен открытый `with`)."""
@@ -246,12 +305,13 @@ class SqliteStore:
         filename: str,
         chunks: list[Chunk],
         jobs: list[EmbeddingJob],
+        source_path: str = "",
     ) -> list[str]:
         """Атомарно записать документ, источник, чанки (с FTS5) и очередь.
 
         Прежний документ того же файла ``(area, filename)`` вытесняется
         (см. ``_bind_source``). Возвращает id вытесненных документов, чтобы
-        вызывающий удалил их сырой текст.
+        вызывающий удалил их сырой текст и сайдкары.
         """
         with self._lock, self._conn:
             self._conn.execute(
@@ -267,7 +327,7 @@ class SqliteStore:
                     doc.created_at,
                 ),
             )
-            evicted = self._bind_source(doc.id, area, filename)
+            evicted = self._bind_source(doc.id, area, filename, source_path)
             for chunk in chunks:
                 cur = self._conn.execute(
                     "INSERT INTO chunks(doc_id, chunk_index, char_start, char_end) "
@@ -281,11 +341,29 @@ class SqliteStore:
                 )
             self._conn.executemany(
                 "INSERT OR IGNORE INTO embedding_queue"
-                "(doc_id, chunk_index, area, status, created_at) "
-                "VALUES (?, ?, ?, 'pending', ?)",
-                [(j.doc_id, j.chunk_index, j.area, j.created_at) for j in jobs],
+                "(doc_id, chunk_index, area, source_path, status, created_at) "
+                "VALUES (?, ?, ?, ?, 'pending', ?)",
+                [
+                    (j.doc_id, j.chunk_index, j.area, j.source_path, j.created_at)
+                    for j in jobs
+                ],
             )
         return evicted
+
+    def enqueue_document(self, doc_id: str, area: str, source_path: str = "") -> None:
+        """Поставить задачи для уже проиндексированного документа (дубликат).
+
+        Документ повторяется в другом источнике: строки с ``(doc_id, chunk)``
+        уже были, но у нового источника свой сайдкар — ставим его задачи.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO embedding_queue"
+                "(doc_id, chunk_index, area, source_path, status, created_at) "
+                "SELECT doc_id, chunk_index, ?, ?, 'pending', ?"
+                " FROM chunks WHERE doc_id = ?",
+                (area, source_path, utcnow(), doc_id),
+            )
 
     def close(self) -> None:
         with self._lock:

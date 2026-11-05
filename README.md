@@ -47,6 +47,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 # запуск сервиса приёма (модуль 1)
 PYTHONPATH=src python3 -m persinder --data-dir ~/.persinder --port 8756
 
+# эмбеддинги по требованию: очередь → векторы → сайдкары (модуль 2)
+PYTHONPATH=src python3 -m persinder embed --data-dir ~/.persinder
+
 # проверка
 curl -s localhost:8756/health
 curl -s -X POST localhost:8756/ingest \
@@ -54,9 +57,11 @@ curl -s -X POST localhost:8756/ingest \
   -d '{"filename":"note.md","area":"personal","text":"Привет мир"}'
 ```
 
-Реализован **модуль 1** (`ingest`): приём текста и метаданных, быстрый морфологический
-слой (FTS5), временное хранение текста и очередь на эмбеддинги. Остальные модули —
-заглушки с зафиксированными интерфейсами (см. `docs/modules.md`).
+Реализованы **модуль 1** (`ingest` — приём текста, морфологический слой FTS5,
+журнал вызовов, инлайн-удаление) и **модуль 2** (`embed` — воркер очереди:
+текст → векторы → сайдкары). Эмбеддер пока детерминированная заглушка
+(`placeholder-v1`), реальная модель подключится за тем же портом. Оставшаяся
+заглушка — `vectorindex` (USearch). Карта и интерфейсы — в `docs/modules.md`.
 
 ## Статус
 

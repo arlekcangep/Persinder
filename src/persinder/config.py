@@ -25,10 +25,20 @@ class Settings:
         """Временный каталог для сырого текста до подсчёта эмбеддингов."""
         return self.data_dir / "pending_texts"
 
+    @property
+    def virtual_dir(self) -> Path:
+        """Папка данных, которых нет на диске (web, вставленный текст).
+
+        Сюда ingest кладёт их сайдкары (``<doc_id>.pdr``); сам текст живёт в
+        ``text_dir``.
+        """
+        return self.data_dir / "virtual"
+
     def ensure(self) -> Settings:
         """Создать каталоги, если их нет."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.text_dir.mkdir(parents=True, exist_ok=True)
+        self.virtual_dir.mkdir(parents=True, exist_ok=True)
         return self
 
     @classmethod

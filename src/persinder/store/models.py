@@ -24,6 +24,7 @@ class EmbeddingQueueItem(TypedDict):
     doc_id: str
     chunk_index: int
     area: str
+    source_path: str  # пусто — виртуальный элемент (нет файла на диске)
 
 
 class StoreCounts(TypedDict):

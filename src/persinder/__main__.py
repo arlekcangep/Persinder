@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .api import serve
 from .config import Settings
+from .embed import EmbedStats, EmbedWorker, PlaceholderEmbedder
 from .ingest import IngestJournal, IngestService, RecoveryStats
 from .morphology import default_stemmer
 from .search import SearchService
@@ -38,6 +39,7 @@ def build_service(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
         journal=IngestJournal(settings.data_dir / "ingest.jsonl"),
+        virtual_dir=settings.virtual_dir,
     )
     search = SearchService(store=store, stemmer=stemmer)
     return ingest, search, store
@@ -96,6 +98,41 @@ def format_recovery(stats: RecoveryStats) -> str:
     )
 
 
+def format_embed(stats: EmbedStats) -> str:
+    """Человекочитаемый отчёт прохода воркера эмбеддингов."""
+    if stats.docs == 0 and stats.skipped == 0 and stats.errors == 0:
+        return "Embed: очередь пуста"
+    return (
+        f"Embed: документов {stats.docs}, чанков {stats.chunks}, "
+        f"сайдкаров {stats.sidecars}, пропущено {stats.skipped}, "
+        f"ошибок {stats.errors}"
+    )
+
+
+def run_embed(data_dir: Path | None, limit: int) -> int:
+    """Эмбеддинги по требованию: очередь → векторы → сайдкары (§7)."""
+    settings = Settings.default()
+    if data_dir:
+        settings = replace(settings, data_dir=data_dir)
+    settings.ensure()
+    store = SqliteStore(settings.db_path)
+    textstore = FsTextStore(settings.text_dir)
+    worker = EmbedWorker(
+        store=store,
+        textstore=textstore,
+        embedder=PlaceholderEmbedder(),
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+        virtual_dir=settings.virtual_dir,
+    )
+    try:
+        stats = worker.run_once(limit)
+    finally:
+        store.close()
+    print(format_embed(stats))
+    return 0
+
+
 def _wait_forever() -> None:
     import time
 
@@ -118,6 +155,10 @@ def main(argv: list[str] | None = None) -> int:
     watch_p.add_argument("--config", type=Path, required=True, help="YAML-конфиг")
     watch_p.add_argument("--data-dir", type=Path, default=None)
 
+    embed_p = sub.add_parser("embed", help="эмбеддинги: очередь → векторы → сайдкары")
+    embed_p.add_argument("--data-dir", type=Path, default=None)
+    embed_p.add_argument("--limit", type=int, default=100, help="задач за проход")
+
     # Совместимость: без подкоманды — serve с флагами.
     parser.add_argument("--data-dir", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--host", default=None, help=argparse.SUPPRESS)
@@ -126,6 +167,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "watch":
         return run_watch(args.config, args.data_dir)
+    if args.command == "embed":
+        return run_embed(args.data_dir, args.limit)
     if args.command == "serve" or args.command is None:
         return _serve_main(parser, args)
     parser.print_help()

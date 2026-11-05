@@ -59,3 +59,9 @@ class EmbeddingJob:
     chunk_index: int
     area: str
     created_at: str
+    source_path: str = ""
+
+    @property
+    def key(self) -> str:
+        """Ключ задачи в очереди: документ + источник."""
+        return f"{self.doc_id}\x00{self.source_path}"

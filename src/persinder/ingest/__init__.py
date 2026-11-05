@@ -1,5 +1,6 @@
 """Сервис приёма: морфоиндекс + очередь эмбеддингов + журнал вызовов."""
 
+from ..domain import chunk_text
 from .journal import INGEST_RETENTION_DAYS, IngestEntry, IngestEvent, IngestJournal
 from .models import (
     IngestRequest,
@@ -7,7 +8,7 @@ from .models import (
     RecoveryStats,
     RemoveResult,
 )
-from .service import IngestService, chunk_text
+from .service import IngestService
 
 __all__ = [
     "IngestService",
