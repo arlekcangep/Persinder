@@ -18,6 +18,13 @@ class IngestRequest:
     area: Area
     text: str
     title: str | None = None
+    source_path: str | None = None
+    """Абсолютный путь источника на диске.
+
+    Есть — файл реальный, сайдкар пишется рядом с ним (``.persinder/``).
+    Нет — данных на диске нет (web, вставленный текст): их эмбеддинги и сам
+    текст живут в отдельной папке (``Settings.virtual_dir``).
+    """
 
 
 @dataclass(frozen=True)
