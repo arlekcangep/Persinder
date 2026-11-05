@@ -26,7 +26,7 @@ from .embed import (
 )
 from .ingest import IngestJournal, IngestService, RecoveryStats
 from .morphology import default_stemmer
-from .search import SearchService
+from .search import SearchQuery, SearchService
 from .sources import (
     JOURNAL_RETENTION_DAYS,
     IndexingPipeline,
@@ -37,6 +37,7 @@ from .sources import (
 )
 from .store import SqliteStore
 from .textstore import FsTextStore
+from .vectorindex import VectorSearch
 
 
 def build_service(
@@ -58,7 +59,12 @@ def build_service(
         virtual_dir=settings.virtual_dir,
         embedding_models=models.queue_models(),
     )
-    search = SearchService(store=store, stemmer=stemmer)
+    vector_search = VectorSearch(
+        store=store,
+        embedder_factory=lambda key: build_embedder(settings.models_dir, key),
+        search_model=models.search,
+    )
+    search = SearchService(store=store, stemmer=stemmer, vector_search=vector_search)
     return ingest, search, store
 
 
@@ -311,11 +317,45 @@ def run_model_remove(settings: Settings, key: str) -> int:
     try:
         sources = store.all_sources()
         store.drop_queue_model(key)
+        store.drop_embeddings_model(key)
     finally:
         store.close()
     delete_model_sidecars(settings.virtual_dir, key, sources)
     remove_weights(root, key)
     print(f"удалена {key}: веса, сайдкары (файловые и виртуальные), задачи из очереди.")
+    return 0
+
+
+def run_search(data_dir: Path | None, text: str, limit: int) -> int:
+    """Поиск из консоли: морфология + семантика (модуль 3)."""
+    settings = Settings.default()
+    if data_dir:
+        settings = replace(settings, data_dir=data_dir)
+    settings.ensure()
+    store = SqliteStore(settings.db_path)
+    try:
+        stemmer = default_stemmer()
+        models = load(settings.models_state_path)
+        vector_search = VectorSearch(
+            store=store,
+            embedder_factory=lambda key: build_embedder(settings.models_dir, key),
+            search_model=models.search,
+        )
+        search = SearchService(
+            store=store, stemmer=stemmer, vector_search=vector_search
+        )
+        result = search.search(SearchQuery(text=text, limit=limit))
+    finally:
+        store.close()
+    print(f"морфология: {len(result.hits)}, семантика: {len(result.semantic_hits)}")
+    for kind, hits in (
+        ("морфология", result.hits),
+        ("семантика", result.semantic_hits),
+    ):
+        for hit in hits:
+            print(
+                f"  [{kind}] {hit.document_id} чанк {hit.chunk_index} = {hit.score:.4f}"
+            )
     return 0
 
 
@@ -377,6 +417,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     remove_p.add_argument("key")
 
+    search_p = sub.add_parser(
+        "search", help="поиск из консоли (морфология + семантика)"
+    )
+    search_p.add_argument("--data-dir", type=Path, default=None)
+    search_p.add_argument("--limit", type=int, default=20)
+    search_p.add_argument("text")
+
     # Совместимость: без подкоманды — serve с флагами.
     parser.add_argument("--data-dir", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--host", default=None, help=argparse.SUPPRESS)
@@ -389,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_embed(
             args.data_dir, args.limit, args.all, args.model, args.background
         )
+    if args.command == "search":
+        return run_search(args.data_dir, args.text, args.limit)
     if args.command == "model":
         return _model_main(parser, args)
     if args.command == "serve" or args.command is None:

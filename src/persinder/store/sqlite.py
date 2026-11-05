@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 
 from ..domain import Chunk, Document, EmbeddingJob, utcnow
-from .models import EmbeddingQueueItem, MorphHit, SourceRow, StoreCounts
+from .models import EmbeddingQueueItem, EmbeddingRow, MorphHit, SourceRow, StoreCounts
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -66,6 +66,17 @@ CREATE TABLE IF NOT EXISTS tags (
     doc_id TEXT NOT NULL,
     tag    TEXT NOT NULL,
     UNIQUE(doc_id, tag)
+);
+
+-- Векторы чанков под моделью: локальное производное для векторного поиска
+-- (модуль 3). Сайдкар синхронизируется через Syncthing, эта таблица
+-- пересобирается из него/воркером на каждом устройстве (§8).
+CREATE TABLE IF NOT EXISTS embeddings (
+    model       TEXT NOT NULL,
+    doc_id      TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    vector      BLOB NOT NULL,  -- f16, размерность из модели
+    PRIMARY KEY (model, doc_id, chunk_index)
 );
 """
 
@@ -467,6 +478,47 @@ class SqliteStore:
             )
             for row in rows
         ]
+
+    # --- эмбеддинги (локальное производное для векторного поиска, модуль 3) ---
+
+    def put_embeddings(self, model: str, rows: list[tuple[str, int, bytes]]) -> None:
+        """Записать/заменить векторы чанков документа под моделью.
+
+        ``rows`` — ``(doc_id, chunk_index, vector)``; ``vector`` — f16-блоб
+        (см. ``sidecar.pack_f16_vectors``). Строки удаляются каскадом при
+        удалении документа (FK ON DELETE CASCADE).
+        """
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO embeddings"
+                "(model, doc_id, chunk_index, vector) VALUES (?, ?, ?, ?)",
+                [
+                    (model, doc_id, chunk_index, vector)
+                    for doc_id, chunk_index, vector in rows
+                ],
+            )
+
+    def embeddings_for_model(self, model: str) -> list[EmbeddingRow]:
+        """Все векторы чанков под моделью (для векторного поиска)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT doc_id, chunk_index, vector FROM embeddings "
+                "WHERE model = ? ORDER BY doc_id, chunk_index",
+                (model,),
+            ).fetchall()
+        return [
+            EmbeddingRow(
+                doc_id=str(row["doc_id"]),
+                chunk_index=int(row["chunk_index"]),
+                vector=bytes(row["vector"]),
+            )
+            for row in rows
+        ]
+
+    def drop_embeddings_model(self, model: str) -> None:
+        """Убрать векторы модели (``model remove`` — вместе с сайдкарами)."""
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM embeddings WHERE model = ?", (model,))
 
     def close(self) -> None:
         with self._lock:

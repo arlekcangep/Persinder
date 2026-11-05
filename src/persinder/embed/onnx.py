@@ -48,9 +48,15 @@ class OnnxEmbedder:
         )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(_PASSAGE_PREFIX, texts)
+
+    def embed_query(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(_QUERY_PREFIX, texts)
+
+    def _embed(self, prefix: str, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        encoded = [self._tokenizer.encode(_PASSAGE_PREFIX + text) for text in texts]
+        encoded = [self._tokenizer.encode(prefix + text) for text in texts]
         batch = len(encoded)
         length = max(1, min(max(len(e.ids) for e in encoded), _MAX_LENGTH))
 

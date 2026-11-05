@@ -37,6 +37,19 @@ class SourceRow(TypedDict):
     source_path: str
 
 
+class EmbeddingRow(TypedDict):
+    """Строка таблицы эмбеддингов (локальное производное, §8).
+
+    Векторы чанков под моделью, материализованные воркером ``embed``
+    (сайдкар — синхронизируемый артефакт, эта таблица — локальный кэш для
+    векторного поиска, модуль 3). ``vector`` — f16-блоб (см. sidecar).
+    """
+
+    doc_id: str
+    chunk_index: int
+    vector: bytes
+
+
 class StoreCounts(TypedDict):
     """Счётчики содержимого метастора."""
 

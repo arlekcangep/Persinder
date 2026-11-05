@@ -22,7 +22,9 @@ from .sidecar import (
     delete_model_sidecars,
     delete_virtual_sidecars,
     file_sidecar_path,
+    pack_f16_vectors,
     read_sidecar,
+    unpack_f16_vectors,
     virtual_sidecar_path,
     write_sidecar,
 )
@@ -41,6 +43,8 @@ __all__ = [
     "virtual_sidecar_path",
     "write_sidecar",
     "read_sidecar",
+    "pack_f16_vectors",
+    "unpack_f16_vectors",
     "delete_file_sidecars",
     "delete_virtual_sidecars",
     "delete_model_sidecars",

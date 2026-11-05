@@ -117,6 +117,24 @@ def delete_model_sidecars(
                 path.unlink()
 
 
+def pack_f16_vectors(vectors: list[list[float]], dim: int) -> bytes:
+    """Упаковать векторы в f16-блоб (формат сайдкара и таблицы embeddings)."""
+    fmt = struct.Struct(f">{dim}e")
+    out = bytearray()
+    for vector in vectors:
+        if len(vector) != dim:
+            raise ValueError(f"размерность вектора {len(vector)} != {dim}")
+        out += fmt.pack(*vector)
+    return bytes(out)
+
+
+def unpack_f16_vectors(data: bytes, dim: int) -> list[tuple[float, ...]]:
+    """Разобрать f16-блоб обратно в список векторов."""
+    fmt = struct.Struct(f">{dim}e")
+    size = fmt.size
+    return [fmt.unpack(data[i : i + size]) for i in range(0, len(data), size)]
+
+
 def write_sidecar(
     path: Path,
     fingerprint: EmbedFingerprint,

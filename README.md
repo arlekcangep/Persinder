@@ -59,6 +59,9 @@ PYTHONPATH=src python3 -m persinder model install e5-small-int8-v1   # веса 
 PYTHONPATH=src python3 -m persinder embed --background               # разобрать очередь до пустой
 PYTHONPATH=src python3 -m persinder model use e5-small-int8-v1       # переключить поиск
 
+# семантический поиск (модуль 3): морфология + семантика
+PYTHONPATH=src python3 -m persinder search "коты сидят" --limit 10
+
 # проверка
 curl -s localhost:8756/health
 curl -s -X POST localhost:8756/ingest \
@@ -67,15 +70,19 @@ curl -s -X POST localhost:8756/ingest \
 ```
 
 Реализованы **модуль 1** (`ingest` — приём текста, морфологический слой FTS5,
-журнал вызовов, инлайн-удаление) и **модуль 2** (`embed` — воркер очереди:
-текст → векторы → сайдкары, реестр моделей и явный модель-менеджмент).
+журнал вызовов, инлайн-удаление), **модуль 2** (`embed` — воркер очереди:
+текст → векторы → сайдкары, реестр моделей и явный модель-менеджмент) и
+**модуль 3** (`vectorindex` — семантический поиск по векторам из SQLite).
 Эмбеддер — реальная модель e5-small (ONNX INT8, `persinder model install`)
 или детерминированная заглушка (`placeholder-v1`, встроена). У файла живут
 сайдкары нескольких моделей сразу (по подпапке на модель): при установке новой
 модели миграция стартует в фоне, поиск остаётся на старой до явного
-`persinder model use`; удаление `persinder model remove` убирает веса и все
-сайдкары модели в один момент. Оставшаяся заглушка — `vectorindex` (USearch).
-Карта и интерфейсы — в `docs/modules.md`.
+`persinder model use`; удаление `persinder model remove` убирает веса, все
+сайдкары и векторы модели в один момент. Векторный поиск идёт активной
+поисковой моделью (`model use`), в ответе `/search` семантические хиты —
+отдельным полем `semantic_hits` рядом с `hits`; единое ранжирование (D16) и
+переход на USearch для больших баз — следующие шаги. Карта и интерфейсы — в
+`docs/modules.md`.
 
 ## Статус
 

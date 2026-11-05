@@ -24,7 +24,12 @@ from ..domain import chunk_text
 from ..interfaces import Embedder, MetaStore, TextStore
 from ..morphology import tokenize
 from .models import ChunkParams, EmbedFingerprint, EmbedStats
-from .sidecar import file_sidecar_path, virtual_sidecar_path, write_sidecar
+from .sidecar import (
+    file_sidecar_path,
+    pack_f16_vectors,
+    virtual_sidecar_path,
+    write_sidecar,
+)
 
 if TYPE_CHECKING:
     from ..store.models import EmbeddingQueueItem
@@ -43,6 +48,13 @@ class PlaceholderEmbedder:
     dim = 384
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts)
+
+    def embed_query(self, texts: list[str]) -> list[list[float]]:
+        # для заглушки префикс query/passage не важен — вектор от текста
+        return self._embed(texts)
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
         vectors: list[list[float]] = []
         for text in texts:
             vector = [0.0] * self.dim
@@ -126,6 +138,19 @@ class EmbedWorker:
             payload = [
                 (start, end, vectors[index]) for index, (start, end) in enumerate(spans)
             ]
+            # Локальное производное (модуль 3): векторы в SQLite под модель —
+            # по ним работает векторный поиск (таблица embeddings, §8).
+            self._store.put_embeddings(
+                model,
+                [
+                    (
+                        doc_id,
+                        index,
+                        pack_f16_vectors([vectors[index]], embedder.dim),
+                    )
+                    for index in range(len(spans))
+                ],
+            )
             targets = {str(row["source_path"]) for row in model_rows}
             for target in targets:
                 if not target:

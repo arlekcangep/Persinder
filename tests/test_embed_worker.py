@@ -13,6 +13,7 @@ from persinder.embed import (
     PlaceholderEmbedder,
     file_sidecar_path,
     read_sidecar,
+    unpack_f16_vectors,
     virtual_sidecar_path,
 )
 from persinder.ingest import IngestRequest, IngestService
@@ -92,6 +93,23 @@ class EmbedWorkerTest(unittest.TestCase):
         self.assertEqual(data.fingerprint.model, "placeholder-v1")
         self.assertEqual(data.fingerprint.dim, self.embedder.dim)
         self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_worker_materializes_embeddings_in_store(self):
+        """Модуль 3: воркер пишет векторы чанков в таблицу embeddings под моделью."""
+        text = "заметка про квантовый флакс"
+        self._file("books/one.md", text)
+        self.worker.run_once()
+        rows = self.store.embeddings_for_model("placeholder-v1")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0]["doc_id"],
+            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(rows[0]["chunk_index"], 0)
+        vector = unpack_f16_vectors(rows[0]["vector"], self.embedder.dim)[0]
+        self.assertEqual(len(vector), self.embedder.dim)
+        # другие модели не смешиваются
+        self.assertEqual(self.store.embeddings_for_model("placeholder-v2"), [])
 
     def test_virtual_sidecar_in_virtual_dir(self):
         text = "вставленный текст без файла на диске"

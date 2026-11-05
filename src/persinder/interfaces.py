@@ -14,7 +14,13 @@ if TYPE_CHECKING:
     from .domain import Area, Chunk, Document, EmbeddingJob
     from .ingest.models import IngestRequest, IngestResult, RemoveResult
     from .search.models import SearchQuery, SearchResult
-    from .store.models import EmbeddingQueueItem, MorphHit, SourceRow, StoreCounts
+    from .store.models import (
+        EmbeddingQueueItem,
+        EmbeddingRow,
+        MorphHit,
+        SourceRow,
+        StoreCounts,
+    )
 
 
 @runtime_checkable
@@ -53,7 +59,13 @@ class Embedder(Protocol):
     name: str
     dim: int
 
-    def embed(self, texts: list[str]) -> list[list[float]]: ...
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Векторы пассажей (документы/чанки)."""
+        ...
+
+    def embed_query(self, texts: list[str]) -> list[list[float]]:
+        """Векторы запросов (e5 требует префикс ``query:``, §12.1)."""
+        ...
 
 
 @runtime_checkable
@@ -112,6 +124,18 @@ class MetaStore(Protocol):
 
     def all_sources(self) -> list[SourceRow]:
         """Все источники (для удаления сайдкаров модели)."""
+        ...
+
+    def put_embeddings(self, model: str, rows: list[tuple[str, int, bytes]]) -> None:
+        """Записать/заменить векторы чанков документа под моделью (модуль 3)."""
+        ...
+
+    def embeddings_for_model(self, model: str) -> list[EmbeddingRow]:
+        """Все векторы чанков под моделью (для векторного поиска)."""
+        ...
+
+    def drop_embeddings_model(self, model: str) -> None:
+        """Убрать векторы модели (``model remove`` — вместе с сайдкарами)."""
         ...
 
     def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]: ...

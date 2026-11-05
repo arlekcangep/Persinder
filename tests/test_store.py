@@ -83,6 +83,41 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertTrue(any(row["source_path"] == "/x/b.txt" for row in sources))
         self.assertTrue(any(row["source_path"] == "" for row in sources))
 
+    def test_embeddings_roundtrip(self):
+        self._save()
+        blob = b"\x00\x3c" * 2  # 384 f16 = 768 байт: заполняем нулями
+        self.store.put_embeddings("m1", [("d1", 0, blob), ("d1", 1, blob)])
+        rows = self.store.embeddings_for_model("m1")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["doc_id"], "d1")
+        self.assertEqual(rows[0]["chunk_index"], 0)
+        self.assertEqual(rows[0]["vector"], blob)
+        # другие модели не смешиваются
+        self.assertEqual(self.store.embeddings_for_model("m2"), [])
+
+    def test_embeddings_replace_on_same_key(self):
+        self._save()
+        self.store.put_embeddings("m1", [("d1", 0, b"old")])
+        self.store.put_embeddings("m1", [("d1", 0, b"new")])
+        rows = self.store.embeddings_for_model("m1")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["vector"], b"new")
+
+    def test_embeddings_cascade_on_doc_delete(self):
+        """Удаление документа уносит его векторы (FK ON DELETE CASCADE, D24)."""
+        self._save(doc_id="d1")
+        self.store.put_embeddings("m1", [("d1", 0, b"v")])
+        self.store.delete_document("d1")
+        self.assertEqual(self.store.embeddings_for_model("m1"), [])
+
+    def test_drop_embeddings_model(self):
+        self._save()
+        self.store.put_embeddings("m1", [("d1", 0, b"v")])
+        self.store.put_embeddings("m2", [("d1", 0, b"v")])
+        self.store.drop_embeddings_model("m1")
+        self.assertEqual(self.store.embeddings_for_model("m1"), [])
+        self.assertEqual(len(self.store.embeddings_for_model("m2")), 1)
+
     def test_counts(self):
         self._save()
         counts = self.store.counts()
