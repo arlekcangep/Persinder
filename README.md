@@ -62,6 +62,9 @@ PYTHONPATH=src python3 -m persinder model use e5-small-int8-v1       # пере�
 # семантический поиск (модуль 3): морфология + семантика
 PYTHONPATH=src python3 -m persinder search "коты сидят" --limit 10
 
+# ANN-индекс USearch: пересобрать из таблицы (холодный старт/рассинхрон)
+PYTHONPATH=src python3 -m persinder ann rebuild
+
 # проверка
 curl -s localhost:8756/health
 curl -s -X POST localhost:8756/ingest \
@@ -72,7 +75,8 @@ curl -s -X POST localhost:8756/ingest \
 Реализованы **модуль 1** (`ingest` — приём текста, морфологический слой FTS5,
 журнал вызовов, инлайн-удаление), **модуль 2** (`embed` — воркер очереди:
 текст → векторы → сайдкары, реестр моделей и явный модель-менеджмент) и
-**модуль 3** (`vectorindex` — семантический поиск по векторам из SQLite).
+**модуль 3** (`vectorindex` — семантический поиск: ANN USearch `data_dir/ann/`
+поверх таблицы `embeddings`, точный скан таблицы как фолбэк).
 Эмбеддер — реальная модель e5-small (ONNX INT8, `persinder model install`)
 или детерминированная заглушка (`placeholder-v1`, встроена). У файла живут
 сайдкары нескольких моделей сразу (по подпапке на модель): при установке новой
@@ -80,8 +84,9 @@ curl -s -X POST localhost:8756/ingest \
 `persinder model use`; удаление `persinder model remove` убирает веса, все
 сайдкары и векторы модели в один момент. Векторный поиск идёт активной
 поисковой моделью (`model use`), в ответе `/search` семантические хиты —
-отдельным полем `semantic_hits` рядом с `hits`; единое ранжирование (D16) и
-переход на USearch для больших баз — следующие шаги. Карта и интерфейсы — в
+отдельным полем `semantic_hits` рядом с `hits`. Векторный поиск идёт по
+USearch-индексу (mmap-файл на модель, `persinder ann rebuild` пересобирает);
+единое ранжирование (D16) — следующий шаг. Карта и интерфейсы — в
 `docs/modules.md`.
 
 ## Статус

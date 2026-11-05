@@ -71,12 +71,15 @@ CREATE TABLE IF NOT EXISTS tags (
 -- Векторы чанков под моделью: локальное производное для векторного поиска
 -- (модуль 3). Сайдкар синхронизируется через Syncthing, эта таблица
 -- пересобирается из него/воркером на каждом устройстве (§8).
+-- ``id`` — стабильный ключ строки (ANN-индекс ссылается на чанк именно им);
+-- ``vector`` — f16, размерность из модели.
 CREATE TABLE IF NOT EXISTS embeddings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     model       TEXT NOT NULL,
     doc_id      TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     chunk_index INTEGER NOT NULL,
-    vector      BLOB NOT NULL,  -- f16, размерность из модели
-    PRIMARY KEY (model, doc_id, chunk_index)
+    vector      BLOB NOT NULL,
+    UNIQUE(model, doc_id, chunk_index)
 );
 """
 
@@ -108,6 +111,36 @@ class SqliteStore:
                     f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
         self._migrate_queue_model()
+        self._migrate_embeddings_id()
+
+    def _migrate_embeddings_id(self) -> None:
+        """Старая таблица ``embeddings`` (PK model+doc_id+chunk_index) → с id.
+
+        ANN-индексу (USearch) нужен стабильный целочисленный ключ строки;
+        старым строкам id раздаются по порядку.
+        """
+        cols = [
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(embeddings)")
+        ]
+        if "id" in cols:
+            return
+        self._conn.executescript(
+            """
+            ALTER TABLE embeddings RENAME TO embeddings_old;
+            CREATE TABLE embeddings (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                model       TEXT NOT NULL,
+                doc_id      TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                chunk_index INTEGER NOT NULL,
+                vector      BLOB NOT NULL,
+                UNIQUE(model, doc_id, chunk_index)
+            );
+            INSERT INTO embeddings (model, doc_id, chunk_index, vector)
+            SELECT model, doc_id, chunk_index, vector FROM embeddings_old;
+            DROP TABLE embeddings_old;
+            """
+        )
 
     def _migrate_queue_model(self) -> None:
         """Очередь теперь модельная (колонка ``model`` + новый UNIQUE).
@@ -481,44 +514,88 @@ class SqliteStore:
 
     # --- эмбеддинги (локальное производное для векторного поиска, модуль 3) ---
 
-    def put_embeddings(self, model: str, rows: list[tuple[str, int, bytes]]) -> None:
+    def put_embeddings(
+        self, model: str, rows: list[tuple[str, int, bytes]]
+    ) -> list[int]:
         """Записать/заменить векторы чанков документа под моделью.
 
         ``rows`` — ``(doc_id, chunk_index, vector)``; ``vector`` — f16-блоб
-        (см. ``sidecar.pack_f16_vectors``). Строки удаляются каскадом при
-        удалении документа (FK ON DELETE CASCADE).
+        (см. ``sidecar.pack_f16_vectors``). Возвращает стабильные ``id`` строк
+        в том же порядке (по ним ANN-индекс ссылается на чанки). Строки
+        удаляются каскадом при удалении документа (FK ON DELETE CASCADE).
         """
+        ids: list[int] = []
         with self._lock, self._conn:
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO embeddings"
-                "(model, doc_id, chunk_index, vector) VALUES (?, ?, ?, ?)",
-                [
-                    (model, doc_id, chunk_index, vector)
-                    for doc_id, chunk_index, vector in rows
-                ],
-            )
+            for doc_id, chunk_index, vector in rows:
+                self._conn.execute(
+                    "INSERT INTO embeddings(model, doc_id, chunk_index, vector) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(model, doc_id, chunk_index) "
+                    "DO UPDATE SET vector = excluded.vector",
+                    (model, doc_id, chunk_index, vector),
+                )
+                row = self._conn.execute(
+                    "SELECT id FROM embeddings"
+                    " WHERE model = ? AND doc_id = ? AND chunk_index = ?",
+                    (model, doc_id, chunk_index),
+                ).fetchone()
+                ids.append(int(row["id"]))
+        return ids
 
     def embeddings_for_model(self, model: str) -> list[EmbeddingRow]:
-        """Все векторы чанков под моделью (для векторного поиска)."""
+        """Все векторы чанков под моделью (для точного скана-фолбэка)."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT doc_id, chunk_index, vector FROM embeddings "
+                "SELECT id, doc_id, chunk_index, vector FROM embeddings "
                 "WHERE model = ? ORDER BY doc_id, chunk_index",
                 (model,),
             ).fetchall()
-        return [
-            EmbeddingRow(
-                doc_id=str(row["doc_id"]),
-                chunk_index=int(row["chunk_index"]),
-                vector=bytes(row["vector"]),
-            )
-            for row in rows
-        ]
+        return [self._embedding_row(row) for row in rows]
+
+    def embeddings_ids_for_model(self, model: str) -> list[EmbeddingRow]:
+        """Все строки модели (для реконсиляции ANN-индекса с таблицей)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, doc_id, chunk_index, vector FROM embeddings "
+                "WHERE model = ? ORDER BY id",
+                (model,),
+            ).fetchall()
+        return [self._embedding_row(row) for row in rows]
+
+    def embeddings_for_ids(self, ids: list[int]) -> list[EmbeddingRow]:
+        """Строки по ``id`` (ANN-хиты → doc_id/chunk; протухшие отсекаются)."""
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id, doc_id, chunk_index, vector FROM embeddings "
+                f"WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        return [self._embedding_row(row) for row in rows]
+
+    @staticmethod
+    def _embedding_row(row: sqlite3.Row) -> EmbeddingRow:
+        return EmbeddingRow(
+            id=int(row["id"]),
+            doc_id=str(row["doc_id"]),
+            chunk_index=int(row["chunk_index"]),
+            vector=bytes(row["vector"]),
+        )
 
     def drop_embeddings_model(self, model: str) -> None:
         """Убрать векторы модели (``model remove`` — вместе с сайдкарами)."""
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM embeddings WHERE model = ?", (model,))
+
+    def embedding_models(self) -> list[str]:
+        """Модели, у которых есть векторы (для ``persinder ann rebuild``)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT model FROM embeddings ORDER BY model"
+            ).fetchall()
+        return [str(row["model"]) for row in rows]
 
     def close(self) -> None:
         with self._lock:

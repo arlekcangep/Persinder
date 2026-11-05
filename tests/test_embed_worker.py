@@ -21,6 +21,7 @@ from persinder.interfaces import Embedder
 from persinder.morphology import NoopStemmer
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
+from persinder.vectorindex import UsannIndex
 
 
 class EmbedWorkerTest(unittest.TestCase):
@@ -48,6 +49,7 @@ class EmbedWorkerTest(unittest.TestCase):
         chunk_size: int = 1200,
         chunk_overlap: int = 200,
         embedder: Embedder | None = None,
+        ann_dir: Path | None = None,
     ) -> EmbedWorker:
         embedder = embedder if embedder is not None else self.embedder
 
@@ -62,6 +64,7 @@ class EmbedWorkerTest(unittest.TestCase):
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             virtual_dir=self.virtual,
+            ann_dir=ann_dir,
         )
 
     def tearDown(self):
@@ -110,6 +113,49 @@ class EmbedWorkerTest(unittest.TestCase):
         self.assertEqual(len(vector), self.embedder.dim)
         # другие модели не смешиваются
         self.assertEqual(self.store.embeddings_for_model("placeholder-v2"), [])
+
+    def test_worker_maintains_ann_index(self):
+        """Модуль 3: воркер кладёт векторы в ANN-индекс (ключи = id строк)."""
+        ann_dir = self.data / "ann"
+        ann_dir.mkdir()
+        worker = self._worker(ann_dir=ann_dir)
+        self._file("books/one.md", "заметка про квантовый флакс")
+        worker.run_once()
+
+        index_path = ann_dir / "placeholder-v1.usearch"
+        self.assertTrue(index_path.exists())
+        index = UsannIndex(index_path, self.embedder.dim)
+        live = {
+            row["id"] for row in self.store.embeddings_ids_for_model("placeholder-v1")
+        }
+        self.assertEqual(index.keys(), live)
+
+    def test_worker_syncs_stale_keys_on_next_pass(self):
+        """Реконсиляция: удалённый документ уходит из индекса на следующем проходе."""
+        ann_dir = self.data / "ann"
+        ann_dir.mkdir()
+        worker = self._worker(ann_dir=ann_dir)
+        text = "документ, который потом удалят"
+        self._file("books/one.md", text)
+        worker.run_once()
+        index_path = ann_dir / "placeholder-v1.usearch"
+        index = UsannIndex(index_path, self.embedder.dim)
+        self.assertEqual(index.size, 1)
+
+        # удаляем документ каскадом; в файле индекса ключ пока «протух»
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        self.store.delete_document(doc_id)
+        self.assertEqual(index.size, 1, "индекс чистится не мгновенно, а на проходе")
+
+        # новый файл под ту же модель заставляет воркер открыть индекс и сделать sync
+        self._file("books/two.md", "второй документ под той же моделью")
+        worker.run_once()
+        live = {
+            row["id"] for row in self.store.embeddings_ids_for_model("placeholder-v1")
+        }
+        reopened = UsannIndex(index_path, self.embedder.dim)
+        self.assertEqual(reopened.keys(), live)
+        self.assertEqual(reopened.size, 1)
 
     def test_virtual_sidecar_in_virtual_dir(self):
         text = "вставленный текст без файла на диске"

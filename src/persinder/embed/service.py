@@ -1,4 +1,4 @@
-"""Воркер эмбеддингов: очередь → векторы → сайдкары.
+"""Воркер эмбеддингов: очередь → векторы → сайдкары (+ ANN-индекс).
 
 ``EmbedWorker`` разбирает ``embedding_queue``: берёт порцию задач, группирует
 по документу, читает сырой текст из ``TextStore``, нарезает теми же чанками,
@@ -10,6 +10,11 @@
 одновременно жить сайдкары нескольких моделей (D24). Эмбеддер подбирается
 фабрикой по ключу модели (``registry.build_embedder``): реальная e5-small или
 встроенная заглушка ``PlaceholderEmbedder``.
+
+Помимо сайдкара воркер материализует векторы в таблицу ``embeddings`` (модуль 3)
+и поддерживает ANN-индекс USearch (``ann_dir``): добавленные ключи попадают в
+индекс сразу, протухшие (документ удалён) убираются реконсиляцией в конце
+прохода. Индекс — локальное производное, пересобирается ``persinder ann rebuild``.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from typing import TYPE_CHECKING
 from ..domain import chunk_text
 from ..interfaces import Embedder, MetaStore, TextStore
 from ..morphology import tokenize
+from ..vectorindex import UsannIndex
 from .models import ChunkParams, EmbedFingerprint, EmbedStats
 from .sidecar import (
     file_sidecar_path,
@@ -80,6 +86,7 @@ class EmbedWorker:
         chunk_size: int = 1200,
         chunk_overlap: int = 200,
         virtual_dir: Path | None = None,
+        ann_dir: Path | None = None,
     ) -> None:
         self._store = store
         self._textstore = textstore
@@ -87,6 +94,18 @@ class EmbedWorker:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._virtual_dir = Path(virtual_dir) if virtual_dir else None
+        self._ann_dir = Path(ann_dir) if ann_dir else None
+        self._indices: dict[str, UsannIndex] = {}
+
+    def _index(self, model: str, dim: int) -> UsannIndex | None:
+        """Открыть/создать ANN-индекс модели (кэш на проход)."""
+        if self._ann_dir is None:
+            return None
+        index = self._indices.get(model)
+        if index is None:
+            index = UsannIndex(self._ann_dir / f"{model}.usearch", dim)
+            self._indices[model] = index
+        return index
 
     def run_once(self, limit: int = 100) -> EmbedStats:
         """Обработать до ``limit`` задач очереди; вернуть итоги.
@@ -94,16 +113,26 @@ class EmbedWorker:
         Документ обрабатывается целиком: если среди порции есть его задачи,
         берутся все его незавершённые задачи (их может быть больше ``limit``).
         Ошибки не валят проход: задачи остаются в очереди и уйдут в следующий.
+        В конце прохода ANN-индексы реконсилируются с таблицей ``embeddings``.
         """
         stats = EmbedStats()
-        rows = self._store.pending_embeddings(limit)
-        doc_ids = list(dict.fromkeys(str(row["doc_id"]) for row in rows))
-        for doc_id in doc_ids:
-            try:
-                self._process_doc(doc_id, stats)
-            except OSError as exc:
-                stats.errors += 1
-                stats.messages.append(f"{doc_id}: {exc}")
+        self._indices.clear()
+        try:
+            rows = self._store.pending_embeddings(limit)
+            doc_ids = list(dict.fromkeys(str(row["doc_id"]) for row in rows))
+            for doc_id in doc_ids:
+                try:
+                    self._process_doc(doc_id, stats)
+                except OSError as exc:
+                    stats.errors += 1
+                    stats.messages.append(f"{doc_id}: {exc}")
+            for model, index in self._indices.items():
+                live = [
+                    row["id"] for row in self._store.embeddings_ids_for_model(model)
+                ]
+                index.sync(live)
+        finally:
+            self._indices.clear()
         return stats
 
     def _process_doc(self, doc_id: str, stats: EmbedStats) -> None:
@@ -140,7 +169,7 @@ class EmbedWorker:
             ]
             # Локальное производное (модуль 3): векторы в SQLite под модель —
             # по ним работает векторный поиск (таблица embeddings, §8).
-            self._store.put_embeddings(
+            ids = self._store.put_embeddings(
                 model,
                 [
                     (
@@ -151,6 +180,10 @@ class EmbedWorker:
                     for index in range(len(spans))
                 ],
             )
+            # ANN-индекс USearch: ключи строк embeddings, векторы сразу при расчёте.
+            index = self._index(model, embedder.dim)
+            if index is not None:
+                index.add(ids, vectors)
             targets = {str(row["source_path"]) for row in model_rows}
             for target in targets:
                 if not target:

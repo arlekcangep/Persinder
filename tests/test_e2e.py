@@ -110,6 +110,29 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn(semantic[0]["document_id"], {doc_id})
         self.assertEqual(semantic[0]["chunk_index"], 0)
 
+    def test_semantic_hits_via_ann_index(self):
+        """Модуль 3: воркер с ann_dir строит USearch-индекс, поиск идёт по нему."""
+        with self._post(
+            "/ingest", {"filename": "note.md", "area": "personal", "text": TEXT}
+        ) as resp:
+            doc_id = json.load(resp)["document_id"]
+
+        worker = EmbedWorker(
+            self.store,
+            FsTextStore(self.settings.text_dir),
+            lambda key: PlaceholderEmbedder(),
+            virtual_dir=self.settings.virtual_dir,
+            ann_dir=self.settings.ann_dir,
+        )
+        worker.run_once()
+        index_path = self.settings.ann_dir / f"{PlaceholderEmbedder.name}.usearch"
+        self.assertTrue(index_path.exists(), "воркер должен построить ANN-индекс")
+
+        result = self._get("/search?q=" + urllib.parse.quote("коты сидят"))
+        semantic = result["semantic_hits"]
+        self.assertTrue(semantic)
+        self.assertIn(semantic[0]["document_id"], {doc_id})
+
     def test_modified_file_replaces_document(self):
         # Файл изменился: старый документ вытесняется, в индексе только новый.
         with self._post(

@@ -53,11 +53,21 @@ class Settings:
         """Файл активных моделей профиля (``embedding``/``search``, D24)."""
         return self.data_dir / "models.json"
 
+    @property
+    def ann_dir(self) -> Path:
+        """Каталог ANN-индексов USearch: ``<data_dir>/ann/<модель>.usearch``.
+
+        Индекс — локальное производное (пересобирается из таблицы ``embeddings``,
+        ``persinder ann rebuild``), живёт вне синка, на mmap — без резидента в RAM.
+        """
+        return self.data_dir / "ann"
+
     def ensure(self) -> Settings:
         """Создать каталоги, если их нет."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.text_dir.mkdir(parents=True, exist_ok=True)
         self.virtual_dir.mkdir(parents=True, exist_ok=True)
+        self.ann_dir.mkdir(parents=True, exist_ok=True)
         return self
 
     @classmethod

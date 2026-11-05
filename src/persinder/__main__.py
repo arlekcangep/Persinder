@@ -37,7 +37,7 @@ from .sources import (
 )
 from .store import SqliteStore
 from .textstore import FsTextStore
-from .vectorindex import VectorSearch
+from .vectorindex import VectorSearch, rebuild_index
 
 
 def build_service(
@@ -63,6 +63,7 @@ def build_service(
         store=store,
         embedder_factory=lambda key: build_embedder(settings.models_dir, key),
         search_model=models.search,
+        ann_dir=settings.ann_dir,
     )
     search = SearchService(store=store, stemmer=stemmer, vector_search=vector_search)
     return ingest, search, store
@@ -166,6 +167,7 @@ def build_embed_worker(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
         virtual_dir=settings.virtual_dir,
+        ann_dir=settings.ann_dir,
     )
     return worker, store, label
 
@@ -320,9 +322,12 @@ def run_model_remove(settings: Settings, key: str) -> int:
         store.drop_embeddings_model(key)
     finally:
         store.close()
+    ann_path = settings.ann_dir / f"{key}.usearch"
+    if ann_path.exists():
+        ann_path.unlink()
     delete_model_sidecars(settings.virtual_dir, key, sources)
     remove_weights(root, key)
-    print(f"удалена {key}: веса, сайдкары (файловые и виртуальные), задачи из очереди.")
+    print(f"удалена {key}: веса, сайдкары, векторы и ANN-индекс.")
     return 0
 
 
@@ -340,6 +345,7 @@ def run_search(data_dir: Path | None, text: str, limit: int) -> int:
             store=store,
             embedder_factory=lambda key: build_embedder(settings.models_dir, key),
             search_model=models.search,
+            ann_dir=settings.ann_dir,
         )
         search = SearchService(
             store=store, stemmer=stemmer, vector_search=vector_search
@@ -357,6 +363,32 @@ def run_search(data_dir: Path | None, text: str, limit: int) -> int:
                 f"  [{kind}] {hit.document_id} чанк {hit.chunk_index} = {hit.score:.4f}"
             )
     return 0
+
+
+def run_ann_rebuild(data_dir: Path | None, model: str | None) -> int:
+    """Пересобрать ANN-индексы из таблицы ``embeddings`` (§8).
+
+    Нужно после холодного старта устройства (таблица есть, индекса нет) и при
+    рассинхронизации. По умолчанию — все модели, у которых есть векторы.
+    """
+    settings = Settings.default()
+    if data_dir:
+        settings = replace(settings, data_dir=data_dir)
+    settings.ensure()
+    store = SqliteStore(settings.db_path)
+    try:
+        keys = [model] if model else store.embedding_models()
+        for key in keys:
+            count = rebuild_index(
+                store,
+                lambda k: build_embedder(settings.models_dir, k),
+                settings.ann_dir,
+                key,
+            )
+            print(f"{key}: ANN-индекс пересобран, ключей {count}.")
+        return 0
+    finally:
+        store.close()
 
 
 def _wait_forever() -> None:
@@ -424,6 +456,19 @@ def main(argv: list[str] | None = None) -> int:
     search_p.add_argument("--limit", type=int, default=20)
     search_p.add_argument("text")
 
+    ann_p = sub.add_parser("ann", help="ANN-индекс (USearch): пересборка из таблицы")
+    ann_p.add_argument("--data-dir", type=Path, default=None)
+    ann_p.add_argument(
+        "--model", default=None, help="только эта модель (по умолчанию все)"
+    )
+    ann_p.add_argument(
+        "subcommand",
+        nargs="?",
+        default="rebuild",
+        choices=["rebuild"],
+        help="операция (сейчас только rebuild)",
+    )
+
     # Совместимость: без подкоманды — serve с флагами.
     parser.add_argument("--data-dir", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--host", default=None, help=argparse.SUPPRESS)
@@ -438,6 +483,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "search":
         return run_search(args.data_dir, args.text, args.limit)
+    if args.command == "ann":
+        return run_ann_rebuild(args.data_dir, args.model)
     if args.command == "model":
         return _model_main(parser, args)
     if args.command == "serve" or args.command is None:

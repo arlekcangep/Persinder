@@ -10,7 +10,9 @@ requires-python = ">=3.10"
 # onnxruntime — обязательная зависимость (есть официальные колеса для
 # Windows/Linux/macOS): Persinder работает «из коробки», Docker не нужен.
 # Сама модель весит ~120 МБ и управляется отдельно (persinder model install).
-dependencies = ["onnxruntime>=1.19", "tokenizers>=0.19"]
+# usearch — ANN-движок векторного поиска (модуль 3, §8): официальные колеса
+# Windows/Linux/macOS, mmap-индекс на диск, без демонов в простое.
+dependencies = ["onnxruntime>=1.19", "tokenizers>=0.19", "usearch>=2.26"]
 
 [project.optional-dependencies]
 stemming = ["snowballstemmer>=2.2"]

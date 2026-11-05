@@ -103,6 +103,24 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["vector"], b"new")
 
+    def test_embeddings_ids_stable_across_upsert(self):
+        """``id`` строки не меняется при перезаписи вектора — ключ для ANN (§8)."""
+        self._save()
+        ids = self.store.put_embeddings("m1", [("d1", 0, b"old"), ("d1", 1, b"x")])
+        self.assertEqual(len(ids), 2)
+        same = self.store.put_embeddings("m1", [("d1", 0, b"new")])
+        self.assertEqual(same, [ids[0]], "перезапись вектора сохраняет id строки")
+        self.assertEqual(
+            {row["id"] for row in self.store.embeddings_ids_for_model("m1")},
+            set(ids),
+        )
+        self.assertEqual(
+            [row["doc_id"] for row in self.store.embeddings_for_ids([ids[0]])],
+            ["d1"],
+        )
+        self.assertEqual(self.store.embedding_models(), ["m1"])
+        self.assertEqual(self.store.embeddings_for_ids([]), [])
+
     def test_embeddings_cascade_on_doc_delete(self):
         """Удаление документа уносит его векторы (FK ON DELETE CASCADE, D24)."""
         self._save(doc_id="d1")

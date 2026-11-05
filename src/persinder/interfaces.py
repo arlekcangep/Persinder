@@ -126,16 +126,34 @@ class MetaStore(Protocol):
         """Все источники (для удаления сайдкаров модели)."""
         ...
 
-    def put_embeddings(self, model: str, rows: list[tuple[str, int, bytes]]) -> None:
-        """Записать/заменить векторы чанков документа под моделью (модуль 3)."""
+    def put_embeddings(
+        self, model: str, rows: list[tuple[str, int, bytes]]
+    ) -> list[int]:
+        """Записать/заменить векторы чанков документа под моделью (модуль 3).
+
+        Возвращает стабильные ``id`` строк — по ним ANN-индекс ссылается
+        на чанки (USearch).
+        """
         ...
 
     def embeddings_for_model(self, model: str) -> list[EmbeddingRow]:
-        """Все векторы чанков под моделью (для векторного поиска)."""
+        """Все векторы чанков под моделью (для точного скана-фолбэка)."""
+        ...
+
+    def embeddings_ids_for_model(self, model: str) -> list[EmbeddingRow]:
+        """Все строки модели (реконсиляция ANN-индекса с таблицей)."""
+        ...
+
+    def embeddings_for_ids(self, ids: list[int]) -> list[EmbeddingRow]:
+        """Строки по ``id`` (ANN-хиты → doc_id/chunk_index; протухшие — отсекаются)."""
         ...
 
     def drop_embeddings_model(self, model: str) -> None:
         """Убрать векторы модели (``model remove`` — вместе с сайдкарами)."""
+        ...
+
+    def embedding_models(self) -> list[str]:
+        """Модели, у которых есть векторы (для ``persinder ann rebuild``)."""
         ...
 
     def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]: ...
