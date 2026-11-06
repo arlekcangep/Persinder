@@ -228,6 +228,27 @@ class IngestService:
         self._log(IngestEvent.REMOVED, doc_id=doc_id, area=area_name, filename=filename)
         return RemoveResult(found=True, document_id=purged)
 
+    def remove_source_tree(self, area: Area, filename: str) -> RemoveResult:
+        """Убрать источник и все его части (файлы контейнера: ``filename/...``).
+
+        Файл-контейнер (ZIP) даёт по источнику на каждую запись
+        (``bundle.zip/inner.md``). При исчезновении самого файла нужно убрать
+        и его, и части. Для обычного файла частей нет — поведение как у
+        ``remove_source``.
+        """
+        area_name = area.value
+        names = [filename]
+        names.extend(self._store.source_filenames_under(area_name, filename + "/"))
+        found = False
+        purged_doc: str | None = None
+        for name in names:
+            result = self.remove_source(area, name)
+            if result.found:
+                found = True
+                if purged_doc is None and result.document_id is not None:
+                    purged_doc = result.document_id
+        return RemoveResult(found=found, document_id=purged_doc)
+
     # --- восстановление ---
 
     def recover(self) -> RecoveryStats:

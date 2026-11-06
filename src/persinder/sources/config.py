@@ -20,6 +20,12 @@ class ConfigError(ValueError):
 
 
 def _expand(path_str: str) -> Path:
+    """Путь из конфига: ``~`` раскрывается, относительный — от CWD конфига.
+
+    Относительные пути в конфиге удобны для переносимых профилей
+    (git bash на Windows, флешка): они считаются от каталога, где лежит
+    конфиг, — watcher резолвит их сам (см. ``load_config``).
+    """
     return Path(path_str).expanduser()
 
 
@@ -41,6 +47,9 @@ def load_config(
 
     ``known_formats`` — имена доступных экстракторов; если задан, неизвестное
     имя в ``formats`` — ошибка конфига.
+
+    Относительные пути ``path`` считаются от каталога, где лежит конфиг, —
+    профиль переносим между машинами.
     """
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -91,6 +100,14 @@ def load_config(
             recursive=recursive,
             formats=tuple(f.strip() for f in formats),
         )
+        if not area.path.is_absolute():
+            # относительный путь — от каталога конфига, не от CWD процесса
+            area = AreaConfig(
+                path=(path.parent / area.path).resolve(),
+                role=role,
+                recursive=recursive,
+                formats=area.formats,
+            )
         if not area.path.is_dir():
             raise ConfigError(f"areas[{i}]: каталог не существует: {area.path}")
         areas.append(area)

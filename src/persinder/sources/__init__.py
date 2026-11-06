@@ -2,8 +2,11 @@
 
 from .config import ConfigError, load_config
 from .extract import (
+    ArchiveExtractor,
+    ContainerExtractor,
     Extracted,
     Extractor,
+    ExtractorFactory,
     ExtractorRegistry,
     HtmlExtractor,
     MarkdownExtractor,
@@ -30,12 +33,15 @@ __all__ = [
     "AreaConfig",
     "AreaScan",
     "AreaScanner",
+    "ArchiveExtractor",
     "BUILTIN_IGNORES",
     "ChangeEvent",
     "ChangeKind",
     "ConfigError",
+    "ContainerExtractor",
     "Extractor",
     "Extracted",
+    "ExtractorFactory",
     "ExtractorRegistry",
     "IndexingPipeline",
     "HtmlExtractor",
