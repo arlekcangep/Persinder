@@ -164,7 +164,7 @@ class PipelineTest(unittest.TestCase):
         area = AreaConfig(
             path=self.area.path,
             role=Area.PERSONAL,
-            formats=("zip", "markdown", "text"),
+            formats=("archive", "markdown", "text"),
         )
         ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
         pipeline = IndexingPipeline(ingest, default_registry(), journal=self.journal)

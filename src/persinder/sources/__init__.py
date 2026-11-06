@@ -2,6 +2,7 @@
 
 from .config import ConfigError, load_config
 from .extract import (
+    ArchiveExtractor,
     ContainerExtractor,
     Extracted,
     Extractor,
@@ -12,7 +13,6 @@ from .extract import (
     MhtmlExtractor,
     PdfExtractor,
     TextExtractor,
-    ZipExtractor,
     default_registry,
     extract_html,
 )
@@ -33,6 +33,7 @@ __all__ = [
     "AreaConfig",
     "AreaScan",
     "AreaScanner",
+    "ArchiveExtractor",
     "BUILTIN_IGNORES",
     "ChangeEvent",
     "ChangeKind",
@@ -55,7 +56,6 @@ __all__ = [
     "TextExtractor",
     "Watcher",
     "WatchConfig",
-    "ZipExtractor",
     "default_registry",
     "extract_html",
     "load_config",

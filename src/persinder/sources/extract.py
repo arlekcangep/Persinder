@@ -9,18 +9,21 @@
 
 Минимальный набор первого прототипа: Markdown/текстовые заметки Obsidian
 с извлечением тэгов (D5: тэги остаются внутри заметок, извлекаются, не
-дублируются), HTML/MHTML, PDF, а также ZIP (``ZipExtractor`` — контейнер:
-распаковывает архив, каждая запись идёт отдельной частью через фабрику
-экстракторов области). DOCX/EPUB/OCR — добавляются как новые реализации порта.
+дублируются), HTML/MHTML, PDF, а также архивы (``ArchiveExtractor`` — контейнер:
+zip/7z/tar/gz/rar, каждая запись — отдельная часть через фабрику экстракторов
+области, вложенные архивы раскрываются на один уровень). DOCX/EPUB/OCR —
+добавляются как новые реализации порта.
 """
 
 from __future__ import annotations
 
 import contextlib
+import gzip
 import re
+import tarfile
 import tempfile
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -307,71 +310,231 @@ class PdfExtractor:
         return Extracted(text="\n\n".join(p for p in pages if p), pages=len(pages))
 
 
-# Пределы распаковки ZIP — защита от архивов-бомб (много записей / огромные).
-ZIP_MAX_ENTRIES = 1000
-ZIP_MAX_ENTRY_BYTES = 32 * 1024 * 1024
-ZIP_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+# Пределы распаковки архивов — защита от архивов-бомб (много записей / огромные).
+ARCHIVE_MAX_ENTRIES = 1000
+ARCHIVE_MAX_ENTRY_BYTES = 32 * 1024 * 1024
+ARCHIVE_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+
+# Составные суффиксы проверяются до обычных: tar.gz/tgz — один tar-контейнер.
+COMPOUND_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz")
+TGZ_SUFFIXES = (".tgz", ".tbz2", ".txz")
 
 
-class ZipExtractor:
-    """ZIP-архив — контейнер: распаковывает и делегирует по суффиксу.
+def archive_suffix(name: str) -> str:
+    """Суффикс записи с учётом составных: ``a.tar.gz`` → ``.tar.gz``."""
+    low = name.lower()
+    for compound in (*COMPOUND_SUFFIXES, *TGZ_SUFFIXES):
+        if low.endswith(compound):
+            return compound
+    return Path(low).suffix
 
-    Каждая поддерживаемая запись архива становится отдельной частью
-    (``Extracted.name`` — путь внутри архива): штатный экстрактор берётся из
-    фабрики (``ExtractorFactory``, с учётом области), вложенный архив не
-    раскрывается (в фабрике нет ``zip``). Неподдерживаемые форматы и слишком
-    большие записи пропускаются; лимиты по числу/сумме — от бомб. Битая запись
-    не валит архив (часть с ``error``), битый архив — одна часть с ошибкой.
+
+class ArchiveExtractor:
+    """Архивы (zip/7z/tar/gz/rar) — контейнер: часть на каждую запись.
+
+    Штатный экстрактор для записи берётся у фабрики области; записи-архивы
+    раскрываются **на один уровень** (записи вложенного архива попадают в
+    части с именем ``outer.zip/inner.zip/file.md``), глубже — нет: защита от
+    бомб и рекурсии. ``tar.gz``/``tgz`` и компания — один tar-контейнер,
+    отдельного уровня не создают. Одиночный ``.gz`` — один «файл» без суффикса
+    ``.gz``. Неподдерживаемые форматы и слишком большие записи пропускаются;
+    лимиты общие на файл архива (число записей, размер записи, суммарный
+    размер) — от бомб. Битая запись не валит архив (часть с ``error``), битый
+    архив — одна часть с ошибкой. ``7z`` требует extra ``7z`` (py7zr), ``rar`` —
+    extra ``rar`` (rarfile + внешний unrar/7z/bsdtar).
     """
 
-    name = "zip"
+    name = "archive"
 
     def suffixes(self) -> frozenset[str]:
-        return frozenset({".zip"})
+        return frozenset({".zip", ".7z", ".tar", ".gz", ".tgz", ".rar"})
+
+    # --- читатели форматов: путь → [(имя записи, байты)] ---
+
+    @staticmethod
+    def _read_zip(path: Path) -> list[tuple[str, bytes]]:
+        out: list[tuple[str, bytes]] = []
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                out.append(
+                    (
+                        info.filename.replace("\\", "/"),
+                        archive.read(info),
+                    )
+                )
+        return out
+
+    @staticmethod
+    def _read_7z(path: Path) -> list[tuple[str, bytes]]:
+        try:
+            import py7zr  # type: ignore[import-untyped]  # pyright: ignore[reportMissingTypeStubs]
+        except ImportError as exc:  # extra '7z' не установлен
+            raise RuntimeError(
+                "формат 7z требует extra '7z': pip install 'persinder[archive7z]'"
+            ) from exc
+        out: list[tuple[str, bytes]] = []
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            py7zr.SevenZipFile(path, "r") as archive,
+        ):
+            archive.extractall(path=tmp)
+            root = Path(tmp)
+            for name in archive.getnames():
+                file = root / name
+                if file.is_file():
+                    out.append((name.replace("\\", "/"), file.read_bytes()))
+        return out
+
+    @staticmethod
+    def _read_tar(path: Path) -> list[tuple[str, bytes]]:
+        out: list[tuple[str, bytes]] = []
+        with tarfile.open(path, "r:*") as archive:
+            for member in archive.getmembers():
+                if not member.isfile():
+                    continue
+                handle = archive.extractfile(member)
+                if handle is None:
+                    continue
+                out.append((member.name.replace("\\", "/"), handle.read()))
+        return out
+
+    @staticmethod
+    def _read_gz(path: Path) -> list[tuple[str, bytes]]:
+        data = gzip.decompress(path.read_bytes())
+        # имя без последнего суффикса: notes.txt.gz → notes.txt
+        stem = (
+            path.name[: -len(".gz")] if path.name.lower().endswith(".gz") else path.name
+        )
+        return [(stem, data)]
+
+    def _read_rar(self, path: Path) -> list[tuple[str, bytes]]:
+        try:
+            import rarfile  # type: ignore[import-untyped]  # pyright: ignore[reportMissingTypeStubs]
+        except ImportError as exc:  # extra 'rar' не установлен
+            raise RuntimeError(
+                "формат rar требует extra 'rar': pip install 'persinder[archiverar]'"
+            ) from exc
+        out: list[tuple[str, bytes]] = []
+        archive: Any = rarfile.RarFile(path)  # pyright: ignore[reportUnknownMemberType]
+        with archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                name = str(info.filename).replace("\\", "/")
+                out.append((name, bytes(archive.read(info))))
+        return out
+
+    def _reader(self, suffix: str) -> Callable[[Path], list[tuple[str, bytes]]] | None:
+        readers: dict[str, Callable[[Path], list[tuple[str, bytes]]]] = {
+            ".zip": self._read_zip,
+            ".tar": self._read_tar,
+            ".tar.gz": self._read_tar,
+            ".tar.bz2": self._read_tar,
+            ".tar.xz": self._read_tar,
+            ".tgz": self._read_tar,
+            ".tbz2": self._read_tar,
+            ".txz": self._read_tar,
+            ".gz": self._read_gz,
+            ".7z": self._read_7z,
+            ".rar": self._read_rar,
+        }
+        return readers.get(suffix)
+
+    # --- главный вход контейнера ---
 
     def extract_all(self, path: Path, factory: ExtractorFactory) -> list[Extracted]:
+        try:
+            suffix = archive_suffix(path.name)
+            reader = self._reader(suffix)
+            if reader is None:
+                return [
+                    Extracted(text="", error=f"archive: формат {suffix} не читается")
+                ]
+            entries = reader(path)
+        except RuntimeError as exc:
+            return [Extracted(text="", error=str(exc))]
+        except Exception as exc:  # noqa: BLE001 — битый/нечитаемый архив
+            return [Extracted(text="", error=f"archive: {exc}")]
+        return self._expand_entries(entries, factory)
+
+    def _expand_entries(
+        self,
+        entries: list[tuple[str, bytes]],
+        factory: ExtractorFactory,
+    ) -> list[Extracted]:
+        """Записи архива → части; вложенные архивы раскрываются на один уровень.
+
+        Имена частей — пути внутри архива (без имени самого архива: конвейер
+        добавит путь файла области).
+        """
         parts: list[Extracted] = []
         total = 0
-        try:
-            with zipfile.ZipFile(path) as archive, tempfile.TemporaryDirectory() as tmp:
-                for index, info in enumerate(archive.infolist()):
-                    if index >= ZIP_MAX_ENTRIES:
-                        break
-                    if info.is_dir():
-                        continue
-                    name = info.filename.replace("\\", "/")
-                    suffix = Path(name).suffix.lower()
-                    extractor = factory.for_suffix(suffix)
-                    if extractor is None:
-                        continue  # формат не поддержан (в т.ч. вложенный zip)
-                    if info.file_size > ZIP_MAX_ENTRY_BYTES:
-                        continue
-                    if total + info.file_size > ZIP_MAX_TOTAL_BYTES:
-                        break
-                    try:
-                        data = archive.read(info)
-                    except Exception:  # noqa: BLE001 — шифрование/битая запись
-                        continue
-                    total += len(data)
-                    parts.append(
-                        self._extract_entry(
-                            extractor, Path(tmp) / f"{index}{suffix}", name, data
-                        )
-                    )
-        except (zipfile.BadZipFile, OSError) as exc:
-            return [Extracted(text="", error=f"zip: {exc}")]
+        for index, (name, data) in enumerate(entries):
+            if index >= ARCHIVE_MAX_ENTRIES:
+                break
+            suffix = archive_suffix(name)
+            if total + len(data) > ARCHIVE_MAX_TOTAL_BYTES:
+                break
+            if (
+                self._reader(suffix) is not None
+                and len(data) <= ARCHIVE_MAX_ENTRY_BYTES
+            ):
+                # Вложенный архив: раскрыть его записи как части (глубина 1).
+                parts.extend(self._nested_parts(name, data, factory))
+                total += len(data)
+                continue
+            if len(data) > ARCHIVE_MAX_ENTRY_BYTES:
+                continue
+            total += len(data)
+            extractor = factory.for_suffix(suffix)
+            if extractor is None:
+                continue  # формат не поддержан
+            parts.append(self._part_from_bytes(extractor, name, data))
+        return parts
+
+    def _nested_parts(
+        self, name: str, data: bytes, factory: ExtractorFactory
+    ) -> list[Extracted]:
+        """Раскрыть вложенный архив (ровно один уровень глубже)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inner_path = Path(tmp) / Path(name).name
+            inner_path.write_bytes(data)
+            try:
+                reader = self._reader(archive_suffix(name))
+                assert reader is not None
+                nested_entries = reader(inner_path)
+            except Exception as exc:  # noqa: BLE001 — битый вложенный архив
+                return [Extracted(text="", name=name, error=f"archive: {exc}")]
+        parts: list[Extracted] = []
+        total = 0
+        for index, (entry_name, entry_data) in enumerate(nested_entries):
+            if index >= ARCHIVE_MAX_ENTRIES:
+                break
+            if total + len(entry_data) > ARCHIVE_MAX_TOTAL_BYTES:
+                break
+            if len(entry_data) > ARCHIVE_MAX_ENTRY_BYTES:
+                continue
+            total += len(entry_data)
+            suffix = archive_suffix(entry_name)
+            extractor = factory.for_suffix(suffix)
+            if extractor is None:
+                continue  # вложенные архивы дальше не раскрываются
+            full = f"{name}/{entry_name}"
+            parts.append(self._part_from_bytes(extractor, full, entry_data))
         return parts
 
     @staticmethod
-    def _extract_entry(
-        extractor: Extractor, entry: Path, name: str, data: bytes
-    ) -> Extracted:
-        """Развернуть одну запись во временный файл и отдать экстрактору."""
-        entry.write_bytes(data)
-        try:
-            result = extractor.extract(entry)
-        except Exception as exc:  # noqa: BLE001 — битая запись не валит архив
-            return Extracted(text="", name=name, error=f"zip entry: {exc}")
+    def _part_from_bytes(extractor: Extractor, name: str, data: bytes) -> Extracted:
+        """Запись архива → временный файл → Extracted с именем части."""
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / ("entry" + archive_suffix(name))
+            entry.write_bytes(data)
+            try:
+                result = extractor.extract(entry)
+            except Exception as exc:  # noqa: BLE001 — битая запись не валит архив
+                return Extracted(text="", name=name, error=f"archive entry: {exc}")
         return Extracted(
             text=result.text,
             tags=result.tags,
@@ -468,11 +631,11 @@ class ExtractorRegistry:
 
 
 def default_registry() -> ExtractorRegistry:
-    """Стандартный набор: markdown + text + html + mhtml + zip; pdf — если extra.
+    """Стандартный набор: markdown + text + html + mhtml + archive; pdf — если extra.
 
-    ZIP — контейнер: он получает фабрику экстракторов области и делегирует ей
-    записи архива по суффиксу. Вложенные zip не раскрываются: самой фабрике
-    контейнеры не видны.
+    Архивы (zip/7z/tar/gz/rar) — контейнер: он получает фабрику экстракторов
+    области и делегирует ей записи по суффиксу. Вложенные архивы раскрываются
+    на один уровень: фабрике контейнеры не видны, поэтому глубже — нет.
     """
     extractors: list[Extractor] = [
         MarkdownExtractor(),
@@ -482,7 +645,7 @@ def default_registry() -> ExtractorRegistry:
     ]
     with contextlib.suppress(RuntimeError):
         extractors.append(PdfExtractor())
-    containers: tuple[ContainerExtractor, ...] = (ZipExtractor(),)
+    containers: tuple[ContainerExtractor, ...] = (ArchiveExtractor(),)
     return ExtractorRegistry(tuple(extractors), containers)
 
 

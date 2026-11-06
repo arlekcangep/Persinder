@@ -19,6 +19,8 @@ stemming = ["snowballstemmer>=2.2"]
 config = ["PyYAML>=6.0"]
 watch = ["watchdog>=4.0"]
 pdf = ["pypdf>=4.0"]
+archive7z = ["py7zr>=1.0"]
+archiverar = ["rarfile>=4.0"]
 http = ["fastapi>=0.110", "uvicorn>=0.29"]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
 

@@ -13,10 +13,11 @@ areas:
   - path: ~/WebArchive
     role: web
     formats: [html, mhtml, markdown, text]  # pdf — если стоит extra 'pdf'
-  # Архивы: каждая запись zip — отдельный документ (имя: архив/запись)
+  # Архивы (zip/7z/tar/gz/rar): каждая запись — отдельный документ
+  # (имя: архив/запись; вложенные архивы — на один уровень)
   - path: ~/Downloads/Archives
     role: foreign
-    formats: [zip, markdown, text, html]
+    formats: [archive, markdown, text, html]
   # Копии чужого (книги, статьи): пока не индексируем
   - path: ~/Library/Books
     role: foreign
