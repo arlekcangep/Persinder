@@ -9,9 +9,9 @@
 
 Минимальный набор первого прототипа: Markdown/текстовые заметки Obsidian
 с извлечением тэгов (D5: тэги остаются внутри заметок, извлекаются, не
-дублируются), HTML/MHTML, PDF, а также ZIP (``ZipExtractor`` — декоратор:
-распаковывает архив и делегирует записи другим экстракторам по суффиксу).
-DOCX/EPUB/OCR — добавляются как новые реализации порта.
+дублируются), HTML/MHTML, PDF, а также ZIP (``ZipExtractor`` — контейнер:
+распаковывает архив, каждая запись идёт отдельной частью через фабрику
+экстракторов области). DOCX/EPUB/OCR — добавляются как новые реализации порта.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import contextlib
 import re
 import tempfile
 import zipfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -43,8 +43,10 @@ FM_TAGS_LIST_RE = re.compile(
 
 @dataclass(frozen=True)
 class Extracted:
-    """Результат извлечения из одного файла.
+    """Результат извлечения одной единицы (файла или части контейнера).
 
+    ``name`` — путь части внутри исходного файла (для контейнеров, например
+    записи ZIP: ``"dir/inner.md"``); пусто — сам исходный файл.
     ``error`` — непустой при проблеме разбора; текст в этом случае пуст.
     """
 
@@ -52,6 +54,7 @@ class Extracted:
     tags: tuple[str, ...] = ()
     pages: int = 0
     error: str | None = None
+    name: str = ""
 
 
 @runtime_checkable
@@ -66,6 +69,40 @@ class Extractor(Protocol):
 
     def extract(self, path: Path) -> Extracted:
         """Извлечь текст и метаданные из файла."""
+        ...
+
+
+@runtime_checkable
+class ExtractorFactory(Protocol):
+    """Источник экстракторов для контейнеров.
+
+    Контейнер (ZIP) не держит готовую карту, а спрашивает фабрику — она
+    учитывает область: для разных каталогов набор разрешённых экстракторов
+    может отличаться.
+    """
+
+    def for_suffix(self, suffix: str) -> Extractor | None:
+        """Экстрактор для суффикса (нижний регистр, с точкой) или ``None``."""
+        ...
+
+
+@runtime_checkable
+class ContainerExtractor(Protocol):
+    """Экстрактор-контейнер: раскрывает файл в несколько частей.
+
+    В отличие от ``Extractor`` (один файл → один результат), контейнер отдаёт
+    список ``Extracted`` — по одному на вложенную единицу. Экстракторы для
+    частей он берёт из фабрики (``ExtractorFactory``).
+    """
+
+    name: str
+
+    def suffixes(self) -> frozenset[str]:
+        """Расширения файлов-контейнеров (в нижнем регистре, с точкой)."""
+        ...
+
+    def extract_all(self, path: Path, factory: ExtractorFactory) -> list[Extracted]:
+        """Раскрыть контейнер в список частей."""
         ...
 
 
@@ -277,104 +314,129 @@ ZIP_MAX_TOTAL_BYTES = 64 * 1024 * 1024
 
 
 class ZipExtractor:
-    """ZIP-архив — экстрактор-декоратор: распаковывает и делегирует по суффиксу.
+    """ZIP-архив — контейнер: распаковывает и делегирует по суффиксу.
 
-    Архив — один документ: содержимое поддерживаемых файлов извлекается
-    штатными экстракторами (по расширению) и склеивается в текст под строкой с
-    именем файла; тэги объединяются, ``pages`` суммируются. Неподдерживаемые
-    форматы и вложенные архивы пропускаются (защита от рекурсии и бомб); лимиты
-    по числу и размеру распакованных записей — от бомб. Битая запись/архив не
-    валит область: у архивной ошибки текст пуст, у ошибки записи — пропуск.
+    Каждая поддерживаемая запись архива становится отдельной частью
+    (``Extracted.name`` — путь внутри архива): штатный экстрактор берётся из
+    фабрики (``ExtractorFactory``, с учётом области), вложенный архив не
+    раскрывается (в фабрике нет ``zip``). Неподдерживаемые форматы и слишком
+    большие записи пропускаются; лимиты по числу/сумме — от бомб. Битая запись
+    не валит архив (часть с ``error``), битый архив — одна часть с ошибкой.
     """
 
     name = "zip"
 
-    def __init__(self, inner: Mapping[str, Extractor]) -> None:
-        self._inner = dict(inner)
-
     def suffixes(self) -> frozenset[str]:
         return frozenset({".zip"})
 
-    def extract(self, path: Path) -> Extracted:
-        parts: list[str] = []
-        tags: list[str] = []
-        pages = 0
+    def extract_all(self, path: Path, factory: ExtractorFactory) -> list[Extracted]:
+        parts: list[Extracted] = []
         total = 0
         try:
-            with zipfile.ZipFile(path) as archive:
-                entries = archive.infolist()
-                with tempfile.TemporaryDirectory() as tmp:
-                    for index, info in enumerate(entries):
-                        if index >= ZIP_MAX_ENTRIES:
-                            break
-                        if info.is_dir():
-                            continue
-                        suffix = Path(info.filename).suffix.lower()
-                        extractor = self._inner.get(suffix)
-                        if extractor is None:
-                            continue  # формат не поддержан (в т.ч. вложенный zip)
-                        if info.file_size > ZIP_MAX_ENTRY_BYTES:
-                            continue
-                        if total + info.file_size > ZIP_MAX_TOTAL_BYTES:
-                            break
-                        try:
-                            data = archive.read(info)
-                        except Exception:  # noqa: BLE001 — шифрование/битая запись
-                            continue
-                        total += len(data)
-                        result = self._extract_entry(
-                            extractor, Path(tmp) / f"{index}{suffix}", data
+            with zipfile.ZipFile(path) as archive, tempfile.TemporaryDirectory() as tmp:
+                for index, info in enumerate(archive.infolist()):
+                    if index >= ZIP_MAX_ENTRIES:
+                        break
+                    if info.is_dir():
+                        continue
+                    name = info.filename.replace("\\", "/")
+                    suffix = Path(name).suffix.lower()
+                    extractor = factory.for_suffix(suffix)
+                    if extractor is None:
+                        continue  # формат не поддержан (в т.ч. вложенный zip)
+                    if info.file_size > ZIP_MAX_ENTRY_BYTES:
+                        continue
+                    if total + info.file_size > ZIP_MAX_TOTAL_BYTES:
+                        break
+                    try:
+                        data = archive.read(info)
+                    except Exception:  # noqa: BLE001 — шифрование/битая запись
+                        continue
+                    total += len(data)
+                    parts.append(
+                        self._extract_entry(
+                            extractor, Path(tmp) / f"{index}{suffix}", name, data
                         )
-                        if result is None:
-                            continue
-                        if result.text.strip():
-                            parts.append(f"{info.filename}\n{result.text}")
-                        tags.extend(result.tags)
-                        pages += result.pages
+                    )
         except (zipfile.BadZipFile, OSError) as exc:
-            return Extracted(text="", error=f"zip: {exc}")
-        return Extracted(text="\n\n".join(parts), tags=dedup_tags(tags), pages=pages)
+            return [Extracted(text="", error=f"zip: {exc}")]
+        return parts
 
     @staticmethod
     def _extract_entry(
-        extractor: Extractor, entry: Path, data: bytes
-    ) -> Extracted | None:
+        extractor: Extractor, entry: Path, name: str, data: bytes
+    ) -> Extracted:
         """Развернуть одну запись во временный файл и отдать экстрактору."""
         entry.write_bytes(data)
         try:
             result = extractor.extract(entry)
-        except Exception:  # noqa: BLE001 — битая запись не валит весь архив
-            return None
-        return None if result.error else result
+        except Exception as exc:  # noqa: BLE001 — битая запись не валит архив
+            return Extracted(text="", name=name, error=f"zip entry: {exc}")
+        return Extracted(
+            text=result.text,
+            tags=result.tags,
+            pages=result.pages,
+            error=result.error,
+            name=name,
+        )
+
+
+class _AreaExtractors:
+    """Фабрика экстракторов одной области: суффикс → экстрактор."""
+
+    def __init__(self, mapping: dict[str, Extractor]) -> None:
+        self._mapping = mapping
+
+    def for_suffix(self, suffix: str) -> Extractor | None:
+        return self._mapping.get(suffix.lower())
 
 
 class ExtractorRegistry:
     """Сопоставление суффиксов экстракторам с учётом форматов области.
 
-    Экстракторы регистрируются явно. Для области берутся только те, чьи имена
-    входят в её белый список ``formats`` (см. ``AreaConfig``). Пустой список —
-    область не индексируется.
+    Экстракторы (``Extractor``) и контейнеры (``ContainerExtractor``)
+    регистрируются явно. Для области берутся только те, чьи имена входят в её
+    белый список ``formats`` (см. ``AreaConfig``). Пустой список — область не
+    индексируется.
     """
 
-    def __init__(self, extractors: tuple[Extractor, ...]) -> None:
-        if not extractors:
+    def __init__(
+        self,
+        extractors: tuple[Extractor, ...],
+        containers: tuple[ContainerExtractor, ...] = (),
+    ) -> None:
+        if not extractors and not containers:
             raise ValueError("реестр экстракторов пуст")
         self._extractors: dict[str, Extractor] = {}
+        self._containers: dict[str, ContainerExtractor] = {}
+        self._names: set[str] = set()
         for extractor in extractors:
+            if extractor.name in self._names:
+                raise ValueError(f"имя экстрактора {extractor.name} занято")
             for suffix in extractor.suffixes():
-                if suffix in self._extractors:
+                if suffix in self._extractors or suffix in self._containers:
                     raise ValueError(
                         f"суффикс {suffix} обслуживают несколько экстракторов"
                     )
                 self._extractors[suffix] = extractor
-        self._names = {e.name for e in extractors}
+            self._names.add(extractor.name)
+        for container in containers:
+            if container.name in self._names:
+                raise ValueError(f"имя контейнера {container.name} занято")
+            for suffix in container.suffixes():
+                if suffix in self._extractors or suffix in self._containers:
+                    raise ValueError(
+                        f"суффикс {suffix} обслуживают несколько экстракторов"
+                    )
+                self._containers[suffix] = container
+            self._names.add(container.name)
 
     def known_names(self) -> frozenset[str]:
         """Доступные имена экстракторов (для проверки конфига)."""
         return frozenset(self._names)
 
     def for_area(self, area: AreaConfig) -> dict[str, Extractor]:
-        """Экстракторы области: имя в её ``formats``, суффикс → экстрактор."""
+        """Обычные экстракторы области: имя в её ``formats``, суффикс → экстрактор."""
         enabled = set(area.formats) & self._names
         return {
             suffix: extractor
@@ -382,19 +444,35 @@ class ExtractorRegistry:
             if extractor.name in enabled
         }
 
-    def extract(self, path: Path, area: AreaConfig) -> Extracted | None:
-        """Извлечь файл с учётом форматов области; None — не поддержан."""
+    def _containers_for_area(self, area: AreaConfig) -> dict[str, ContainerExtractor]:
+        """Контейнеры области: имя в её ``formats``, суффикс → контейнер."""
+        enabled = set(area.formats) & self._names
+        return {
+            suffix: container
+            for suffix, container in self._containers.items()
+            if container.name in enabled
+        }
+
+    def extract(self, path: Path, area: AreaConfig) -> list[Extracted] | None:
+        """Извлечь файл с учётом форматов области.
+
+        Обычный файл — список из одной части; контейнер — по части на запись;
+        ``None`` — формат не обслуживается.
+        """
         suffix = path.suffix.lower()
+        container = self._containers_for_area(area).get(suffix)
+        if container is not None:
+            return container.extract_all(path, _AreaExtractors(self.for_area(area)))
         extractor = self.for_area(area).get(suffix)
-        return extractor.extract(path) if extractor else None
+        return [extractor.extract(path)] if extractor else None
 
 
 def default_registry() -> ExtractorRegistry:
     """Стандартный набор: markdown + text + html + mhtml + zip; pdf — если extra.
 
-    ZIP-экстрактор получает карту «суффикс → экстрактор» из уже собранных
-    экстракторов — он делегирует им распакованные записи. Вложенные zip в карту
-    не попадают: архивы внутри архивов не раскрываются (защита от бомб).
+    ZIP — контейнер: он получает фабрику экстракторов области и делегирует ей
+    записи архива по суффиксу. Вложенные zip не раскрываются: самой фабрике
+    контейнеры не видны.
     """
     extractors: list[Extractor] = [
         MarkdownExtractor(),
@@ -404,11 +482,8 @@ def default_registry() -> ExtractorRegistry:
     ]
     with contextlib.suppress(RuntimeError):
         extractors.append(PdfExtractor())
-    inner = {
-        suffix: extractor for extractor in extractors for suffix in extractor.suffixes()
-    }
-    extractors.append(ZipExtractor(inner))
-    return ExtractorRegistry(tuple(extractors))
+    containers: tuple[ContainerExtractor, ...] = (ZipExtractor(),)
+    return ExtractorRegistry(tuple(extractors), containers)
 
 
 def dedup_tags(tags: Iterable[str]) -> tuple[str, ...]:

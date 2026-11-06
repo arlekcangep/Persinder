@@ -346,6 +346,17 @@ class SqliteStore:
             ).fetchone()
         return str(row["source_path"]) if row else ""
 
+    def source_filenames_under(self, area: str, prefix: str) -> list[str]:
+        """Имена источников области, начинающихся с ``prefix`` (части контейнера)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT filename FROM document_sources"
+                " WHERE area = ? AND substr(filename, 1, ?) = ?"
+                " ORDER BY filename",
+                (area, len(prefix), prefix),
+            ).fetchall()
+        return [str(row["filename"]) for row in rows]
+
     def _purge_document(self, doc_id: str) -> None:
         """Удалить документ и все производные строки (нужен открытый `with`)."""
         self._conn.execute("DELETE FROM chunks_fts WHERE doc_id = ?", (doc_id,))

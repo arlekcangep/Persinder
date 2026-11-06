@@ -13,7 +13,7 @@ areas:
   - path: ~/WebArchive
     role: web
     formats: [html, mhtml, markdown, text]  # pdf — если стоит extra 'pdf'
-  # Архивы: zip распаковывается, содержимое — штатными экстракторами по суффиксу
+  # Архивы: каждая запись zip — отдельный документ (имя: архив/запись)
   - path: ~/Downloads/Archives
     role: foreign
     formats: [zip, markdown, text, html]

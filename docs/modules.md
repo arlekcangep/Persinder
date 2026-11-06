@@ -69,8 +69,10 @@ src/persinder/
     watcher.py       # цикл скана, запуск по требованию
     journal.py       # журнал статусов файлов (JSONL) — состояние watcher'а (D21),
                      # обрезка истории переходов
-    extract.py       # экстракторы (markdown/text/html/mht/pdf/zip) + реестр
-    pipeline.py      # события → экстракция → ingest → журнал
+    extract.py       # экстракторы (markdown/text/html/mht/pdf), контейнер zip,
+                     # фабрика и реестр (ExtractorFactory, ContainerExtractor)
+    pipeline.py      # события → экстракция (файл или части контейнера) →
+                     # ingest (документ на каждую часть) → журнал
 ```
 
 Переход между слоями — только через явные мапперы (`IngestPayload.to_request`,

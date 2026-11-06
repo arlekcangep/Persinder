@@ -2,8 +2,10 @@
 
 from .config import ConfigError, load_config
 from .extract import (
+    ContainerExtractor,
     Extracted,
     Extractor,
+    ExtractorFactory,
     ExtractorRegistry,
     HtmlExtractor,
     MarkdownExtractor,
@@ -35,8 +37,10 @@ __all__ = [
     "ChangeEvent",
     "ChangeKind",
     "ConfigError",
+    "ContainerExtractor",
     "Extractor",
     "Extracted",
+    "ExtractorFactory",
     "ExtractorRegistry",
     "IndexingPipeline",
     "HtmlExtractor",

@@ -22,7 +22,7 @@ from persinder.sources import (
     ScanResult,
     TextExtractor,
     WatchConfig,
-    ZipExtractor,
+    default_registry,
 )
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
@@ -159,33 +159,42 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(counts["documents"], 1)
         self.assertEqual(counts["chunks"], 1)
 
-    def test_zip_archive_indexed_through_pipeline(self):
-        # Область допускает zip; внутреннее содержимое — markdown/text.
+    def test_zip_archive_indexed_as_part_per_entry(self):
+        # Область допускает zip; каждая запись архива — отдельный документ.
         area = AreaConfig(
             path=self.area.path,
             role=Area.PERSONAL,
             formats=("zip", "markdown", "text"),
         )
-        md = MarkdownExtractor()
-        txt = TextExtractor()
-        registry = ExtractorRegistry(
-            (md, txt, ZipExtractor({".md": md, ".markdown": md, ".txt": txt}))
-        )
         ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
-        pipeline = IndexingPipeline(ingest, registry, journal=self.journal)
+        pipeline = IndexingPipeline(ingest, default_registry(), journal=self.journal)
 
         archive_path = self.area.path / "bundle.zip"
         with zipfile.ZipFile(archive_path, "w") as archive:
             archive.writestr("inside.md", "#tag содержимое архива")
+            archive.writestr("sub/two.txt", "второй файл внутри")
 
         stats = pipeline.process(self._scan(area))
-        self.assertEqual(stats.indexed, 1)
-        self.assertEqual(self.store.counts()["documents"], 1)
-        # в хранилище лёг склеенный текст всех записей архива
+        self.assertEqual(stats.indexed, 2)
+        self.assertEqual(self.store.counts()["documents"], 2)
+        # источники — части архива, каждая со своим именем
+        parts = self.store.source_filenames_under(Area.PERSONAL.value, "bundle.zip/")
+        self.assertEqual(parts, ["bundle.zip/inside.md", "bundle.zip/sub/two.txt"])
         stored = "".join(
             p.read_text(encoding="utf-8") for p in self.texts.glob("*.txt")
         )
         self.assertIn("содержимое архива", stored)
+        self.assertIn("второй файл внутри", stored)
+
+        # Удаление архива убирает и сам файл, и все его части.
+        archive_path.unlink()
+        deleted = pipeline.process(self._scan(area))
+        self.assertEqual(deleted.deleted, 1)
+        self.assertEqual(self.store.counts()["documents"], 0)
+        self.assertEqual(self.store.counts()["chunks"], 0)
+        self.assertEqual(
+            self.store.source_filenames_under(Area.PERSONAL.value, "bundle.zip/"), []
+        )
 
 
 if __name__ == "__main__":
