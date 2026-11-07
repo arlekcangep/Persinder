@@ -48,6 +48,12 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["doc_id"], "d1")
 
+    def test_chunk_span(self):
+        self._save()
+        self.assertEqual(self.store.chunk_span("d1", 0), (0, 10))
+        self.assertIsNone(self.store.chunk_span("d1", 99))
+        self.assertIsNone(self.store.chunk_span("nope", 0))
+
     def test_pending_embeddings(self):
         self._save()
         pending = self.store.pending_embeddings()

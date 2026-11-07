@@ -67,7 +67,12 @@ def build_service(
         search_model=models.search,
         ann_dir=settings.ann_dir,
     )
-    search = SearchService(store=store, stemmer=stemmer, vector_search=vector_search)
+    search = SearchService(
+        store=store,
+        stemmer=stemmer,
+        vector_search=vector_search,
+        textstore=textstore,
+    )
     return ingest, search, store
 
 

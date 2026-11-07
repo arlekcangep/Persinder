@@ -15,11 +15,16 @@ class SearchQuery:
 
 @dataclass(frozen=True)
 class SearchHit:
-    """Одно попадание поиска."""
+    """Одно попадание поиска.
+
+    ``context`` — текст вокруг чанка (строки хита плюс несколько строк до и
+    после, ``None`` — если сырой текст недоступен).
+    """
 
     document_id: str
     chunk_index: int
     score: float
+    context: str | None = None
 
 
 @dataclass(frozen=True)

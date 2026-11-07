@@ -204,6 +204,18 @@ class SqliteStore:
             for row in rows
         ]
 
+    def chunk_span(self, doc_id: str, chunk_index: int) -> tuple[int, int] | None:
+        """Границы чанка в сыром тексте: ``(char_start, char_end)``."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT char_start, char_end FROM chunks "
+                "WHERE doc_id = ? AND chunk_index = ?",
+                (doc_id, chunk_index),
+            ).fetchone()
+        if row is None:
+            return None
+        return (int(row["char_start"]), int(row["char_end"]))
+
     def pending_embeddings(self, limit: int = 100) -> list[EmbeddingQueueItem]:
         with self._lock:
             rows = self._conn.execute(
