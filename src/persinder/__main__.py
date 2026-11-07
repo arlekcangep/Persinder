@@ -178,6 +178,7 @@ def run_serve(config_path: Path, settings: Settings) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        print("Останавливаюсь — завершаю watcher и эмбеддинги...", flush=True)
         stop.set()
         kick.set()
         watcher.stop()
@@ -670,11 +671,15 @@ def _serve_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
     recovery = ingest.recover()
     if recovery.removed:
         print(format_recovery(recovery))
-    print(f"Persinder слушает http://{settings.host}:{settings.port}")
+    print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)
     try:
         serve(ingest, search, settings.host, settings.port)
+    except KeyboardInterrupt:
+        pass
     finally:
+        print("Останавливаюсь (Ctrl+C)...", flush=True)
         store.close()
+        print("Persinder остановлен.", flush=True)
     return 0
 
 

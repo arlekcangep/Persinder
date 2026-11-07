@@ -56,11 +56,18 @@ class ServeTest(unittest.TestCase):
             # даём watcher'у и потоку эмбеддингов отработать первый проход
             time.sleep(1.0)
 
-        with mock.patch.object(cli, "serve", fake_serve):
+        out = io.StringIO()
+        with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
             rc = cli.run_serve(self.config, self.settings)
 
         self.assertEqual(rc, 0)
         self.assertEqual(len(served), 1)
+
+        text = out.getvalue()
+        self.assertIn("Останавливаюсь", text)
+        self.assertLess(
+            text.index("Останавливаюсь"), text.index("Persinder остановлен.")
+        )
 
         store = SqliteStore(self.settings.db_path)
         try:
@@ -172,6 +179,7 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(served), 1)
         self.assertIn("только HTTP", out.getvalue())
+        self.assertIn("Останавливаюсь", out.getvalue())
 
 
 if __name__ == "__main__":
