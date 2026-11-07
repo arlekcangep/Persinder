@@ -48,10 +48,10 @@ Docker. Сама модель эмбеддингов (~120 МБ) — не в п�
 # тесты
 PYTHONPATH=src python3 -m unittest discover -s tests
 
-# запуск сервиса приёма (модуль 1)
-PYTHONPATH=src python3 -m persinder --home ~/.persinder --port 8756
+# единый сервис: HTTP (приём+поиск) + watcher + эмбеддинги; Ctrl+C — стоп
+PYTHONPATH=src python3 -m persinder serve --config persinder.yaml --home ~/.persinder
 
-# эмбеддинги по требованию: очередь → векторы → сайдкары (модуль 2)
+# только эмбеддинги по требованию: очередь → векторы → сайдкары (модуль 2)
 PYTHONPATH=src python3 -m persinder embed --home ~/.persinder
 
 # модель эмбеддингов: установка и переключение (D24)

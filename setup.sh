@@ -102,16 +102,19 @@ cat <<'EOF'
 
 Установка завершена.
 
-Запуск индексации test-content (Git Bash):
+Запуск сервиса (Git Bash):
 
-    ./run.sh          — watcher в фоне + разбор очереди эмбеддингов + поиск
-    ./run.sh "запрос" — то же + поиск по запросу
+    ./run.sh                          — конфиг: папка запуска, затем ~/.persinder
+    ./run.sh --config /путь/persinder.yaml
+    ./run.sh --host 0.0.0.0 --port 8756   — доступ с других машин
+
+Конфиг по умолчанию ищется как persinder.yaml (затем .yml) в папке запуска
+и в ~/.persinder. Модели и БД живут в ~/.persinder.
 
 Вручную (в отдельном терминале):
 
     source .venv/Scripts/activate     # Windows Git Bash
 
-    persinder watch --config ../test-content/persinder.yaml
-    persinder embed --background
+    persinder serve --config ../test-content/persinder.yaml
     persinder search "история поиска видео"
 EOF

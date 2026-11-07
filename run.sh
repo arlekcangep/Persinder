@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# run.sh — запустить индексацию и поиск по конфигу.
+# run.sh — единый сервис Persinder: HTTP + watcher + эмбеддинги.
 #
-#   ./run.sh                          — конфиг по умолчанию (persinder.yaml/yml в папке запуска)
-#   ./run.sh --config PATH            — явный путь к конфигу
-#   ./run.sh --config PATH "запрос"   — то же + поиск по запросу
-#   ./run.sh "запрос"                 — поиск по запросу (конфиг по умолчанию)
-#   ./run.sh --watch                  — watcher в фоне, не останавливать (Ctrl+C)
-#   ./run.sh --config PATH --watch    — то же, но с явным конфигом
+#   ./run.sh                        — конфиг: папка запуска, затем ~/.persinder
+#                                     (persinder.yaml, затем persinder.yml)
+#   ./run.sh --config PATH          — явный путь к конфигу
+#   ./run.sh --config PATH --host 0.0.0.0 --port 8756
+#
+# Запускает `python -m persinder serve --config ... --home ...` — ОДИН процесс:
+#   * слушает HTTP (приём + поиск);
+#   * следит за областями и индексирует новое/изменённое (первый проход сразу
+#     доиндексирует всё, что не было проиндексировано или прервалось);
+#   * разбирает очередь эмбеддингов в фоне.
+# Остановка — Ctrl+C.
 #
 # Требуется: ./setup.sh уже выполнен (venv .venv + модель).
 
@@ -26,12 +31,11 @@ else
     echo "Сначала запусти ./setup.sh" >&2
     exit 1
 fi
-PERSINDER="$PY -m persinder"
 
-# --- разбор аргументов: [--config PATH] [--watch] [запрос] ---
+# --- разбор аргументов: [--config PATH] [--host HOST] [--port PORT] ---
 CONFIG=""
-MODE=""
-QUERY=""
+HOST=""
+PORT=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --config)
@@ -46,70 +50,77 @@ while [ $# -gt 0 ]; do
             CONFIG="${1#--config=}"
             shift
             ;;
-        --watch)
-            MODE="--watch"
+        --host)
+            if [ $# -lt 2 ]; then
+                echo "ОШИБКА: --host требует адрес" >&2
+                exit 1
+            fi
+            HOST="$2"
+            shift 2
+            ;;
+        --host=*)
+            HOST="${1#--host=}"
+            shift
+            ;;
+        --port)
+            if [ $# -lt 2 ]; then
+                echo "ОШИБКА: --port требует номер" >&2
+                exit 1
+            fi
+            PORT="$2"
+            shift 2
+            ;;
+        --port=*)
+            PORT="${1#--port=}"
             shift
             ;;
         *)
-            QUERY="$1"
-            shift
+            echo "ОШИБКА: неизвестный аргумент: $1" >&2
+            echo "Использование: ./run.sh [--config PATH] [--host HOST] [--port PORT]" >&2
+            exit 1
             ;;
     esac
 done
 
-# Конфиг: явный (--config) или по умолчанию в папке запуска.
-# Ищем persinder.yaml, затем persinder.yml.
+# Конфиг: явный (--config) или поиск по умолчанию — папка запуска, затем ~/.persinder.
+# В каждом каталоге: persinder.yaml, затем persinder.yml.
 if [ -z "$CONFIG" ]; then
-    if [ -f "$START_DIR/persinder.yaml" ]; then
-        CONFIG="$START_DIR/persinder.yaml"
-    elif [ -f "$START_DIR/persinder.yml" ]; then
-        CONFIG="$START_DIR/persinder.yml"
-    fi
+    for candidate in \
+        "$START_DIR/persinder.yaml" "$START_DIR/persinder.yml" \
+        "$HOME/.persinder/persinder.yaml" "$HOME/.persinder/persinder.yml"
+    do
+        if [ -f "$candidate" ]; then
+            CONFIG="$candidate"
+            break
+        fi
+    done
 fi
+# Относительный --config — от папки запуска, а не от корня репозитория (сюда мы cd'нули).
+case "$CONFIG" in
+    "" | /* | [A-Za-z]:*) ;;
+    *) CONFIG="$START_DIR/$CONFIG" ;;
+esac
 if [ -z "$CONFIG" ] || [ ! -f "$CONFIG" ]; then
     echo "ОШИБКА: конфиг не найден." >&2
-    echo "Искал в запущенной папке: $START_DIR/persinder.{yaml,yml}" >&2
+    echo "Искал: $START_DIR/persinder.{yaml,yml} и $HOME/.persinder/persinder.{yaml,yml}" >&2
     echo "Укажи путь явно: ./run.sh --config /путь/к/persinder.yaml" >&2
     exit 1
 fi
 
-# Каталог приложения — рядом с конфигом (внутри test-content; в конфиге в ignore).
+# Каталог приложения — ~/.persinder (тот же, что Settings.default() в коде).
 # Модели живут в <PERSINDER_HOME>/models — отдельного каталога моделей нет.
-PERSINDER_HOME="$(dirname "$CONFIG")/persinder-data"
+PERSINDER_HOME="$HOME/.persinder"
 
 echo "Конфиг:   $CONFIG"
 echo "Home:     $PERSINDER_HOME  (модели: $PERSINDER_HOME/models)"
 echo
 
-if [ "$MODE" = "--watch" ]; then
-    # Долгий режим: watcher работает, пока не прервёшь.
-    echo "Watcher запущен (Ctrl+C — остановить). Эмбеддинги и поиск — вручную."
-    exec $PERSINDER watch --config "$CONFIG" --home "$PERSINDER_HOME"
+ARGS=(serve --config "$CONFIG" --home "$PERSINDER_HOME")
+if [ -n "$HOST" ]; then
+    ARGS+=(--host "$HOST")
+fi
+if [ -n "$PORT" ]; then
+    ARGS+=(--port "$PORT")
 fi
 
-# --- разовый проход ---
-echo "[1/3] Скан областей и индексация (один проход watcher'а)..."
-$PERSINDER watch --config "$CONFIG" --home "$PERSINDER_HOME" &
-WATCH_PID=$!
-sleep 8
-kill "$WATCH_PID" 2>/dev/null || true
-wait "$WATCH_PID" 2>/dev/null || true
-
-echo
-echo "[2/3] Эмбеддинги: очередь -> векторы -> сайдкары..."
-$PERSINDER embed --background --home "$PERSINDER_HOME"
-
-echo
-echo "[3/3] Поиск..."
-if [ -n "$QUERY" ]; then
-    $PERSINDER search --home "$PERSINDER_HOME" "$QUERY"
-else
-    # демо-запросы по обоим документам тестового корпуса
-    $PERSINDER search --home "$PERSINDER_HOME" "история поиска видео" || true
-    echo
-    $PERSINDER search --home "$PERSINDER_HOME" "тетради Грамши" || true
-fi
-
-echo
-echo "Готово. Повторный запуск проиндексирует только изменения."
-echo "Долгий режим (watcher всегда работает): ./run.sh --watch"
+exec "$PY" -m persinder "${ARGS[@]}"
