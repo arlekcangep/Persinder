@@ -24,6 +24,33 @@ class EmbeddingQueueItem(TypedDict):
     doc_id: str
     chunk_index: int
     area: str
+    source_path: str  # пусто — виртуальный элемент (нет файла на диске)
+    model: str  # модель, чей вектор считается (сайдкар на модель)
+
+
+class SourceRow(TypedDict):
+    """Источник: для удаления сайдкаров модели (D24)."""
+
+    doc_id: str
+    area: str
+    filename: str
+    source_path: str
+
+
+class EmbeddingRow(TypedDict):
+    """Строка таблицы эмбеддингов (локальное производное, §8).
+
+    Векторы чанков под моделью, материализованные воркером ``embed``
+    (сайдкар — синхронизируемый артефакт, эта таблица — локальный кэш для
+    векторного поиска, модуль 3). ``vector`` — f16-блоб (см. sidecar).
+    ``id`` — стабильный ключ строки: по нему ANN-индекс (USearch) ссылается
+    на чанк, upsert вектора не меняет id.
+    """
+
+    id: int
+    doc_id: str
+    chunk_index: int
+    vector: bytes
 
 
 class StoreCounts(TypedDict):

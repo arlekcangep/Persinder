@@ -1,8 +1,9 @@
 # Пример конфига Persinder: области + watcher.
 # Положите как, например, ~/.persinder/config.yaml и правьте под себя.
-
-# Каталог данных (БД, временные тексты) — НЕ внутри синхронизируемых папок.
-data_dir: ~/.persinder
+#
+# Каталог приложения (БД, тексты, модели, ANN) задаётся запуском: --home,
+# по умолчанию ~/.persinder. Модели живут в <home>/models. Его класть в
+# конфиг не нужно — БД не должна быть внутри синхронизируемых папок.
 
 areas:
   # Заметки Obsidian: markdown + текст
@@ -13,6 +14,11 @@ areas:
   - path: ~/WebArchive
     role: web
     formats: [html, mhtml, markdown, text]  # pdf — если стоит extra 'pdf'
+  # Архивы (zip/7z/tar/gz/rar): каждая запись — отдельный документ
+  # (имя: архив/запись; вложенные архивы — на один уровень)
+  - path: ~/Downloads/Archives
+    role: foreign
+    formats: [archive, markdown, text, html]
   # Копии чужого (книги, статьи): пока не индексируем
   - path: ~/Library/Books
     role: foreign

@@ -87,25 +87,38 @@ class IngestResponse:
 
 @dataclass(frozen=True)
 class SearchResponse:
-    """Тело ответа ``GET /search`` (DTO ответа)."""
+    """Тело ответа ``GET /search`` (DTO ответа).
+
+    ``hits`` — морфологический слой, ``semantic_hits`` — векторный (модуль 3).
+    """
 
     query: str
     hits: tuple[SearchHit, ...] = ()
+    semantic_hits: tuple[SearchHit, ...] = ()
 
     @classmethod
     def from_result(cls, result: SearchResult) -> SearchResponse:
         """Собрать DTO из результата сервиса поиска."""
-        return cls(query=result.query, hits=result.hits)
+        return cls(
+            query=result.query,
+            hits=result.hits,
+            semantic_hits=result.semantic_hits,
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
             "query": self.query,
-            "hits": [
-                {
-                    "document_id": hit.document_id,
-                    "chunk_index": hit.chunk_index,
-                    "score": hit.score,
-                }
-                for hit in self.hits
-            ],
+            "hits": self._hits_to_dict(self.hits),
+            "semantic_hits": self._hits_to_dict(self.semantic_hits),
         }
+
+    @staticmethod
+    def _hits_to_dict(hits: tuple[SearchHit, ...]) -> list[dict[str, object]]:
+        return [
+            {
+                "document_id": hit.document_id,
+                "chunk_index": hit.chunk_index,
+                "score": hit.score,
+            }
+            for hit in hits
+        ]
