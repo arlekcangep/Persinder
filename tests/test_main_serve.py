@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import io
+import os
 import time
 import unittest
 from contextlib import redirect_stdout
@@ -90,9 +91,55 @@ class ServeTest(unittest.TestCase):
             served.append(host)
             time.sleep(1.0)
 
+        empty = self.root / "empty"
+        empty.mkdir()
         out = io.StringIO()
-        with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
-            rc = cli.main(["serve", "--home", str(home)])
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(empty)
+            with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
+                rc = cli.main(["serve", "--home", str(home)])
+        finally:
+            os.chdir(old_cwd)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(served), 1)
+        self.assertIn("использую", out.getvalue())
+
+        store = SqliteStore(self.settings.db_path)
+        try:
+            counts = store.counts()
+        finally:
+            store.close()
+        self.assertEqual(counts["documents"], 1)
+
+    def test_serve_finds_config_in_launch_dir(self):
+        launch = self.root / "launch"
+        launch.mkdir()
+        (launch / "persinder.yml").write_text(
+            "areas:\n"
+            f"  - path: {self.area}\n"
+            "    role: personal\n"
+            "    formats: [markdown, text]\n"
+            "watch:\n"
+            "  poll_interval: 1\n"
+            "  debounce: 0\n",
+            encoding="utf-8",
+        )
+        served: list[str] = []
+
+        def fake_serve(ingest: Ingest, search: Search, host: str, port: int) -> None:
+            served.append(host)
+            time.sleep(1.0)
+
+        out = io.StringIO()
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(launch)
+            with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
+                rc = cli.main(["serve", "--home", str(self.settings.home)])
+        finally:
+            os.chdir(old_cwd)
 
         self.assertEqual(rc, 0)
         self.assertEqual(len(served), 1)
@@ -111,9 +158,16 @@ class ServeTest(unittest.TestCase):
         def fake_serve(ingest: Ingest, search: Search, host: str, port: int) -> None:
             served.append(host)
 
+        empty = self.root / "empty"
+        empty.mkdir()
         out = io.StringIO()
-        with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
-            rc = cli.main(["serve", "--home", str(self.settings.home)])
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(empty)
+            with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
+                rc = cli.main(["serve", "--home", str(self.settings.home)])
+        finally:
+            os.chdir(old_cwd)
 
         self.assertEqual(rc, 0)
         self.assertEqual(len(served), 1)

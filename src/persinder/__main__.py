@@ -124,6 +124,7 @@ def run_serve(config_path: Path, settings: Settings) -> int:
     * HTTP-сервер блокирует главный поток до Ctrl+C.
     """
     settings.ensure()
+    print(f"Home: {settings.home}", flush=True)
     registry = default_registry()
     areas, watch = load_config(config_path, known_formats=registry.known_names())
 
@@ -627,6 +628,14 @@ def _model_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
     return 1
 
 
+def _config_candidates(settings: Settings) -> tuple[Path, ...]:
+    """Где искать конфиг, если ``--config`` не задан: папка запуска, затем home."""
+    names = ("persinder.yaml", "persinder.yml")
+    return tuple(Path.cwd() / name for name in names) + tuple(
+        settings.home / name for name in names
+    )
+
+
 def _serve_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     settings = Settings.default()
     if getattr(args, "home", None):
@@ -635,12 +644,12 @@ def _serve_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
         settings = replace(settings, host=args.host)
     if getattr(args, "port", None):
         settings = replace(settings, port=args.port)
+    # Home и подкаталоги существуют всегда — даже если конфига нет (HTTP-only).
+    settings = settings.ensure()
 
     config_path: Path | None = getattr(args, "config", None)
     if config_path is None:
-        # --config не задан: ищем конфиг в каталоге приложения.
-        for name in ("persinder.yaml", "persinder.yml"):
-            candidate = settings.home / name
+        for candidate in _config_candidates(settings):
             if candidate.is_file():
                 config_path = candidate
                 print(f"Конфиг не задан — использую {config_path}", flush=True)
@@ -648,12 +657,12 @@ def _serve_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
     if config_path is not None:
         return run_serve(config_path, settings)
 
-    # Конфига нет ни явного, ни в home — деградация до HTTP-only:
+    # Конфига нет ни явного, ни в папке запуска/home — деградация до HTTP-only:
     # watcher/эмбеддинги не знают областей.
     print(
         "ВНИМАНИЕ: конфиг не найден — работает только HTTP (приём + поиск), "
         "без watcher и эмбеддингов.\n"
-        f"Искал: {settings.home}/persinder.{{yaml,yml}}\n"
+        f"Искал: persinder.{{yaml,yml}} в текущей папке и в {settings.home}\n"
         "Полный сервис: persinder serve --config persinder.yaml",
         flush=True,
     )
