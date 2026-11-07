@@ -49,10 +49,10 @@ Docker. Сама модель эмбеддингов (~120 МБ) — не в п�
 PYTHONPATH=src python3 -m unittest discover -s tests
 
 # запуск сервиса приёма (модуль 1)
-PYTHONPATH=src python3 -m persinder --data-dir ~/.persinder --port 8756
+PYTHONPATH=src python3 -m persinder --home ~/.persinder --port 8756
 
 # эмбеддинги по требованию: очередь → векторы → сайдкары (модуль 2)
-PYTHONPATH=src python3 -m persinder embed --data-dir ~/.persinder
+PYTHONPATH=src python3 -m persinder embed --home ~/.persinder
 
 # модель эмбеддингов: установка и переключение (D24)
 PYTHONPATH=src python3 -m persinder model install e5-small-int8-v1   # веса + миграция в очередь
@@ -75,7 +75,7 @@ curl -s -X POST localhost:8756/ingest \
 Реализованы **модуль 1** (`ingest` — приём текста, морфологический слой FTS5,
 журнал вызовов, инлайн-удаление), **модуль 2** (`embed` — воркер очереди:
 текст → векторы → сайдкары, реестр моделей и явный модель-менеджмент) и
-**модуль 3** (`vectorindex` — семантический поиск: ANN USearch `data_dir/ann/`
+**модуль 3** (`vectorindex` — семантический поиск: ANN USearch `home/ann/`
 поверх таблицы `embeddings`, точный скан таблицы как фолбэк).
 Эмбеддер — реальная модель e5-small (ONNX INT8, `persinder model install`)
 или детерминированная заглушка (`placeholder-v1`, встроена). У файла живут

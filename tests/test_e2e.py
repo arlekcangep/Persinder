@@ -34,7 +34,7 @@ class EndToEndTest(unittest.TestCase):
         self._tmp = TemporaryDirectory()
         root = Path(self._tmp.name)
         self.data_dir = root / "data"
-        settings = Settings(data_dir=self.data_dir)
+        settings = Settings(home=self.data_dir)
         self.settings = settings
         self.ingest, self.search, self.store = build_service(settings)
         self.server = make_server(self.ingest, self.search, host="127.0.0.1", port=0)

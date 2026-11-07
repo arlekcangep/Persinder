@@ -55,7 +55,7 @@ def build_service(
         stemmer=stemmer,
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
-        journal=IngestJournal(settings.data_dir / "ingest.jsonl"),
+        journal=IngestJournal(settings.home / "ingest.jsonl"),
         virtual_dir=settings.virtual_dir,
         embedding_models=models.queue_models(),
     )
@@ -69,15 +69,15 @@ def build_service(
     return ingest, search, store
 
 
-def run_watch(config_path: Path, data_dir: Path | None) -> int:
+def run_watch(config_path: Path, home: Path | None) -> int:
     """Запустить watcher: скан областей и индексация найденного."""
     registry = default_registry()
     areas, watch = load_config(config_path, known_formats=registry.known_names())
     settings = Settings.default()
-    if data_dir:
-        settings = replace(settings, data_dir=data_dir)
+    if home:
+        settings = replace(settings, home=home)
     ingest, _search, store = build_service(settings)
-    journal = Journal(settings.data_dir / "journal.jsonl")
+    journal = Journal(settings.home / "journal.jsonl")
     dropped = journal.compact()
     if dropped:
         print(
@@ -190,12 +190,12 @@ def _drain(worker: EmbedWorker, limit: int) -> EmbedStats:
 
 
 def run_embed(
-    data_dir: Path | None, limit: int, all_: bool, model: str | None, background: bool
+    home: Path | None, limit: int, all_: bool, model: str | None, background: bool
 ) -> int:
     """Эмбеддинги: очередь → векторы → сайдкары (§7)."""
     settings = Settings.default()
-    if data_dir:
-        settings = replace(settings, data_dir=data_dir)
+    if home:
+        settings = replace(settings, home=home)
     settings.ensure()
     if all_:
         key = model or load(settings.models_state_path).embedding
@@ -331,11 +331,11 @@ def run_model_remove(settings: Settings, key: str) -> int:
     return 0
 
 
-def run_search(data_dir: Path | None, text: str, limit: int) -> int:
+def run_search(home: Path | None, text: str, limit: int) -> int:
     """Поиск из консоли: морфология + семантика (модуль 3)."""
     settings = Settings.default()
-    if data_dir:
-        settings = replace(settings, data_dir=data_dir)
+    if home:
+        settings = replace(settings, home=home)
     settings.ensure()
     store = SqliteStore(settings.db_path)
     try:
@@ -365,15 +365,15 @@ def run_search(data_dir: Path | None, text: str, limit: int) -> int:
     return 0
 
 
-def run_ann_rebuild(data_dir: Path | None, model: str | None) -> int:
+def run_ann_rebuild(home: Path | None, model: str | None) -> int:
     """Пересобрать ANN-индексы из таблицы ``embeddings`` (§8).
 
     Нужно после холодного старта устройства (таблица есть, индекса нет) и при
     рассинхронизации. По умолчанию — все модели, у которых есть векторы.
     """
     settings = Settings.default()
-    if data_dir:
-        settings = replace(settings, data_dir=data_dir)
+    if home:
+        settings = replace(settings, home=home)
     settings.ensure()
     store = SqliteStore(settings.db_path)
     try:
@@ -405,16 +405,16 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
 
     serve_p = sub.add_parser("serve", help="HTTP-сервис (приём + поиск)")
-    serve_p.add_argument("--data-dir", type=Path, default=None)
+    serve_p.add_argument("--home", type=Path, default=None)
     serve_p.add_argument("--host", default=None)
     serve_p.add_argument("--port", type=int, default=None)
 
     watch_p = sub.add_parser("watch", help="следить за областями и индексировать")
     watch_p.add_argument("--config", type=Path, required=True, help="YAML-конфиг")
-    watch_p.add_argument("--data-dir", type=Path, default=None)
+    watch_p.add_argument("--home", type=Path, default=None)
 
     embed_p = sub.add_parser("embed", help="эмбеддинги: очередь → векторы → сайдкары")
-    embed_p.add_argument("--data-dir", type=Path, default=None)
+    embed_p.add_argument("--home", type=Path, default=None)
     embed_p.add_argument("--limit", type=int, default=100, help="задач за проход")
     embed_p.add_argument(
         "--all",
@@ -430,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
 
     model_p = sub.add_parser("model", help="управление моделями эмбеддингов (D24)")
     model_common = argparse.ArgumentParser(add_help=False)
-    model_common.add_argument("--data-dir", type=Path, default=None)
+    model_common.add_argument("--home", type=Path, default=None)
     model_sub = model_p.add_subparsers(dest="model_command")
 
     model_sub.add_parser(
@@ -452,12 +452,12 @@ def main(argv: list[str] | None = None) -> int:
     search_p = sub.add_parser(
         "search", help="поиск из консоли (морфология + семантика)"
     )
-    search_p.add_argument("--data-dir", type=Path, default=None)
+    search_p.add_argument("--home", type=Path, default=None)
     search_p.add_argument("--limit", type=int, default=20)
     search_p.add_argument("text")
 
     ann_p = sub.add_parser("ann", help="ANN-индекс (USearch): пересборка из таблицы")
-    ann_p.add_argument("--data-dir", type=Path, default=None)
+    ann_p.add_argument("--home", type=Path, default=None)
     ann_p.add_argument(
         "--model", default=None, help="только эта модель (по умолчанию все)"
     )
@@ -470,21 +470,19 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Совместимость: без подкоманды — serve с флагами.
-    parser.add_argument("--data-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--home", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--host", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args(argv)
     if args.command == "watch":
-        return run_watch(args.config, args.data_dir)
+        return run_watch(args.config, args.home)
     if args.command == "embed":
-        return run_embed(
-            args.data_dir, args.limit, args.all, args.model, args.background
-        )
+        return run_embed(args.home, args.limit, args.all, args.model, args.background)
     if args.command == "search":
-        return run_search(args.data_dir, args.text, args.limit)
+        return run_search(args.home, args.text, args.limit)
     if args.command == "ann":
-        return run_ann_rebuild(args.data_dir, args.model)
+        return run_ann_rebuild(args.home, args.model)
     if args.command == "model":
         return _model_main(parser, args)
     if args.command == "serve" or args.command is None:
@@ -495,8 +493,8 @@ def main(argv: list[str] | None = None) -> int:
 
 def _model_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     settings = Settings.default()
-    if getattr(args, "data_dir", None):
-        settings = replace(settings, data_dir=args.data_dir)
+    if getattr(args, "home", None):
+        settings = replace(settings, home=args.home)
     if args.model_command is None:
         parser.parse_args([args.command, "--help"])
         return 1
@@ -513,8 +511,8 @@ def _model_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
 
 def _serve_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     settings = Settings.default()
-    if getattr(args, "data_dir", None):
-        settings = replace(settings, data_dir=args.data_dir)
+    if getattr(args, "home", None):
+        settings = replace(settings, home=args.home)
     if getattr(args, "host", None):
         settings = replace(settings, host=args.host)
     if getattr(args, "port", None):

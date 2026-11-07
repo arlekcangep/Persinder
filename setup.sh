@@ -8,8 +8,8 @@
 #   1. Проверяет Python 3.10+ и создаёт venv в корне репозитория (.venv).
 #   2. Ставит persinder со всеми extra (pdf, archive7z, archiverar, config,
 #      watch, http, stemming).
-#   3. Скачивает модель эмбеддингов e5-small-int8-v1 (~120 МБ) в общий каталог
-#      ~/.persinder/models (модель общая для профилей, вне репозитория).
+#   3. Скачивает модель эмбеддингов e5-small-int8-v1 (~120 МБ) в каталог
+#      приложения ~/.persinder/models (модели всегда в <home>/models).
 #   4. Показывает, как запустить индексацию test-content.
 
 set -euo pipefail
@@ -18,18 +18,33 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
 
 VENV="$REPO/.venv"
-PY="$VENV/Scripts/python.exe"     # Windows (Git Bash)
-[ -f "$PY" ] || PY="$VENV/bin/python"  # Linux/macOS
 
-# --- python >= 3.10 ---
-if ! command -v python >/dev/null 2>&1; then
-    echo "ОШИБКА: python не найден в PATH. Установи Python 3.10+ с python.org" >&2
-    echo "(при установке отметь 'Add Python to PATH')" >&2
+# Найти живой python: на Windows 'python' бывает программной оболочкой
+# (Microsoft Store alias, MSYS-обёртка), которая не является настоящим
+# интерпретатором. Проверяем фактическим запуском, а не по имени/пути:
+# заглушка падает, настоящий Python (хоть из WindowsApps, хоть с python.org)
+# выполняет код.
+find_python() {
+    for cand in python3.exe python.exe python3 py.exe py; do
+        command -v "$cand" >/dev/null 2>&1 || continue
+        if "$cand" -c 'import sys' >/dev/null 2>&1; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if ! BASEPY="$(find_python)"; then
+    echo "ОШИБКА: не нашёл работающий python в PATH." >&2
+    echo "Если Python установлен — добавь его в PATH или укажи явно:" >&2
+    echo "    PATH=\"/c/Program Files/Python314:\$PATH\" ./setup.sh   # пример" >&2
+    echo "Если не установлен — поставь с python.org (отметь 'Add Python to PATH')." >&2
     exit 1
 fi
-pyver=$(python -c 'import sys; print("{}.{}".format(*sys.version_info[:2]))')
-echo "Python: $pyver"
-python - "$pyver" <<'EOF'
+pyver=$("$BASEPY" -c 'import sys; print("{}.{}".format(*sys.version_info[:2]))')
+echo "Python: $pyver ($BASEPY)"
+"$BASEPY" - "$pyver" <<'EOF'
 import sys
 
 version = sys.argv[1]
@@ -40,25 +55,43 @@ EOF
 echo "OK"
 
 # --- venv ---
-if [ ! -f "$PY" ]; then
+# Путь к python внутри venv различается: Windows — Scripts/python.exe,
+# POSIX — bin/python. Определяем ПОСЛЕ создания (или находим существующий).
+venv_python() {
+    if [ -f "$VENV/Scripts/python.exe" ]; then
+        echo "$VENV/Scripts/python.exe"
+    elif [ -f "$VENV/bin/python" ]; then
+        echo "$VENV/bin/python"
+    else
+        echo ""
+    fi
+}
+
+PY="$(venv_python)"
+if [ -z "$PY" ]; then
     echo "Создаю venv: $VENV"
-    python -m venv "$VENV"
+    "$BASEPY" -m venv "$VENV"
+    PY="$(venv_python)"
 fi
+
+if [ -z "$PY" ]; then
+    echo "ОШИБКА: venv создан, но python внутри не найден: $VENV" >&2
+    exit 1
+fi
+echo "Venv python: $PY"
 
 # --- установка пакета со всеми extra ---
 echo "Ставлю persinder + все extra..."
-"$PY" -m pip install --quiet --upgrade pip
-"$PY" -m pip install --quiet -e ".[config,watch,http,pdf,archive7z,archiverar,stemming]"
+"$PY" -m pip install --upgrade pip
+"$PY" -m pip install -e ".[config,watch,http,pdf,archive7z,archiverar,stemming]"
 echo "OK: persinder установлен."
 
 # --- модель эмбеддингов ---
-# PERSINDER_MODEL_DIR — общий каталог моделей (вне репозитория и venv).
-export PERSINDER_MODEL_DIR="${PERSINDER_MODEL_DIR:-$HOME/.persinder/models}"
-
+# Модели всегда лежат в <home>/models; по умолчанию home = ~/.persinder.
 if "$PY" -m persinder model list 2>/dev/null | grep -q "e5-small-int8-v1"; then
     echo "Модель e5-small-int8-v1 уже установлена."
 else
-    echo "Качаю модель e5-small-int8-v1 (~120 МБ) -> $PERSINDER_MODEL_DIR ..."
+    echo "Качаю модель e5-small-int8-v1 (~120 МБ) -> ~/.persinder/models ..."
     "$PY" -m persinder model install e5-small-int8-v1
     "$PY" -m persinder embed --background
     "$PY" -m persinder model use e5-small-int8-v1
@@ -77,7 +110,6 @@ cat <<'EOF'
 Вручную (в отдельном терминале):
 
     source .venv/Scripts/activate     # Windows Git Bash
-    export PERSINDER_MODEL_DIR=~/.persinder/models
 
     persinder watch --config ../test-content/persinder.yaml
     persinder embed --background

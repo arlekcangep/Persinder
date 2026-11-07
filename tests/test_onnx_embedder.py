@@ -1,7 +1,7 @@
 """Тесты OnnxEmbedder (ONNX e5-small INT8) — реальная модель.
 
 Модель-зависимые тесты пропускаются, если каталог пуст (скачать:
-``PERSINDER_MODEL_DIR=… python scripts/download_model.py``). Тест на
+``persinder download_model --home …``). Тест на
 отсутствие модели — наоборот, модели не требует и бежит всегда.
 """
 
