@@ -4,14 +4,11 @@
 #   ./run.sh                        — конфиг: папка запуска, затем ~/.persinder
 #                                     (persinder.yaml, затем persinder.yml)
 #   ./run.sh --config PATH          — явный путь к конфигу
-#   ./run.sh --config PATH --host 0.0.0.0 --port 8756
+#   ./run.sh --host 0.0.0.0 --port 8756
 #
-# Запускает `python -m persinder serve --config ... --home ...` — ОДИН процесс:
-#   * слушает HTTP (приём + поиск);
-#   * следит за областями и индексирует новое/изменённое (первый проход сразу
-#     доиндексирует всё, что не было проиндексировано или прервалось);
-#   * разбирает очередь эмбеддингов в фоне.
-# Остановка — Ctrl+C.
+# Запускает `python -m persinder serve --config ... --home ~/.persinder` — ОДИН
+# процесс: HTTP (приём + поиск), watcher (первый проход сразу доиндексирует всё
+# новое/недоделанное) и фоновый разбор очереди эмбеддингов. Остановка — Ctrl+C.
 #
 # Требуется: ./setup.sh уже выполнен (venv .venv + модель).
 
@@ -82,12 +79,20 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Конфиг: явный (--config) или поиск по умолчанию — папка запуска, затем ~/.persinder.
+# Каталог приложения — ~/.persinder (тот же, что Settings.default() в коде).
+# Модели живут в <home>/models. Создаём сразу, чтобы каталог был виден.
+PERSINDER_HOME="$HOME/.persinder"
+if ! mkdir -p "$PERSINDER_HOME"; then
+    echo "ОШИБКА: не могу создать каталог приложения: $PERSINDER_HOME" >&2
+    exit 1
+fi
+
+# Конфиг: явный (--config) или поиск — папка запуска, затем ~/.persinder.
 # В каждом каталоге: persinder.yaml, затем persinder.yml.
 if [ -z "$CONFIG" ]; then
     for candidate in \
         "$START_DIR/persinder.yaml" "$START_DIR/persinder.yml" \
-        "$HOME/.persinder/persinder.yaml" "$HOME/.persinder/persinder.yml"
+        "$PERSINDER_HOME/persinder.yaml" "$PERSINDER_HOME/persinder.yml"
     do
         if [ -f "$candidate" ]; then
             CONFIG="$candidate"
@@ -95,21 +100,17 @@ if [ -z "$CONFIG" ]; then
         fi
     done
 fi
-# Относительный --config — от папки запуска, а не от корня репозитория (сюда мы cd'нули).
+# Относительный --config — от папки запуска, а не от корня репозитория.
 case "$CONFIG" in
     "" | /* | [A-Za-z]:*) ;;
     *) CONFIG="$START_DIR/$CONFIG" ;;
 esac
 if [ -z "$CONFIG" ] || [ ! -f "$CONFIG" ]; then
     echo "ОШИБКА: конфиг не найден." >&2
-    echo "Искал: $START_DIR/persinder.{yaml,yml} и $HOME/.persinder/persinder.{yaml,yml}" >&2
-    echo "Укажи путь явно: ./run.sh --config /путь/к/persinder.yaml" >&2
+    echo "Искал: $START_DIR/persinder.{yaml,yml} и $PERSINDER_HOME/persinder.{yaml,yml}" >&2
+    echo "Положи конфиг в $PERSINDER_HOME/persinder.yaml или укажи --config PATH" >&2
     exit 1
 fi
-
-# Каталог приложения — ~/.persinder (тот же, что Settings.default() в коде).
-# Модели живут в <PERSINDER_HOME>/models — отдельного каталога моделей нет.
-PERSINDER_HOME="$HOME/.persinder"
 
 echo "Конфиг:   $CONFIG"
 echo "Home:     $PERSINDER_HOME  (модели: $PERSINDER_HOME/models)"
