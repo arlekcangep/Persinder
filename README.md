@@ -38,7 +38,11 @@ Persinder ведёт автоматическое каталогизирован
 
 ## Разработка
 
-Ядро — на стандартной библиотеке Python (без обязательных зависимостей).
+Ядро — на стандартной библиотеке Python; единственная обязательная внешняя
+зависимость — `onnxruntime` (+ `tokenizers`): у него официальные колеса для
+Windows/Linux/macOS, поэтому Persinder ставится и работает «из коробки», без
+Docker. Сама модель эмбеддингов (~120 МБ) — не в пакете, а управляется явно:
+`persinder model install`.
 
 ```bash
 # тесты
@@ -47,6 +51,20 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 # запуск сервиса приёма (модуль 1)
 PYTHONPATH=src python3 -m persinder --data-dir ~/.persinder --port 8756
 
+# эмбеддинги по требованию: очередь → векторы → сайдкары (модуль 2)
+PYTHONPATH=src python3 -m persinder embed --data-dir ~/.persinder
+
+# модель эмбеддингов: установка и переключение (D24)
+PYTHONPATH=src python3 -m persinder model install e5-small-int8-v1   # веса + миграция в очередь
+PYTHONPATH=src python3 -m persinder embed --background               # разобрать очередь до пустой
+PYTHONPATH=src python3 -m persinder model use e5-small-int8-v1       # переключить поиск
+
+# семантический поиск (модуль 3): морфология + семантика
+PYTHONPATH=src python3 -m persinder search "коты сидят" --limit 10
+
+# ANN-индекс USearch: пересобрать из таблицы (холодный старт/рассинхрон)
+PYTHONPATH=src python3 -m persinder ann rebuild
+
 # проверка
 curl -s localhost:8756/health
 curl -s -X POST localhost:8756/ingest \
@@ -54,9 +72,22 @@ curl -s -X POST localhost:8756/ingest \
   -d '{"filename":"note.md","area":"personal","text":"Привет мир"}'
 ```
 
-Реализован **модуль 1** (`ingest`): приём текста и метаданных, быстрый морфологический
-слой (FTS5), временное хранение текста и очередь на эмбеддинги. Остальные модули —
-заглушки с зафиксированными интерфейсами (см. `docs/modules.md`).
+Реализованы **модуль 1** (`ingest` — приём текста, морфологический слой FTS5,
+журнал вызовов, инлайн-удаление), **модуль 2** (`embed` — воркер очереди:
+текст → векторы → сайдкары, реестр моделей и явный модель-менеджмент) и
+**модуль 3** (`vectorindex` — семантический поиск: ANN USearch `data_dir/ann/`
+поверх таблицы `embeddings`, точный скан таблицы как фолбэк).
+Эмбеддер — реальная модель e5-small (ONNX INT8, `persinder model install`)
+или детерминированная заглушка (`placeholder-v1`, встроена). У файла живут
+сайдкары нескольких моделей сразу (по подпапке на модель): при установке новой
+модели миграция стартует в фоне, поиск остаётся на старой до явного
+`persinder model use`; удаление `persinder model remove` убирает веса, все
+сайдкары и векторы модели в один момент. Векторный поиск идёт активной
+поисковой моделью (`model use`), в ответе `/search` семантические хиты —
+отдельным полем `semantic_hits` рядом с `hits`. Векторный поиск идёт по
+USearch-индексу (mmap-файл на модель, `persinder ann rebuild` пересобирает);
+единое ранжирование (D16) — следующий шаг. Карта и интерфейсы — в
+`docs/modules.md`.
 
 ## Статус
 

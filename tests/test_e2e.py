@@ -20,7 +20,9 @@ from persinder.__main__ import build_service
 from persinder.api import make_server
 from persinder.config import Settings
 from persinder.domain import Area
+from persinder.embed import EmbedWorker, PlaceholderEmbedder
 from persinder.store import SqliteStore
+from persinder.textstore import FsTextStore
 
 TEXT = (
     "Кот сидит на коврике в комнате. The quick brown fox jumps over the lazy dog. "
@@ -33,6 +35,7 @@ class EndToEndTest(unittest.TestCase):
         root = Path(self._tmp.name)
         self.data_dir = root / "data"
         settings = Settings(data_dir=self.data_dir)
+        self.settings = settings
         self.ingest, self.search, self.store = build_service(settings)
         self.server = make_server(self.ingest, self.search, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -82,6 +85,53 @@ class EndToEndTest(unittest.TestCase):
         self.assertTrue(hits)
         self.assertIn(hits[0]["document_id"], {doc_id})
         self.assertEqual(hits[0]["chunk_index"], 0)
+        # модуль 3: семантический слой — отдельное поле; до эмбеддингов пуст
+        self.assertIn("semantic_hits", result)
+        self.assertEqual(result["semantic_hits"], [])
+
+    def test_semantic_hits_after_embed(self):
+        """Модуль 3: после воркера /search отдаёт semantic_hits по косинусу."""
+        with self._post(
+            "/ingest", {"filename": "note.md", "area": "personal", "text": TEXT}
+        ) as resp:
+            doc_id = json.load(resp)["document_id"]
+
+        worker = EmbedWorker(
+            self.store,
+            FsTextStore(self.settings.text_dir),
+            lambda key: PlaceholderEmbedder(),
+            virtual_dir=self.settings.virtual_dir,
+        )
+        worker.run_once()
+
+        result = self._get("/search?q=" + urllib.parse.quote("коты сидят"))
+        semantic = result["semantic_hits"]
+        self.assertTrue(semantic, "векторные хиты должны появиться после embed")
+        self.assertIn(semantic[0]["document_id"], {doc_id})
+        self.assertEqual(semantic[0]["chunk_index"], 0)
+
+    def test_semantic_hits_via_ann_index(self):
+        """Модуль 3: воркер с ann_dir строит USearch-индекс, поиск идёт по нему."""
+        with self._post(
+            "/ingest", {"filename": "note.md", "area": "personal", "text": TEXT}
+        ) as resp:
+            doc_id = json.load(resp)["document_id"]
+
+        worker = EmbedWorker(
+            self.store,
+            FsTextStore(self.settings.text_dir),
+            lambda key: PlaceholderEmbedder(),
+            virtual_dir=self.settings.virtual_dir,
+            ann_dir=self.settings.ann_dir,
+        )
+        worker.run_once()
+        index_path = self.settings.ann_dir / f"{PlaceholderEmbedder.name}.usearch"
+        self.assertTrue(index_path.exists(), "воркер должен построить ANN-индекс")
+
+        result = self._get("/search?q=" + urllib.parse.quote("коты сидят"))
+        semantic = result["semantic_hits"]
+        self.assertTrue(semantic)
+        self.assertIn(semantic[0]["document_id"], {doc_id})
 
     def test_modified_file_replaces_document(self):
         # Файл изменился: старый документ вытесняется, в индексе только новый.

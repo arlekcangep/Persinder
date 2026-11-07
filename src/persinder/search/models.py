@@ -24,7 +24,13 @@ class SearchHit:
 
 @dataclass(frozen=True)
 class SearchResult:
-    """Результат поиска."""
+    """Результат поиска.
+
+    ``hits`` — морфологический слой (FTS5); ``semantic_hits`` — векторный слой
+    (модуль 3). Пока это отдельные группы; объединение в единый рейтинг
+    (D16: точные → семантика → морфология → тэги) — следующий шаг.
+    """
 
     query: str
     hits: tuple[SearchHit, ...] = ()
+    semantic_hits: tuple[SearchHit, ...] = ()
