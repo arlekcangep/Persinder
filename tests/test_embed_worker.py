@@ -218,6 +218,34 @@ class EmbedWorkerTest(unittest.TestCase):
         self.assertIsNotNone(read_sidecar(file_sidecar_path(src1, "placeholder-v1")))
         self.assertIsNotNone(read_sidecar(file_sidecar_path(src2, "placeholder-v1")))
 
+    def test_empty_queue_path_resolves_to_real_source(self):
+        """Старая запись без source_path: сайдкар ложится рядом с файлом.
+
+        У пользователя база могла быть создана до появления колонки
+        ``source_path``; задачи в очередь попадали с пустым путём, и векторы
+        писались в ``virtual/`` — со стороны выглядело, что «папки модели нет».
+        """
+        src = self.root / "notes/old.md"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        text = "старый документ без записанного пути"
+        src.write_text(text, encoding="utf-8")
+        outcome = self.ingest.ingest(
+            IngestRequest(filename="notes/old.md", area=Area.PERSONAL, text=text)
+        )
+        doc_id = outcome.document_id
+        assert doc_id is not None
+        # База «починилась»: у источника теперь есть реальный путь.
+        self.store.add_source(doc_id, Area.PERSONAL.value, "notes/old.md", str(src))
+
+        stats = self.worker.run_once(limit=10)
+        self.assertEqual((stats.docs, stats.sidecars, stats.errors), (1, 1, 0))
+        self.assertTrue(file_sidecar_path(src, "placeholder-v1").exists())
+        self.assertEqual(
+            list(self.virtual.rglob("*.pdr")),
+            [],
+            "сайдкар не должен уходить в virtual/, если есть путь файла",
+        )
+
     def test_missing_text_drops_queue(self):
         text = "документ, чей текст пропал до обработки"
         outcome = self.ingest.ingest(

@@ -27,7 +27,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from persinder.domain import Area
-from persinder.embed import EmbedWorker, PlaceholderEmbedder, read_sidecar
+from persinder.embed import (
+    EmbedWorker,
+    PlaceholderEmbedder,
+    file_sidecar_path,
+    read_sidecar,
+)
 from persinder.ingest import IngestService
 from persinder.morphology import NoopStemmer
 from persinder.sources import (
@@ -255,6 +260,29 @@ class WatcherEmbedE2ETest(unittest.TestCase):
         more = self._run_watcher(reindexed)
         self.assertEqual(more, [], "после reindex повторные сканы пусты")
         self.assertEqual(self._pending(), 0)
+
+    def test_reindex_only_enqueues_missing_sidecars(self):
+        """Сброс журнала не пересчитывает всё: только потерянные сайдкары."""
+        a = self._write("a.md", "документ а про векторный поиск")
+        b = self._write("b.md", "документ б про морфологию и стемминг")
+        journal = Journal(self.data / "journal.jsonl")
+        self._run_watcher(journal)
+        self._drain_embeddings()
+        self.assertEqual(self._pending(), 0)
+
+        # Один сайдкар «потерялся» — после сброса журнала нужен только он.
+        lost = file_sidecar_path(b, "placeholder-v1")
+        lost.unlink()
+        journal_path = self.data / "journal.jsonl"
+        journal_path.unlink()
+        reindexed = Journal(journal_path)
+        self._run_watcher(reindexed)
+        self.assertEqual(self._pending(), 1, "пересчёт только потерянного сайдкара")
+
+        self._drain_embeddings()
+        self.assertEqual(self._pending(), 0)
+        self.assertTrue(lost.exists(), "сайдкар восстановлен")
+        self.assertTrue(file_sidecar_path(a, "placeholder-v1").exists())
 
     def test_archive_part_sidecar_in_archive_folder(self):
         """Часть zip-архива в области: сайдкар в .persinder/<архив>/ папке."""

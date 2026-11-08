@@ -315,8 +315,11 @@ class SqliteStore:
                 self._purge_document(old_id)
                 evicted.append(old_id)
         self._conn.execute(
-            "INSERT OR IGNORE INTO document_sources"
-            "(doc_id, area, filename, source_path, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO document_sources"
+            "(doc_id, area, filename, source_path, created_at) VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(doc_id, area, filename) DO UPDATE SET source_path ="
+            " CASE WHEN excluded.source_path != '' THEN excluded.source_path"
+            " ELSE document_sources.source_path END",
             (doc_id, area, filename, source_path, utcnow()),
         )
         return evicted
@@ -357,6 +360,21 @@ class SqliteStore:
                 (area, filename),
             ).fetchone()
         return str(row["source_path"]) if row else ""
+
+    def source_paths_for_doc(self, doc_id: str) -> list[str]:
+        """Непустые пути всех источников документа.
+
+        Нужно воркеру эмбеддингов: задача могла быть поставлена по старой
+        записи без пути (БД до появления ``source_path``), и тогда сайдкар
+        ушёл бы в ``virtual/`` вместо папки рядом с файлом.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT source_path FROM document_sources"
+                " WHERE doc_id = ? AND source_path != ''",
+                (doc_id,),
+            ).fetchall()
+        return sorted(str(row["source_path"]) for row in rows)
 
     def source_filenames_under(self, area: str, prefix: str) -> list[str]:
         """Имена источников области, начинающихся с ``prefix`` (части контейнера)."""
@@ -518,6 +536,37 @@ class SqliteStore:
                             str(row["doc_id"]),
                         ),
                     )
+
+    def sources_without_path(self) -> list[SourceRow]:
+        """Источники, у которых ``source_path`` не записан.
+
+        Такие строки остались в БД, созданных до появления колонки (миграция
+        добавляет её пустой). Без пути задачи эмбеддингов уводят сайдкары в
+        ``virtual/`` вместо папки рядом с файлом.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT doc_id, area, filename, source_path FROM document_sources"
+                " WHERE source_path = ''"
+            ).fetchall()
+        return [
+            SourceRow(
+                doc_id=str(row["doc_id"]),
+                area=str(row["area"]),
+                filename=str(row["filename"]),
+                source_path=str(row["source_path"]),
+            )
+            for row in rows
+        ]
+
+    def set_source_path(self, area: str, filename: str, source_path: str) -> None:
+        """Записать путь источника (лечение старых записей)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE document_sources SET source_path = ?"
+                " WHERE area = ? AND filename = ?",
+                (source_path, area, filename),
+            )
 
     def all_sources(self) -> list[SourceRow]:
         """Все источники (для удаления сайдкаров модели)."""

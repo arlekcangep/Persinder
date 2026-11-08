@@ -86,6 +86,10 @@ class MetaStore(Protocol):
 
     def source_path(self, area: str, filename: str) -> str: ...
 
+    def source_paths_for_doc(self, doc_id: str) -> list[str]:
+        """Непустые пути источников документа (для сайдкаров рядом с файлами)."""
+        ...
+
     def source_filenames_under(self, area: str, prefix: str) -> list[str]:
         """Имена источников области, начинающихся с ``prefix`` (части контейнера)."""
         ...

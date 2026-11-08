@@ -14,7 +14,12 @@ import hashlib
 from pathlib import Path
 
 from ..domain import Area, Chunk, Document, EmbeddingJob, chunk_text, utcnow
-from ..embed.sidecar import delete_file_sidecars, delete_virtual_sidecars
+from ..embed.sidecar import (
+    delete_file_sidecars,
+    delete_virtual_sidecars,
+    file_sidecar_path,
+    virtual_sidecar_path,
+)
 from ..interfaces import MetaStore, Stemmer, TextStore
 from ..morphology import analyze_to_string
 from .journal import IngestEntry, IngestEvent, IngestJournal
@@ -93,6 +98,29 @@ class IngestService:
             for old_id in evicted:
                 delete_virtual_sidecars(self._virtual_dir, old_id)
 
+    def _models_without_sidecar(self, doc_id: str, source_path: str) -> list[str]:
+        """Модели, под которыми у источника ещё нет сайдкара.
+
+        Сайдкар — признак того, что документ уже отработан под моделью для
+        этого источника: воркер пишет его только после записи векторов в
+        таблицу. Уже посчитанное заново в очередь не ставим — иначе каждый
+        запуск с ``--reindex`` (сброс журнала) пересчитывал бы эмбеддинги всех
+        документов, постоянно нагружая процессор.
+        """
+        missing: list[str] = []
+        for model in self._embedding_models:
+            if source_path:
+                path = file_sidecar_path(source_path, model)
+            elif self._virtual_dir is not None:
+                path = virtual_sidecar_path(self._virtual_dir, doc_id, model)
+            else:
+                # Некуда положить сайдкар — считаем, что его нет.
+                missing.append(model)
+                continue
+            if not path.exists():
+                missing.append(model)
+        return missing
+
     # --- приём ---
 
     def ingest(self, request: IngestRequest) -> IngestResult:
@@ -131,9 +159,13 @@ class IngestService:
             self._drop_sidecars(evicted, previous, source_path, existing)
             # У нового источника свои сайдкары — ставим его задачи под каждой
             # активной моделью (D24: пока embedding ≠ search, файл считается обеими).
-            self._store.enqueue_document(
-                existing, area, source_path, models=list(self._embedding_models)
-            )
+            # Но только если сайдкара ещё нет: повторный скан (в т.ч. после
+            # --reindex) не должен заново считать уже посчитанные эмбеддинги.
+            pending_models = self._models_without_sidecar(existing, source_path)
+            if pending_models:
+                self._store.enqueue_document(
+                    existing, area, source_path, models=pending_models
+                )
             self._log(
                 IngestEvent.DUPLICATED,
                 doc_id=existing,
