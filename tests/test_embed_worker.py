@@ -13,6 +13,7 @@ from persinder.embed import (
     PlaceholderEmbedder,
     file_sidecar_path,
     read_sidecar,
+    sidecar_path,
     unpack_f16_vectors,
     virtual_sidecar_path,
 )
@@ -172,6 +173,39 @@ class EmbedWorkerTest(unittest.TestCase):
         )
         # рядом с файлом сайдкара нет — файла нет
         self.assertEqual(list(self.root.glob("**/.persinder")), [])
+
+    def test_archive_part_sidecar_in_archive_folder(self):
+        """Часть архива: source_path = полный виртуальный путь, сайдкар в
+        .persinder/<модель>/<архив>/ папку; при удалении источника уходит вместе."""
+        container = self.root / "arch"
+        container.mkdir(parents=True, exist_ok=True)
+        zip_path = container / "bundle.zip"
+        zip_path.write_text("", encoding="utf-8")  # контейнер существует на диске
+        text = "внутренний документ архива про векторный поиск"
+        part_path = Path(zip_path) / "inner.md"
+        self.ingest.ingest(
+            IngestRequest(
+                filename="bundle.zip/inner.md",
+                area=Area.PERSONAL,
+                text=text,
+                source_path=str(part_path),
+            )
+        )
+        stats = self.worker.run_once(limit=10)
+        self.assertEqual((stats.docs, stats.sidecars, stats.errors), (1, 1, 0))
+
+        sidecar = sidecar_path(part_path, "placeholder-v1")
+        self.assertTrue(sidecar.exists(), f"нет сайдкара: {sidecar}")
+        # папка на архив внутри .persinder
+        self.assertEqual(
+            sidecar.parent,
+            container / ".persinder" / "placeholder-v1" / "bundle.zip",
+        )
+        # в глобальную virtual_dir не ушёл
+        self.assertEqual(list(self.virtual.glob("*.pdr")), [])
+
+        self.ingest.remove_source(Area.PERSONAL, "bundle.zip/inner.md")
+        self.assertFalse(sidecar.exists(), "сайдкар не удалён вместе с источником")
 
     def test_duplicate_gets_its_own_sidecar(self):
         text = "общий текст про котиков и васильки"
