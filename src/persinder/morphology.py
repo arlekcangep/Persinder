@@ -23,6 +23,15 @@ def tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
+def token_positions(text: str) -> list[tuple[int, int]]:
+    """Позиции токенов ``(start, end)`` в ``text`` (без нижнего регистра).
+
+    Нужно для поиска точного места найденного слова в сыром тексте:
+    ``text[start:end]`` — само слово в оригинальном регистре.
+    """
+    return [(match.start(), match.end()) for match in _TOKEN_RE.finditer(text)]
+
+
 class NoopStemmer:
     """Заглушка: не стеммит. Используется, если Snowball недоступен."""
 

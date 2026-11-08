@@ -78,7 +78,7 @@ class ApiTest(unittest.TestCase):
         with urllib.request.urlopen(f"{self.base}/search?{params}") as resp:
             return json.load(resp)
 
-    def test_search_hit_has_context_three_lines_around(self):
+    def test_search_hit_has_context_three_sentences_around(self):
         text = (
             "line one\nline two\nline three\nline four\nline five\n"
             "line six\nline seven\nline eight\nline nine\n"
@@ -92,11 +92,33 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(body["hits"])
         hit = body["hits"][0]
         self.assertEqual(hit["chunk_index"], 0)
+        # Контекст — от найденного слова, по 3 предложения назад и вперёд,
+        # а не весь чанк (строки с 4-й по 7-ю не попадают).
         self.assertEqual(
             hit["context"],
             "line one\nline two\nline three\nline four\n"
-            "line five\nline six\nline seven\nline eight",
+            "line five\nline six\nline seven",
         )
+
+    def test_search_hit_context_is_bounded_not_whole_chunk(self):
+        # Чанк маленький, но контекст всё равно только вокруг найденного слова:
+        # ничего дальше 3 предложений от хита не выводится.
+        text = (
+            "alpha one\nalpha two\nцелевое слово\n"
+            "delta one\ndelta two\ndelta three\ndelta four\ndelta five\n"
+            "delta six\ndelta seven\ndelta eight\ndelta nine\n"
+        )
+        with self._post(
+            "/ingest", {"filename": "ctx2.txt", "area": "personal", "text": text}
+        ) as resp:
+            self.assertEqual(json.load(resp)["status"], "indexed")
+
+        body = self._search("слово")
+        self.assertTrue(body["hits"])
+        hit = body["hits"][0]
+        self.assertIn("целевое слово", hit["context"])
+        self.assertNotIn("delta eight", hit["context"])
+        self.assertNotIn("delta nine", hit["context"])
 
     def test_search_context_is_null_without_raw_text(self):
         with self._post(
