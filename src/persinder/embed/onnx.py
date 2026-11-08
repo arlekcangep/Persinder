@@ -20,6 +20,10 @@ from typing import Any
 _MAX_LENGTH = 512
 _QUERY_PREFIX = "query: "
 _PASSAGE_PREFIX = "passage: "
+# Вместимость одного прогона модели (последовательностей). Вся порция
+# (часто — все чанки документа) в одном run() дает батч в сотни строк × 512
+# токенов, и активации внимания (батч × heads × L²) съедают гигабайты.
+_BATCH_SIZE = 16
 
 
 class OnnxEmbedder:
@@ -54,8 +58,24 @@ class OnnxEmbedder:
         return self._embed(_QUERY_PREFIX, texts)
 
     def _embed(self, prefix: str, texts: list[str]) -> list[list[float]]:
+        """Векторы для ``texts``, дробя порцию на мини-батчи ``_BATCH_SIZE``.
+
+        Память ONNX зависит от размера прогона: один run() с батчем в сотни
+        последовательностей по 512 токенов требует гигабайты на активации
+        внимания. Дробить порцию надо не в воркере (он не знает о модели),
+        а здесь, на границе вызова.
+        """
         if not texts:
             return []
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), _BATCH_SIZE):
+            vectors.extend(
+                self._embed_batch(prefix, texts[start : start + _BATCH_SIZE])
+            )
+        return vectors
+
+    def _embed_batch(self, prefix: str, texts: list[str]) -> list[list[float]]:
+        """Один прогон модели: не больше ``_BATCH_SIZE`` последовательностей."""
         encoded = [self._tokenizer.encode(prefix + text) for text in texts]
         batch = len(encoded)
         length = max(1, min(max(len(e.ids) for e in encoded), _MAX_LENGTH))
