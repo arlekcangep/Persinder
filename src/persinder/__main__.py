@@ -30,7 +30,6 @@ from .morphology import default_stemmer
 from .search import SearchQuery, SearchService
 from .sources import (
     JOURNAL_RETENTION_DAYS,
-    AreaConfig,
     IndexingPipeline,
     Journal,
     ScanResult,
@@ -130,10 +129,9 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     * HTTP-сервер блокирует главный поток до Ctrl+C.
 
     При ``reindex=True`` журнал сбрасывается полностью (все файлы считаются
-    новыми) — сервис стартует с пересканированием всех областей. Эмбеддинги
-    при этом повторно ставятся в очередь только там, где сайдкара ещё нет
-    (это решает ingest на duplicate-пути), поэтому запуск не пересчитывает
-    векторы всех документов заново.
+    новыми): сервис пересканирует все области, ingest сверяет хэши содержимого
+    с базой (файл мог измениться, пока сервис был выключен) и под активную
+    модель ставится пересчёт всех источников — полная переиндексация.
     """
     settings.ensure()
     print(f"Home: {settings.home}", flush=True)
@@ -143,27 +141,21 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     ingest, search, store = build_service(settings)
     embed_worker, embed_store, embed_label = build_embed_worker(settings)
 
-    healed = heal_source_paths(store, areas)
-    if healed:
-        print(
-            f"Источники: восстановлен путь у {healed} шт. (старая база).",
-            flush=True,
-        )
-
     journal = Journal(settings.home / "journal.jsonl")
     if reindex:
         journal_path = settings.home / "journal.jsonl"
         if journal_path.exists():
             journal_path.unlink()
         print(
-            "Полная переиндексация: журнал сброшен, пересканируются все области.",
+            "Полная переиндексация: журнал сброшен, пересканируются все области. "
+            "Пересчёт эмбеддингов поставлен в очередь.",
             flush=True,
         )
-        # Заново ставить в очередь эмбеддинги НЕ нужно: сброс журнала лишь
-        # заставляет watcher пересканировать файлы, а ingest при повторной
-        # встрече (duplicate) сам поставит задачи только тем моделям, у которых
-        # у источника ещё нет сайдкара. Иначе каждый запуск с --reindex
-        # пересчитывал бы эмбеддинги всех документов заново (постоянный CPU).
+        # Полный пересчёт: файлы могли измениться, пока сервис был выключен;
+        # watcher сверит хэши при пересканировании, а под активную модель
+        # ставим в очередь все источники (старые документы — тоже).
+        models = load(settings.models_state_path)
+        store.enqueue_all([models.embedding])
         journal = Journal(settings.home / "journal.jsonl")  # пустой, заново
     dropped = journal.compact()
     if dropped:
@@ -259,35 +251,6 @@ def describe_models(settings: Settings) -> str:
     if models.search == models.embedding:
         return f"embedding = search = {embedding}{hint}"
     return f"embedding = {embedding}, search = {models.search} (миграция){hint}"
-
-
-def heal_source_paths(store: SqliteStore, areas: tuple[AreaConfig, ...]) -> int:
-    """Восстановить ``source_path`` у источников, где он пуст (старая БД).
-
-    Путь потерялся у записей, созданных до появления колонки (миграция
-    добавляет её пустой). Пока он пуст, ``model install`` ставит задачи с
-    пустым путём, и сайдкары новой модели уходят в ``home/virtual/`` вместо
-    ``.persinder/<модель>/`` рядом с файлами.
-
-    Путь восстанавливается по конфигу: ``filename`` — это путь от корня
-    области, для части архива первый компонент — сам архив на диске.
-    """
-    by_role: dict[str, list[Path]] = {}
-    for area in areas:
-        by_role.setdefault(area.role.value, []).append(area.path)
-    healed = 0
-    for source in store.sources_without_path():
-        parts = Path(source["filename"]).parts
-        if not parts:
-            continue
-        for base in by_role.get(source["area"], []):
-            if (base / parts[0]).exists():
-                store.set_source_path(
-                    source["area"], source["filename"], str(base / source["filename"])
-                )
-                healed += 1
-                break
-    return healed
 
 
 def build_embed_worker(

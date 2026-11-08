@@ -232,8 +232,8 @@ class WatcherEmbedE2ETest(unittest.TestCase):
             "сайдкар удалён вместе с источником",
         )
 
-    def test_reindex_flag_resets_and_recounts(self):
-        """--reindex: журнал сброшен, все источники пересчитаны, затем идемпотентно."""
+    def test_reindex_requeues_every_source(self):
+        """--reindex: журнал сброшен и в очередь поставлены ВСЕ источники."""
         self._write("a.md", "документ а про векторный поиск")
         self._write("b.md", "документ б про морфологию и стемминг")
         journal = Journal(self.data / "journal.jsonl")
@@ -242,47 +242,63 @@ class WatcherEmbedE2ETest(unittest.TestCase):
         self.assertEqual(self.store.counts()["documents"], 2)
         self.assertEqual(self._pending(), 0)
 
-        # Переиндексация: сбрасываем журнал (как делает --reindex).
+        # Как run_serve с --reindex: журнал сброшен и всё поставлено в очередь.
         journal_path = self.data / "journal.jsonl"
         journal_path.unlink()
+        self.store.enqueue_all(["placeholder-v1"])
+        self.assertEqual(
+            self._pending(), 2, "пересчёт всех источников, а не только утраченных"
+        )
+
         reindexed = Journal(journal_path)
         self._run_watcher(reindexed)
-        # Файлы уже известны по содержимому → duplicates, задач нет... но сброс
-        # журнала заставляет watcher пересканировать всё заново.
         self.assertEqual(
             self.store.counts()["documents"], 2, "документы целы после reindex"
         )
-
         self._drain_embeddings()
         self.assertEqual(self._pending(), 0)
+        for name in ("a.md", "b.md"):
+            self.assertTrue(
+                (self.vault / ".persinder" / "placeholder-v1" / f"{name}.pdr").exists()
+            )
 
         # Повторные сканы после переиндексации снова идемпотентны.
         more = self._run_watcher(reindexed)
         self.assertEqual(more, [], "после reindex повторные сканы пусты")
         self.assertEqual(self._pending(), 0)
 
-    def test_reindex_only_enqueues_missing_sidecars(self):
-        """Сброс журнала не пересчитывает всё: только потерянные сайдкары."""
-        a = self._write("a.md", "документ а про векторный поиск")
-        b = self._write("b.md", "документ б про морфологию и стемминг")
+    def test_reindex_picks_up_file_changed_while_service_off(self):
+        """Файл, изменённый при выключенном сервисе, переиндексируется по хэшу."""
+        src = self._write("note.md", "старая версия про котиков")
         journal = Journal(self.data / "journal.jsonl")
         self._run_watcher(journal)
         self._drain_embeddings()
-        self.assertEqual(self._pending(), 0)
+        self.assertEqual(len(self.store.search_morph("котиков")), 1)
 
-        # Один сайдкар «потерялся» — после сброса журнала нужен только он.
-        lost = file_sidecar_path(b, "placeholder-v1")
-        lost.unlink()
+        # Сервис «выключен»: содержимое файла изменилось.
+        time.sleep(0.05)
+        src.write_text("новая версия про квантовый флакс", encoding="utf-8")
+
+        # --reindex: журнал сброшен, все источники снова в очереди.
         journal_path = self.data / "journal.jsonl"
         journal_path.unlink()
+        self.store.enqueue_all(["placeholder-v1"])
         reindexed = Journal(journal_path)
-        self._run_watcher(reindexed)
-        self.assertEqual(self._pending(), 1, "пересчёт только потерянного сайдкара")
+        prints = self._run_watcher(reindexed)
+        self.assertIn("indexed=1", prints[0], "изменённый файл переиндексирован")
 
         self._drain_embeddings()
         self.assertEqual(self._pending(), 0)
-        self.assertTrue(lost.exists(), "сайдкар восстановлен")
-        self.assertTrue(file_sidecar_path(a, "placeholder-v1").exists())
+        self.assertEqual(self.store.counts()["documents"], 1)
+        self.assertEqual(
+            len(self.store.search_morph("котиков")), 0, "старая версия удалена"
+        )
+        self.assertEqual(
+            len(self.store.search_morph("флакс")), 1, "новая версия в индексе"
+        )
+        sidecar = file_sidecar_path(src, "placeholder-v1")
+        self.assertTrue(sidecar.exists(), "сайдкар пересчитан для новой версии")
+        self.assertIsNotNone(read_sidecar(sidecar))
 
     def test_archive_part_sidecar_in_archive_folder(self):
         """Часть zip-архива в области: сайдкар в .persinder/<архив>/ папке."""

@@ -22,16 +22,21 @@ from unittest import mock
 
 from persinder import __main__ as cli
 from persinder.config import Settings
+from persinder.domain import Area
 from persinder.embed import (
     PLACEHOLDER,
     file_sidecar_path,
     is_installed,
     load,
     read_sidecar,
+    virtual_sidecar_path,
 )
 from persinder.embed.registry import CATALOG, ModelSpec
+from persinder.ingest import IngestRequest, IngestService
 from persinder.interfaces import Ingest, Search
+from persinder.morphology import NoopStemmer
 from persinder.store import SqliteStore
+from persinder.textstore import FsTextStore
 
 NEW_MODEL = "test-embed-v1"
 FILES = {
@@ -168,55 +173,59 @@ class ModelInstallE2ETest(unittest.TestCase):
         finally:
             store.close()
 
-    def test_restart_after_install_does_not_recompute(self):
-        """После установки модели повторные запуски не считают всё заново."""
-        with (
-            mock.patch.dict(CATALOG, {NEW_MODEL: self.spec}),
-            mock.patch("persinder.embed.registry.OnnxEmbedder", FakeOnnxEmbedder),
-        ):
-            self._serve_once()
-            with redirect_stdout(io.StringIO()):
-                cli.run_model_install(self.settings, NEW_MODEL)
-            self._serve_once()
-            self._drain_queue()
-            # Повторный старт: очередь пуста, воркер ничего не считает.
-            again = self._serve_once()
+    def test_virtual_document_sidecar_under_new_model(self):
+        """Документ не из файлов: сайдкар новой модели — в ``home/virtual/``.
 
-        self.assertNotIn("Embed: документов", again, again)
+        Пустой ``source_path`` — штатный виртуальный режим (текст вставлен/web,
+        файла на диске нет): сайдкар живёт в ``data_dir/virtual/<модель>/``,
+        а не рядом с файлами.
+        """
+        text = "вставленный текст без файла на диске про нейросети"
+        self.settings.ensure()
         store = SqliteStore(self.settings.db_path)
         try:
-            self.assertEqual(store.counts()["pending_embeddings"], 0)
+            ingest = IngestService(
+                store,
+                FsTextStore(self.settings.text_dir),
+                NoopStemmer(),
+                virtual_dir=self.settings.virtual_dir,
+                embedding_models=(PLACEHOLDER,),
+            )
+            outcome = ingest.ingest(
+                IngestRequest(
+                    filename="web-note.md", area=Area.WEB, text=text, source_path=""
+                )
+            )
         finally:
             store.close()
-
-    def test_install_on_stale_db_writes_sidecars_next_to_files(self):
-        """БД до ``source_path``: пустые пути не уводят сайдкары в ``virtual/``."""
-        import sqlite3
+        doc_id = outcome.document_id
+        assert doc_id is not None
 
         with (
             mock.patch.dict(CATALOG, {NEW_MODEL: self.spec}),
             mock.patch("persinder.embed.registry.OnnxEmbedder", FakeOnnxEmbedder),
         ):
             self._serve_once()
-            # Имитируем старую БД: у источников путь не записан.
-            conn = sqlite3.connect(self.settings.db_path)
-            with conn:
-                conn.execute("UPDATE document_sources SET source_path = ''")
-            conn.close()
-
+            self.assertTrue(
+                virtual_sidecar_path(
+                    self.settings.virtual_dir, doc_id, PLACEHOLDER
+                ).exists(),
+                "виртуальный документ должен считаться заглушкой",
+            )
             with redirect_stdout(io.StringIO()):
                 cli.run_model_install(self.settings, NEW_MODEL)
-            # Очередь новой модели уже содержит задачи с пустым путём.
             self._serve_once()
             self._drain_queue()
 
-        for path in self.files.values():
-            self.assertTrue(
-                file_sidecar_path(path, NEW_MODEL).exists(),
-                f"нет сайдкара новой модели рядом с файлом: {path}",
-            )
-        virtual = list((self.settings.virtual_dir / NEW_MODEL).glob("*.pdr"))
-        self.assertEqual(virtual, [], "сайдкары не должны уходить в virtual/")
+        sidecar = virtual_sidecar_path(self.settings.virtual_dir, doc_id, NEW_MODEL)
+        self.assertTrue(sidecar.exists(), f"нет виртуального сайдкара: {sidecar}")
+        data = read_sidecar(sidecar)
+        assert data is not None
+        self.assertEqual(data.fingerprint.model, NEW_MODEL)
+        # Рядом с файлами его быть не должно — файла на диске нет.
+        self.assertFalse(
+            (self.area / ".persinder" / NEW_MODEL / "web-note.md.pdr").exists()
+        )
 
 
 if __name__ == "__main__":

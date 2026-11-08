@@ -101,9 +101,9 @@ class IngestServiceTest(unittest.TestCase):
 class IngestDuplicateQueueTest(unittest.TestCase):
     """Повторная встреча файла не пересчитывает уже готовые эмбеддинги.
 
-    Сайдкар — признак, что документ отработан под моделью для этого источника.
-    Иначе каждый запуск с ``--reindex`` (сброс журнала → все файлы снова
-    попадают в ingest) ставил бы в очередь полный пересчёт — постоянный CPU.
+    Сайдкар — признак, что документ отработан под моделью для этого источника:
+    watcher на каждом проходе снова видит те же файлы, и без этой проверки
+    очередь пополнялась бы постоянным пересчётом.
     """
 
     def setUp(self):
@@ -163,11 +163,13 @@ class IngestDuplicateQueueTest(unittest.TestCase):
         )
         doc_id = first.document_id
         assert doc_id is not None
-        self.assertEqual(self.store.source_paths_for_doc(doc_id), [])
+        self.assertEqual(self.store.source_path(Area.PERSONAL.value, src.name), "")
 
         again = self._ingest(src, text)
         self.assertEqual(again.status, IngestResult.ALREADY)
-        self.assertEqual(self.store.source_paths_for_doc(doc_id), [str(src)])
+        self.assertEqual(
+            self.store.source_path(Area.PERSONAL.value, src.name), str(src)
+        )
 
     def test_new_source_without_sidecar_is_enqueued(self):
         text = "общий текст двух копий"

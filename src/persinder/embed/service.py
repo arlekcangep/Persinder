@@ -200,12 +200,6 @@ class EmbedWorker:
             if index is not None:
                 index.add(ids, vectors)
             targets = {str(row["source_path"]) for row in model_rows}
-            if "" in targets:
-                # Задача могла быть поставлена по устаревшей записи без пути
-                # (БД до появления source_path): берём реальные пути источников
-                # документа, чтобы сайдкар лёг рядом с файлом, а не в virtual/.
-                real = set(self._store.source_paths_for_doc(doc_id))
-                targets = ((targets - {""}) | real) or {""}
             for target in targets:
                 if not target:
                     if self._virtual_dir is None:
