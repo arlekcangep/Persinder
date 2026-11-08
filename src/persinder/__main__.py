@@ -116,7 +116,7 @@ def run_watch(config_path: Path, home: Path | None) -> int:
     return 0
 
 
-def run_serve(config_path: Path, settings: Settings) -> int:
+def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> int:
     """Полный сервис: HTTP + watcher + эмбеддинги + восстановление после сбоев.
 
     Это единая точка запуска всех фоновых активностей:
@@ -127,6 +127,10 @@ def run_serve(config_path: Path, settings: Settings) -> int:
       (журнал считает «устроенными» только завершённые цепочки);
     * поток эмбеддингов — разбирает очередь в векторы/сайдкары, пока сервис жив;
     * HTTP-сервер блокирует главный поток до Ctrl+C.
+
+    При ``reindex=True`` журнал сбрасывается полностью (все файлы считаются
+    новыми), а под активную модель ставится пересчёт всех источников — сервис
+    стартует с полной переиндексацией.
     """
     settings.ensure()
     print(f"Home: {settings.home}", flush=True)
@@ -137,6 +141,19 @@ def run_serve(config_path: Path, settings: Settings) -> int:
     embed_worker, embed_store, embed_label = build_embed_worker(settings)
 
     journal = Journal(settings.home / "journal.jsonl")
+    if reindex:
+        journal_path = settings.home / "journal.jsonl"
+        if journal_path.exists():
+            journal_path.unlink()
+        print(
+            "Полная переиндексация: журнал сброшен, пересканируются все области. "
+            "Пересчёт эмбеддингов поставлен в очередь.",
+            flush=True,
+        )
+        # Поставить пересчёт всех источников под активной моделью.
+        models = load(settings.models_state_path)
+        store.enqueue_all([models.embedding])
+        journal = Journal(settings.home / "journal.jsonl")  # пустой, заново
     dropped = journal.compact()
     if dropped:
         print(
@@ -531,6 +548,12 @@ def main(argv: list[str] | None = None) -> int:
     serve_p.add_argument("--home", type=Path, default=default_home, help=home_help)
     serve_p.add_argument("--host", default=None)
     serve_p.add_argument("--port", type=int, default=None)
+    serve_p.add_argument(
+        "--reindex",
+        action="store_true",
+        help="полная переиндексация: сбросить журнал, пересканировать все области "
+        "и пересчитать все эмбеддинги при старте",
+    )
 
     watch_p = sub.add_parser("watch", help="следить за областями и индексировать")
     watch_p.add_argument("--config", type=Path, required=True, help="YAML-конфиг")
@@ -661,7 +684,7 @@ def _serve_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
                 print(f"Конфиг не задан — использую {config_path}", flush=True)
                 break
     if config_path is not None:
-        return run_serve(config_path, settings)
+        return run_serve(config_path, settings, getattr(args, "reindex", False))
 
     # Конфига нет ни явного, ни в папке запуска/home — деградация до HTTP-only:
     # watcher/эмбеддинги не знают областей.

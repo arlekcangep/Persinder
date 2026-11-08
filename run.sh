@@ -6,6 +6,8 @@
 #   ./run.sh --config PATH        — явный конфиг
 #   ./run.sh --home PATH          — каталог приложения
 #   ./run.sh --host 0.0.0.0 --port 8756
+#   ./run.sh --reindex            — полная переиндексация при старте
+#   REINDEX=1 ./run.sh            — то же самое (переменная окружения)
 #
 # Вся логика — в `persinder serve` (src/persinder/__main__.py): поиск конфига,
 # создание home, watcher, эмбеддинги. Здесь только выбор python из venv и exec.
@@ -24,6 +26,11 @@ else
     echo "ОШИБКА: venv не найден: $VENV" >&2
     echo "Сначала запусти ./setup.sh" >&2
     exit 1
+fi
+
+# Полная переиндексация: флаг --reindex или переменная окружения REINDEX=1.
+if [ "${REINDEX:-}" = "1" ]; then
+    set -- --reindex "$@"
 fi
 
 exec "$PY" -m persinder serve "$@"
