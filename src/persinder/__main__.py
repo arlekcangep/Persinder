@@ -315,6 +315,8 @@ def _embed_loop(
             continue
         if stats.docs or stats.skipped or stats.errors:
             print(format_embed(stats), flush=True)
+            for message in stats.messages[:10]:
+                print(f"Embed: {message}", flush=True)
         if stats.docs == 0:
             kick.wait(interval)
             kick.clear()

@@ -429,5 +429,84 @@ class EmbedWorkerTest(unittest.TestCase):
         self.assertIsNotNone(read_sidecar(file_sidecar_path(src2, "placeholder-v2")))
 
 
+class EmbedWorkerRobustnessTest(unittest.TestCase):
+    """Устойчивость фонового воркера: кэш эмбеддера и изоляция ошибок."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.root = root
+        self.virtual = root / "virtual"
+        self.store = SqliteStore(root / "db.sqlite")
+        self.textstore = FsTextStore(root / "pending_texts")
+        self.ingest = IngestService(
+            self.store, self.textstore, NoopStemmer(), virtual_dir=self.virtual
+        )
+        self.good = PlaceholderEmbedder()
+
+    def tearDown(self):
+        self.store.close()
+        self._tmp.cleanup()
+
+    def _file(self, name: str, text: str) -> Path:
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        self.ingest.ingest(
+            IngestRequest(
+                filename=name,
+                area=Area.PERSONAL,
+                text=text,
+                source_path=str(path),
+            )
+        )
+        return path
+
+    def test_embedder_factory_called_once_per_model(self):
+        """Модель не перезагружается на каждый документ/проход (кэш)."""
+        calls: list[str] = []
+
+        def factory(model: str) -> Embedder:
+            calls.append(model)
+            return self.good
+
+        worker = EmbedWorker(
+            self.store, self.textstore, factory, virtual_dir=self.virtual
+        )
+        self._file("a.md", "первый документ про котиков")
+        self._file("b.md", "второй документ про собак")
+        worker.run_once(limit=10)
+        worker.run_once(limit=10)
+        self.assertEqual(calls, ["placeholder-v1"], "сессия модели — один раз")
+
+    def test_one_document_error_does_not_block_others(self):
+        """Падение одного документа не мешает посчитать остальные."""
+        boom = self._file("0boom.md", "этот документ взорвёт эмбеддер boom")
+        good = self._file("zgood.md", "обычный документ про спокойный флакс")
+
+        class BoomEmbedder(PlaceholderEmbedder):
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                if any("boom" in text for text in texts):
+                    raise RuntimeError("модель упала")
+                return super().embed(texts)
+
+        worker = EmbedWorker(
+            self.store,
+            self.textstore,
+            lambda model: BoomEmbedder(),
+            virtual_dir=self.virtual,
+        )
+        stats = worker.run_once(limit=10)
+        self.assertEqual(stats.errors, 1)
+        self.assertEqual(stats.docs, 1, "второй документ всё равно посчитан")
+        self.assertTrue(
+            read_sidecar(file_sidecar_path(good, "placeholder-v1")) is not None
+        )
+        self.assertFalse(
+            file_sidecar_path(boom, "placeholder-v1").exists(),
+            "у упавшего документа сайдкара нет",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

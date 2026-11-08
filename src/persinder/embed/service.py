@@ -96,6 +96,18 @@ class EmbedWorker:
         self._virtual_dir = Path(virtual_dir) if virtual_dir else None
         self._ann_dir = Path(ann_dir) if ann_dir else None
         self._indices: dict[str, UsannIndex] = {}
+        # Эмбеддеры кэшируются по модели: ONNX-сессия (веса ~100 МБ) создаётся
+        # один раз, а не на каждый документ/проход. Иначе пересчёт сотен файлов
+        # постоянно перезагружает модель — это и есть «жрёт процессор».
+        self._embedders: dict[str, Embedder] = {}
+
+    def _embedder(self, model: str) -> Embedder:
+        """Эмбеддер модели — из кэша, иначе создать и запомнить."""
+        embedder = self._embedders.get(model)
+        if embedder is None:
+            embedder = self._embedder_factory(model)
+            self._embedders[model] = embedder
+        return embedder
 
     def _index(self, model: str, dim: int) -> UsannIndex | None:
         """Открыть/создать ANN-индекс модели (кэш на проход)."""
@@ -123,7 +135,10 @@ class EmbedWorker:
             for doc_id in doc_ids:
                 try:
                     self._process_doc(doc_id, stats)
-                except OSError as exc:
+                except Exception as exc:  # noqa: BLE001 — одна задача не валит проход
+                    # Ошибка одного документа (OOM, битый файл, нет модели) не
+                    # должна блокировать остальные: задачи остаются в очереди и
+                    # уйдут следующим проходом, а прочие документы посчитаются.
                     stats.errors += 1
                     stats.messages.append(f"{doc_id}: {exc}")
             for model, index in self._indices.items():
@@ -159,7 +174,7 @@ class EmbedWorker:
 
         counted = False
         for model, model_rows in by_model.items():
-            embedder = self._embedder_factory(model)
+            embedder = self._embedder(model)
             vectors = embedder.embed([text[a:b] for a, b in spans])
             fingerprint = EmbedFingerprint(
                 model=embedder.name, dim=embedder.dim, quant="f16"
