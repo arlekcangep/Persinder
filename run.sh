@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # run.sh — запуск единого сервиса Persinder.
 #
-#   ./run.sh                      — serve; конфиг ищется в папке запуска,
-#                                   затем в ~/.persinder (persinder.yaml, .yml)
+# Полная переиндексация включена ПО УМОЛЧАНИЮ: при каждом старте журнал
+# сбрасывается, все области сканируются заново, эмбеддинги пересчитываются.
+# Отключить (быстрый инкрементальный старт по сохранённому журналу):
+#
+#   ./run.sh --no-reindex
+#   REINDEX=0 ./run.sh
+#
+# Обычные флаги пробрасываются в `persinder serve` как есть:
 #   ./run.sh --config PATH        — явный конфиг
 #   ./run.sh --home PATH          — каталог приложения
 #   ./run.sh --host 0.0.0.0 --port 8756
-#   ./run.sh --reindex            — полная переиндексация при старте
-#   REINDEX=1 ./run.sh            — то же самое (переменная окружения)
 #
 # Вся логика — в `persinder serve` (src/persinder/__main__.py): поиск конфига,
 # создание home, watcher, эмбеддинги. Здесь только выбор python из venv и exec.
@@ -28,8 +32,18 @@ else
     exit 1
 fi
 
-# Полная переиндексация: флаг --reindex или переменная окружения REINDEX=1.
-if [ "${REINDEX:-}" = "1" ]; then
+# Переиндексация по умолчанию; отключить: REINDEX=0 или флаг --no-reindex.
+reindex="1"
+filtered=()
+for arg in "$@"; do
+    case "$arg" in
+        --no-reindex) reindex="0" ;;
+        --reindex)    reindex="1" ;;
+        *)            filtered+=("$arg") ;;
+    esac
+done
+set -- "${filtered[@]}"
+if [ "${REINDEX:-$reindex}" = "1" ]; then
     set -- --reindex "$@"
 fi
 
