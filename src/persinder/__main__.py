@@ -18,12 +18,14 @@ from .embed import (
     ModelState,
     build_embedder,
     delete_model_sidecars,
+    file_sidecar_path,
     install,
     installed_keys,
     is_installed,
     load,
     remove_weights,
     save,
+    virtual_sidecar_path,
 )
 from .ingest import IngestJournal, IngestService, RecoveryStats
 from .morphology import default_stemmer
@@ -163,10 +165,18 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
             flush=True,
         )
         # Полный пересчёт: файлы могли измениться, пока сервис был выключен;
-        # watcher сверит хэши при пересканировании, а под активную модель
-        # ставим в очередь все источники (старые документы — тоже).
+        # watcher сверит хэши при пересканировании и поставит в очередь всё,
+        # у чего нет сайдкара под активной моделью (в т.ч. виртуальные источники).
+        # Уже посчитанное заново в очередь не возвращаем — иначе каждый рестарт
+        # перезаполнял бы очередь целиком (вот это и выглядит как «растёт»).
         models = load(settings.models_state_path)
-        store.enqueue_all([models.embedding])
+
+        def _has_sidecar(model: str, doc_id: str, source_path: str) -> bool:
+            if source_path:
+                return file_sidecar_path(source_path, model).exists()
+            return virtual_sidecar_path(settings.virtual_dir, doc_id, model).exists()
+
+        store.enqueue_missing([models.embedding], _has_sidecar)
         journal = Journal(settings.home / "journal.jsonl")  # пустой, заново
     dropped = journal.compact()
     if dropped:
@@ -222,6 +232,15 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     print(
         f"Ошибки эмбеддингов пишутся в {settings.home / 'embed_errors.log'}",
         flush=True,
+    )
+    # Файл лога создаётся при каждом запуске — его наличие само по себе
+    # говорит, что сервис дошёл до фонового цикла. Если файла нет, запуск
+    # упал раньше (конфиг, импорт, OOM) — тогда смотри вывод run.sh.
+    _append_embed_error(
+        settings.home / "embed_errors.log",
+        "запуск: активная модель эмбеддингов "
+        f"{load(settings.models_state_path).embedding}, "
+        f"очередь {store.counts()['pending_embeddings']} задач",
     )
     watcher.start()
     embed_thread.start()

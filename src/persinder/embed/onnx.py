@@ -17,6 +17,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 _MAX_LENGTH = 512
 _QUERY_PREFIX = "query: "
 _PASSAGE_PREFIX = "passage: "
@@ -61,6 +63,18 @@ class OnnxEmbedder:
         )
         self._tokenizer: Any = tokenizers.Tokenizer.from_file(
             str(self._model_dir / "tokenizer.json")
+        )
+        # Прогрев: первый run() ORT тратит сотни мс на ленивую оптимизацию
+        # графа. Делаем один крошечный прогон при загрузке, чтобы первый
+        # документ не платил эту цену.
+        ids = self._tokenizer.encode(_PASSAGE_PREFIX + "прогрев").ids[:4] or [1]
+        self._session.run(
+            None,
+            {
+                "input_ids": [ids],
+                "attention_mask": [[1] * len(ids)],
+                "token_type_ids": [[0] * len(ids)],
+            },
         )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -110,24 +124,19 @@ class OnnxEmbedder:
             },
         )[0]
 
-        pooled: list[list[float]] = []
-        for i in range(batch):
-            total = 0.0
-            for j in range(length):
-                total += float(attention[i][j])
-            if total <= 0:
-                pooled.append([0.0] * self.dim)
-                continue
-            vector = [0.0] * self.dim
-            for j in range(length):
-                if not attention[i][j]:
-                    continue
-                row = last_hidden[i][j]
-                for k in range(self.dim):
-                    vector[k] += float(row[k])
-            norm = sum(v * v for v in vector) ** 0.5
-            pooled.append([v / norm for v in vector] if norm else vector)
-        return pooled
+        # Mean pooling с маской внимания + нормализация. В чистом Python это
+        # тройной цикл batch × length × dim (сотни тысяч операций на батч) —
+        # столько же времени, сколько сама модель. Numpy делает это за
+        # десятки микросекунд на батч.
+        mask = np.asarray(attention, dtype=np.float32)  # (batch, length)
+        sums = (last_hidden * mask[:, :, None]).sum(axis=1)  # (batch, dim)
+        counts = mask.sum(axis=1, keepdims=True)
+        counts[counts == 0] = 1.0  # пустой чанк → нулевой вектор ниже
+        pooled = sums / counts
+        norms = np.linalg.norm(pooled, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        pooled = pooled / norms
+        return pooled.tolist()
 
     @staticmethod
     def available(model_dir: str | Path) -> bool:

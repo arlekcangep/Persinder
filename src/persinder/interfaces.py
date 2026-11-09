@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -122,6 +122,15 @@ class MetaStore(Protocol):
         (установка новой модели — миграция, D24)."""
         ...
 
+    def enqueue_missing(
+        self,
+        models: list[str],
+        has_sidecar: Callable[[str, str, str], bool],
+    ) -> None:
+        """Поставить задачи только для источников без сайдкара под моделью
+        (``--reindex``: уже отработанное заново в очередь не возвращается)."""
+        ...
+
     def drop_queue_model(self, model: str) -> None:
         """Убрать задачи модели из очереди (модель удалена)."""
         ...
@@ -142,6 +151,11 @@ class MetaStore(Protocol):
 
     def embeddings_for_model(self, model: str) -> list[EmbeddingRow]:
         """Все векторы чанков под моделью (для точного скана-фолбэка)."""
+        ...
+
+    def embeddings_for_doc(self, model: str, doc_id: str) -> list[EmbeddingRow]:
+        """Векторы чанков одного документа под моделью (воркеру — чтобы
+        не пересчитывать чанки, уже лежащие в таблице)."""
         ...
 
     def embeddings_ids_for_model(self, model: str) -> list[EmbeddingRow]:

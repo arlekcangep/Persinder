@@ -179,6 +179,45 @@ class EmbedWorkerTest(unittest.TestCase):
         # очередь опустела: задача снята, несмотря на падение ANN
         self.assertEqual(self.store.counts()["pending_embeddings"], 0)
 
+    def test_skip_already_embedded_chunks(self):
+        """Чанки, уже лежащие в таблице embeddings, повторно не считаются:
+        упавший прогон оставил векторы без сайдкара — следующий проход берёт
+        их из БД и считает только недостающие (иначе каждый рестарт после
+        обрыва пересчитывал бы всё заново)."""
+
+        class CountingEmbedder(PlaceholderEmbedder):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+                self.texts = 0
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                self.calls += 1
+                self.texts += len(texts)
+                return super().embed(texts)
+
+        counting = CountingEmbedder()
+        worker = self._worker(embedder=counting)
+        text = "очень длинный текст про векторный поиск, эмбеддинги и память. " * 60
+        src = self._file("books/one.md", text)
+        stats = worker.run_once(limit=10)
+        self.assertEqual(stats.docs, 1)
+        self.assertGreater(counting.texts, 1, "текст действительно на несколько чанков")
+
+        # эмулируем упавший прогон: векторы в БД есть, сайдкара нет,
+        # задачи снова в очереди
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        file_sidecar_path(src, "placeholder-v1").unlink()
+        self.store.enqueue_document(
+            doc_id, Area.PERSONAL.value, str(src), models=["placeholder-v1"]
+        )
+        counting.calls = 0
+        stats2 = worker.run_once(limit=10)
+        self.assertEqual(stats2.docs, 1)
+        self.assertEqual(counting.calls, 0, "ни один чанк не пересчитывался")
+        self.assertIsNotNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
     def test_corrupt_ann_file_rebuilt_without_losing_sidecar(self):
         """Битый .usearch (обрыв прошлого прогона) не зацикливает документ:
         воркер чинит индекс с нуля, сайдкар пишется, задачи снимаются."""

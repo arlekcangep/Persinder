@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from ..domain import Chunk, Document, EmbeddingJob, utcnow
@@ -522,6 +523,39 @@ class SqliteStore:
                         ),
                     )
 
+    def enqueue_missing(
+        self,
+        models: list[str],
+        has_sidecar: Callable[[str, str, str], bool],
+    ) -> None:
+        """Поставить задачи только для источников без сайдкара под моделью.
+
+        То же, что ``enqueue_all``, но уже отработанные источники (сайдкар на
+        месте) в очередь не возвращает. Нужно ``--reindex``: рестарт не должен
+        перезаполнять очередь всем подряд — только тем, чего реально нет.
+        """
+        for model in models:
+            with self._lock, self._conn:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT doc_id, area, source_path FROM document_sources"
+                ).fetchall()
+                for row in rows:
+                    doc_id, area, source_path = (
+                        str(row["doc_id"]),
+                        str(row["area"]),
+                        str(row["source_path"]),
+                    )
+                    if has_sidecar(model, doc_id, source_path):
+                        continue
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO embedding_queue"
+                        "(doc_id, chunk_index, area, source_path, model, "
+                        "status, created_at) "
+                        "SELECT doc_id, chunk_index, ?, ?, ?, 'pending', ?"
+                        " FROM chunks WHERE doc_id = ?",
+                        (area, source_path, model, utcnow(), doc_id),
+                    )
+
     def all_sources(self) -> list[SourceRow]:
         """Все источники (для удаления сайдкаров модели)."""
         with self._lock:
@@ -575,6 +609,21 @@ class SqliteStore:
                 "SELECT id, doc_id, chunk_index, vector FROM embeddings "
                 "WHERE model = ? ORDER BY doc_id, chunk_index",
                 (model,),
+            ).fetchall()
+        return [self._embedding_row(row) for row in rows]
+
+    def embeddings_for_doc(self, model: str, doc_id: str) -> list[EmbeddingRow]:
+        """Векторы чанков одного документа под моделью.
+
+        Нужно воркеру, чтобы не пересчитывать чанки, которые уже в БД
+        (упавший прогон оставил векторы, но не сайдкар): повторный проход
+        берёт их из таблицы и считает только недостающие.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, doc_id, chunk_index, vector FROM embeddings "
+                "WHERE model = ? AND doc_id = ? ORDER BY chunk_index",
+                (model, doc_id),
             ).fetchall()
         return [self._embedding_row(row) for row in rows]
 

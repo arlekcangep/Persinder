@@ -33,6 +33,7 @@ from .models import ChunkParams, EmbedFingerprint, EmbedStats
 from .sidecar import (
     file_sidecar_path,
     pack_f16_vectors,
+    unpack_f16_vectors,
     virtual_sidecar_path,
     write_sidecar,
 )
@@ -175,7 +176,36 @@ class EmbedWorker:
         counted = False
         for model, model_rows in by_model.items():
             embedder = self._embedder(model)
-            vectors = embedder.embed([text[a:b] for a, b in spans])
+            # Часть чанков документа может уже лежать в таблице embeddings
+            # (упавший прогон записал векторы, но не дошёл до сайдкара; doc_id —
+            # хэш содержимого, так что они актуальны). Их не пересчитываем —
+            # иначе повторный проход после рестарта считал бы всё заново
+            # (вот это и выглядит как «медленно»).
+            existing = {
+                row["chunk_index"]: list(
+                    unpack_f16_vectors(row["vector"], embedder.dim)[0]
+                )
+                for row in self._store.embeddings_for_doc(model, doc_id)
+            }
+            missing = [
+                (index, start, end)
+                for index, (start, end) in enumerate(spans)
+                if index not in existing
+            ]
+            if missing:
+                computed = dict(
+                    zip(
+                        (item[0] for item in missing),
+                        embedder.embed([text[a:b] for _, a, b in missing]),
+                        strict=True,
+                    )
+                )
+            else:
+                computed = {}
+            vectors = [
+                computed[index] if index in computed else existing[index]
+                for index in range(len(spans))
+            ]
             fingerprint = EmbedFingerprint(
                 model=embedder.name, dim=embedder.dim, quant="f16"
             )
