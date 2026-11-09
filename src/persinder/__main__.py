@@ -164,20 +164,20 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
             "Пересчёт эмбеддингов поставлен в очередь.",
             flush=True,
         )
-        # Полный пересчёт: файлы могли измениться, пока сервис был выключен;
-        # watcher сверит хэши при пересканировании и поставит в очередь всё,
-        # у чего нет сайдкара под активной моделью (в т.ч. виртуальные источники).
-        # Уже посчитанное заново в очередь не возвращаем — иначе каждый рестарт
-        # перезаполнял бы очередь целиком (вот это и выглядит как «растёт»).
-        models = load(settings.models_state_path)
-
-        def _has_sidecar(model: str, doc_id: str, source_path: str) -> bool:
-            if source_path:
-                return file_sidecar_path(source_path, model).exists()
-            return virtual_sidecar_path(settings.virtual_dir, doc_id, model).exists()
-
-        store.enqueue_missing([models.embedding], _has_sidecar)
         journal = Journal(settings.home / "journal.jsonl")  # пустой, заново
+    # Под активную модель в очередь идут только источники без сайдкара:
+    # уже посчитанное заново не ставится — рестарт не перезаполняет очередь
+    # и не трогает файлы с сайдкарами. Проверка на каждом старте: после
+    # переключения модели или оборванного прогона досчёт случается и без
+    # полного ``--reindex``.
+    models = load(settings.models_state_path)
+
+    def _has_sidecar(model: str, doc_id: str, source_path: str) -> bool:
+        if source_path:
+            return file_sidecar_path(source_path, model).exists()
+        return virtual_sidecar_path(settings.virtual_dir, doc_id, model).exists()
+
+    store.enqueue_missing([models.embedding], _has_sidecar)
     dropped = journal.compact()
     if dropped:
         print(
