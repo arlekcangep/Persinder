@@ -47,6 +47,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from persinder.config import Settings
+from persinder.embed import is_installed, load, models_root
 from persinder.sources import load_config
 
 
@@ -158,11 +159,12 @@ def main() -> int:
     args = parser.parse_args()
 
     home = (args.home or Settings.default().home).expanduser()
+    settings = Settings(home=home)
     config = args.config or _find_config(home)
     if config is None:
         print("конфиг не найден: укажи --config persinder.yaml")
         return 1
-    db_path = Settings(home=home).db_path
+    db_path = settings.db_path
     if not db_path.is_file():
         print(f"БД не найдена: {db_path}")
         return 1
@@ -248,6 +250,18 @@ def main() -> int:
         print("DRY-RUN: изменения не сохранены.")
     else:
         print("Готово. Перезапусти сервис (./run.sh), чтобы досчитать сайдкары.")
+
+    state = load(settings.models_state_path)
+    print(f"Активная модель эмбеддингов: {state.embedding}")
+    if state.embedding != "placeholder-v1" and not is_installed(
+        models_root(home), state.embedding
+    ):
+        print(
+            f"ВНИМАНИЕ: она не установлена в {models_root(home)} — "
+            "сайдкары не будут считаться.\n"
+            f"  установи: persinder model install {state.embedding}"
+        )
+    print("Скрипт сам эмбеддинги не считает: папки создаёт сервис при запуске.")
     return 0
 
 

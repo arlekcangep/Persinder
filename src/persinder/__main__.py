@@ -141,6 +141,17 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     ingest, search, store = build_service(settings)
     embed_worker, embed_store, embed_label = build_embed_worker(settings)
 
+    models_state = load(settings.models_state_path)
+    if models_state.embedding != PLACEHOLDER and not is_installed(
+        settings.models_dir, models_state.embedding
+    ):
+        print(
+            f"ВНИМАНИЕ: активная модель {models_state.embedding} не установлена "
+            f"в {settings.models_dir} — сайдкары не будут считаться.\n"
+            f"Установи её: persinder model install {models_state.embedding}",
+            flush=True,
+        )
+
     journal = Journal(settings.home / "journal.jsonl")
     if reindex:
         journal_path = settings.home / "journal.jsonl"
@@ -195,6 +206,10 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
         f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с", flush=True
     )
     print(embed_label, flush=True)
+    print(
+        f"Очередь эмбеддингов при старте: {store.counts()['pending_embeddings']} задач",
+        flush=True,
+    )
     watcher.start()
     embed_thread.start()
     print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)

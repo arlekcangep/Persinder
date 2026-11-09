@@ -20,10 +20,11 @@ from typing import Any
 _MAX_LENGTH = 512
 _QUERY_PREFIX = "query: "
 _PASSAGE_PREFIX = "passage: "
-# Вместимость одного прогона модели (последовательностей). Вся порция
-# (часто — все чанки документа) в одном run() дает батч в сотни строк × 512
-# токенов, и активации внимания (батч × heads × L²) съедают гигабайты.
-_BATCH_SIZE = 16
+# Вместимость одного прогона модели (последовательностей). Память активаций
+# растёт как batch × длина²: 16 последовательностей по 512 токенов дают пик
+# RSS ~1.2 ГБ, 4 — ~560 МБ. Идём мини-батчами по 4: заметно экономнее, но
+# всё ещё быстрее, чем по одной последовательности.
+_BATCH_SIZE = 4
 
 
 class OnnxEmbedder:
@@ -44,8 +45,19 @@ class OnnxEmbedder:
                 f"модель не найдена: {model_path}\n"
                 "скачай её: persinder model install e5-small-int8-v1"
             )
+        options: Any = (  # pyright: ignore[reportUnknownVariableType]
+            onnxruntime.SessionOptions()  # pyright: ignore[reportUnknownMemberType]
+        )
+        # Арена ONNX держит буферы прошлых прогонов и раздувает RSS: при
+        # батче 16 пик ~1.2 ГБ против ~560 МБ без арены (батч 4). Плата —
+        # чуть более дорогое выделение памяти на каждый run, зато RSS не
+        # накапливается.
+        options.enable_cpu_mem_arena = False
+        options.enable_mem_pattern = False
         self._session: Any = onnxruntime.InferenceSession(
-            str(model_path), providers=["CPUExecutionProvider"]
+            str(model_path),
+            sess_options=options,
+            providers=["CPUExecutionProvider"],
         )
         self._tokenizer: Any = tokenizers.Tokenizer.from_file(
             str(self._model_dir / "tokenizer.json")

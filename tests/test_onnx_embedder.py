@@ -13,6 +13,7 @@ from pathlib import Path
 
 from persinder.config import Settings
 from persinder.embed import OnnxEmbedder
+from persinder.embed.onnx import _BATCH_SIZE  # pyright: ignore[reportPrivateUsage]
 
 
 def model_dir() -> Path:
@@ -121,7 +122,9 @@ class OnnxEmbedderBatchingTest(unittest.TestCase):
         self.assertEqual(len(vectors), 40)
         self.assertGreater(len(session.batch_sizes), 1)
         for size in session.batch_sizes:
-            self.assertLessEqual(size, 16, "каждый прогон — не больше _BATCH_SIZE")
+            self.assertLessEqual(
+                size, _BATCH_SIZE, "каждый прогон — не больше _BATCH_SIZE"
+            )
 
     def test_query_path_batches_too(self) -> None:
         session = _FakeSession()
@@ -131,7 +134,7 @@ class OnnxEmbedderBatchingTest(unittest.TestCase):
         vectors = embedder.embed_query(["запрос"] * 35)
         self.assertEqual(len(vectors), 35)
         for size in session.batch_sizes:
-            self.assertLessEqual(size, 16)
+            self.assertLessEqual(size, _BATCH_SIZE)
 
 
 if __name__ == "__main__":
