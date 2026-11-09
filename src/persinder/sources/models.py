@@ -25,7 +25,9 @@ class AreaConfig:
     path: Path
     role: Area
     recursive: bool = True
-    formats: tuple[str, ...] = ()  # имена экстракторов; пусто — не индексировать
+    formats: tuple[
+        str, ...
+    ] = ()  # имена классов экстракторов; пусто — не индексировать
 
 
 @dataclass(frozen=True)

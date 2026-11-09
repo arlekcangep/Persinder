@@ -208,6 +208,7 @@ class IngestService:
             char_count=len(text),
             text_key=doc_id,
             created_at=now,
+            extractor=request.extractor or "",
         )
         jobs = [
             EmbeddingJob(

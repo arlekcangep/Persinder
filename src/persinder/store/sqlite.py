@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS documents (
     title        TEXT,
     char_count   INTEGER NOT NULL,
     text_key     TEXT NOT NULL,
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    extractor    TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS document_sources (
@@ -102,6 +103,7 @@ class SqliteStore:
         for table, column in (
             ("document_sources", "source_path"),
             ("embedding_queue", "source_path"),
+            ("documents", "extractor"),
         ):
             cols = [
                 str(row["name"])
@@ -442,8 +444,9 @@ class SqliteStore:
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO documents"
-                "(id, content_hash, title, char_count, text_key, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(id, content_hash, title, char_count, text_key, created_at, "
+                " extractor) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     doc.id,
                     doc.content_hash,
@@ -451,6 +454,7 @@ class SqliteStore:
                     doc.char_count,
                     doc.text_key,
                     doc.created_at,
+                    doc.extractor,
                 ),
             )
             evicted = self._bind_source(doc.id, area, filename, source_path)

@@ -12,6 +12,7 @@ from typing import cast
 import yaml
 
 from ..domain import Area
+from .extract import CLASS_ALIASES
 from .models import AreaConfig, WatchConfig
 
 
@@ -39,14 +40,15 @@ def load_config(
         areas:
           - path: ~/Obsidian/Personal
             role: personal
-            formats: [markdown, text]   # какие экстракторы применять
+            formats: [text, structure-text]   # классы экстракторов
         watch:
           poll_interval: 30
           debounce: 2
           ignore: ["**/drafts/**"]
 
-    ``known_formats`` — имена доступных экстракторов; если задан, неизвестное
-    имя в ``formats`` — ошибка конфига.
+    ``known_formats`` — имена доступных **классов** (и легаси-имена экстракторов,
+    которые нормализуются в классы); если задан, неизвестное имя в ``formats`` —
+    ошибка конфига.
 
     Относительные пути ``path`` считаются от каталога, где лежит конфиг, —
     профиль переносим между машинами.
@@ -86,7 +88,7 @@ def load_config(
             isinstance(f, str) and f.strip() for f in cast("list[object]", formats_raw)
         ):
             raise ConfigError(f"areas[{i}].formats: список непустых строк")
-        formats = tuple(cast("list[str]", formats_raw))
+        formats = tuple(f.strip() for f in cast("list[str]", formats_raw))
         if known_formats is not None:
             unknown = set(formats) - set(known_formats)
             if unknown:
@@ -94,11 +96,15 @@ def load_config(
                     f"areas[{i}].formats: неизвестные форматы {sorted(unknown)} "
                     f"(доступно: {sorted(known_formats)})"
                 )
+        # Конфиг называет классы; старые имена экстракторов нормализуются в
+        # классы (например ``markdown`` → ``structure-text``), чтобы конфиги
+        # до перехода не ломались.
+        formats = tuple(CLASS_ALIASES.get(f, f) for f in formats)
         area = AreaConfig(
             path=_expand(path_raw),
             role=role,
             recursive=recursive,
-            formats=tuple(f.strip() for f in formats),
+            formats=formats,
         )
         if not area.path.is_absolute():
             # относительный путь — от каталога конфига, не от CWD процесса

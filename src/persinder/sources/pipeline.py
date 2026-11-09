@@ -154,6 +154,7 @@ class IndexingPipeline:
                     area=area.role,
                     text=part.text,
                     source_path=source_path,
+                    extractor=part.extractor or None,
                 )
             )
             if outcome.status == IngestResult.INDEXED:

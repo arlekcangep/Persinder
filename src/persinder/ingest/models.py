@@ -25,6 +25,8 @@ class IngestRequest:
     Нет — данных на диске нет (web, вставленный текст): их эмбеддинги и сам
     текст живут в отдельной папке (``Settings.virtual_dir``).
     """
+    extractor: str | None = None
+    """Имя экстрактора, который извлёк этот текст (для атрибуции в БД)."""
 
 
 @dataclass(frozen=True)

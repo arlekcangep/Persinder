@@ -17,7 +17,9 @@ from persinder.sources import (
 from persinder.sources.extract import extract_tags
 
 
-def area(root: Path, formats: tuple[str, ...] = ("markdown", "text")) -> AreaConfig:
+def area(
+    root: Path, formats: tuple[str, ...] = ("structure-text", "text")
+) -> AreaConfig:
     return AreaConfig(path=root, role=Area.PERSONAL, formats=formats)
 
 
@@ -34,34 +36,61 @@ class RegistryTest(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
-    def test_registry_maps_suffixes(self):
+    def test_recognized_classes(self):
         reg = default_registry()
-        mapping = reg.for_area(area(self.root))
-        self.assertIs(mapping[".md"], reg.for_area(area(self.root))[".md"])
-        self.assertEqual({".md", ".markdown", ".txt"}, set(mapping))
+        names = reg.known_names()
+        self.assertIn("structure-text", names)
+        self.assertIn("pub-formats", names)
+        self.assertIn("archive", names)
+        # зарезервированные под будущее классы валидны в конфиге
+        self.assertIn("ocr", names)
+        self.assertIn("science", names)
+        # легаси-имена экстракторов тоже принимаются (нормализуются в классы)
+        self.assertIn("markdown", names)
 
-    def test_formats_whitelist(self):
+    def test_md_resolved_to_markdown_structure_text(self):
         reg = default_registry()
-        md_only = reg.for_area(area(self.root, ("markdown",)))
-        self.assertEqual(set(md_only), {".md", ".markdown"})
+        path = self._write("n.md", "# Заголовок\n#tag заметка")
+        parts = reg.extract(path, area(self.root))
+        assert parts is not None
+        self.assertEqual(parts[0].extractor, "markdown")
+        self.assertEqual(parts[0].tags, ("tag",))
+
+    def test_formats_whitelist_classes(self):
+        reg = default_registry()
+        # только structure-text: md индексируется, txt — нет
+        md_path = self._write("n.md", "# Заголовок")
+        txt_path = self._write("n.txt", "обычный текст")
+        only_struct = area(self.root, ("structure-text",))
+        self.assertIsNotNone(reg.extract(md_path, only_struct))
+        self.assertIsNone(reg.extract(txt_path, only_struct))
 
     def test_empty_formats_disables_area(self):
         reg = default_registry()
-        self.assertEqual(reg.for_area(area(self.root, ())), {})
+        path = self._write("n.md", "# Заголовок")
+        self.assertIsNone(reg.extract(path, area(self.root, ())))
 
-    def test_unknown_format_not_found(self):
+    def test_unknown_class_not_found(self):
         reg = ExtractorRegistry((MarkdownExtractor(), TextExtractor()))
-        self.assertEqual(reg.for_area(area(self.root, ("pdf",))), {})
+        path = self._write("n.md", "# Заголовок")
+        self.assertIsNone(reg.extract(path, area(self.root, ("science",))))
 
-    def test_extract_respects_area_formats(self):
+    def test_extract_respects_area_classes(self):
         reg = default_registry()
         path = self._write("n.md", "#tag заметка")
         self.assertIsNotNone(reg.extract(path, area(self.root)))
         self.assertIsNone(reg.extract(path, area(self.root, ("text",))))
 
-    def test_duplicate_suffix_rejected(self):
+    def test_content_based_pdf_class_not_in_area(self):
+        # PDF по содержимому (без расширения .pdf) — класс pub-formats не в
+        # конфиге области → не извлечён
+        reg = ExtractorRegistry((TextExtractor(),))
+        path = self._write("n.txt", "%PDF-1.4\nтекст не pdf совсем")
+        self.assertIsNone(reg.extract(path, area(self.root, ("text",))))
+
+    def test_duplicate_name_rejected(self):
         class Second(MarkdownExtractor):
-            name = "markdown2"
+            name = "markdown"
 
         with self.assertRaises(ValueError):
             ExtractorRegistry((MarkdownExtractor(), Second()))
