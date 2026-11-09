@@ -204,6 +204,29 @@ def write_sidecar(
 
     Каждый элемент ``chunks`` — ``(char_start, char_end, vector)``.
     """
+    vector_fmt = struct.Struct(f">{fingerprint.dim}e")
+    packed: list[tuple[int, int, bytes]] = []
+    for start, end, vector in chunks:
+        if len(vector) != fingerprint.dim:
+            raise ValueError(f"размерность вектора {len(vector)} != {fingerprint.dim}")
+        packed.append((start, end, vector_fmt.pack(*vector)))
+    write_sidecar_packed(path, fingerprint, params, packed)
+
+
+def write_sidecar_packed(
+    path: Path,
+    fingerprint: EmbedFingerprint,
+    params: ChunkParams,
+    chunks: list[tuple[int, int, bytes]],
+) -> None:
+    """Записать сайдкар из готовых упакованных векторов (атомарно).
+
+    Каждый элемент ``chunks`` — ``(char_start, char_end, vector)``, где
+    ``vector`` — блоб ``dim * quant`` байт (f16/f32, см. ``pack_f16_vectors``).
+    Потоковый путь воркера: огромный документ (десятки тысяч чанков) не
+    должен держать все векторы развёрнутыми в памяти — они пакуются по мере
+    расчёта и только копятся байтами.
+    """
     quant_code = _QUANT_CODES[fingerprint.quant]
     name = fingerprint.model.encode("utf-8")
     if len(name) > _MAX_MODEL_LEN:
@@ -223,12 +246,12 @@ def write_sidecar(
         len(chunks),
     )
     buf += name
-    vector_fmt = struct.Struct(f">{fingerprint.dim}e")
+    vector_bytes = fingerprint.dim * _QUANT_CODES[fingerprint.quant]
     for start, end, vector in chunks:
-        if len(vector) != fingerprint.dim:
-            raise ValueError(f"размерность вектора {len(vector)} != {fingerprint.dim}")
+        if len(vector) != vector_bytes:
+            raise ValueError(f"блоб вектора {len(vector)} != {vector_bytes}")
         buf += struct.pack(">II", start, end)
-        buf += vector_fmt.pack(*vector)
+        buf += vector
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")

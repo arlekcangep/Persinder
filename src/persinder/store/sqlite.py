@@ -218,11 +218,22 @@ class SqliteStore:
         return (int(row["char_start"]), int(row["char_end"]))
 
     def pending_embeddings(self, limit: int = 100) -> list[EmbeddingQueueItem]:
+        """Задачи на эмбеддинги, малые документы первыми.
+
+        ``ORDER BY`` — по числу невыполненных задач документа, затем по id:
+        один гигантский документ (большой PDF — десятки тысяч чанков) не
+        замораживает очередь, пока считаются мелкие — сайдкары продолжают
+        появляться, а крупный молотится между ними.
+        """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, doc_id, chunk_index, area, source_path, model "
-                "FROM embedding_queue WHERE status = 'pending' "
-                "ORDER BY id LIMIT ?",
+                "FROM embedding_queue "
+                "WHERE status = 'pending' "
+                "ORDER BY (SELECT COUNT(*) FROM embedding_queue q2"
+                "          WHERE q2.status = 'pending'"
+                "          AND q2.doc_id = embedding_queue.doc_id),"
+                "         id LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._queue_item(row) for row in rows]

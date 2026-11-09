@@ -33,13 +33,18 @@ from .models import ChunkParams, EmbedFingerprint, EmbedStats
 from .sidecar import (
     file_sidecar_path,
     pack_f16_vectors,
-    unpack_f16_vectors,
     virtual_sidecar_path,
-    write_sidecar,
+    write_sidecar_packed,
 )
 
 if TYPE_CHECKING:
     from ..store.models import EmbeddingQueueItem
+
+# Сколько недостающих чанков документа считаем и пишем за одну порцию. Весь
+# документ разом (у огромного PDF десятки тысяч чанков) держал бы в памяти
+# все векторы — это гигабайты списков Python и «заморозка» ПК. Порциями память
+# остаётся ~константной: в один момент развёрнуты только чанки порции.
+_CHUNK_BATCH = 512
 
 
 class PlaceholderEmbedder:
@@ -176,15 +181,13 @@ class EmbedWorker:
         counted = False
         for model, model_rows in by_model.items():
             embedder = self._embedder(model)
-            # Часть чанков документа может уже лежать в таблице embeddings
-            # (упавший прогон записал векторы, но не дошёл до сайдкара; doc_id —
-            # хэш содержимого, так что они актуальны). Их не пересчитываем —
-            # иначе повторный проход после рестарта считал бы всё заново
-            # (вот это и выглядит как «медленно»).
+            # Уже посчитанные чанки документа (упавший прогон оставил векторы
+            # без сайдкара; doc_id — хэш содержимого, так что они актуальны) —
+            # это сырые f16-блабы из таблицы, распаковывать их не нужно. Их не
+            # пересчитываем и в ANN повторно не добавляем: id стабильны, они
+            # уже в индексе.
             existing = {
-                row["chunk_index"]: list(
-                    unpack_f16_vectors(row["vector"], embedder.dim)[0]
-                )
+                row["chunk_index"]: bytes(row["vector"])
                 for row in self._store.embeddings_for_doc(model, doc_id)
             }
             missing = [
@@ -192,38 +195,51 @@ class EmbedWorker:
                 for index, (start, end) in enumerate(spans)
                 if index not in existing
             ]
-            if missing:
-                computed = dict(
-                    zip(
-                        (item[0] for item in missing),
-                        embedder.embed([text[a:b] for _, a, b in missing]),
-                        strict=True,
-                    )
-                )
-            else:
-                computed = {}
-            vectors = [
-                computed[index] if index in computed else existing[index]
-                for index in range(len(spans))
+            # Сайдкар собирается из уже упакованных чанков; недостающие
+            # считаются и пишутся порциями по _CHUNK_BATCH. Развёрнутые
+            # векторы в памяти держатся только для текущей порции — огромный
+            # документ (150 МБ PDF) больше не накапливает гигабайты списков.
+            packed: list[tuple[int, int, bytes]] = [
+                (start, end, existing[index])
+                for index, (start, end) in enumerate(spans)
+                if index in existing
             ]
+            index_obj: UsannIndex | None = None
+
+            def _ann_add(
+                ids_sub: list[int],
+                vectors_sub: list[list[float]],
+                model: str,
+                embedder: Embedder,
+            ) -> None:
+                """ANN best-effort порцией: сбой не валит документ (сайдкар будет)."""
+                nonlocal index_obj
+                if not ids_sub:
+                    return
+                try:
+                    if index_obj is None:
+                        index_obj = self._index(model, embedder.dim)
+                    if index_obj is not None:
+                        index_obj.add(ids_sub, vectors_sub)
+                except Exception as exc:  # noqa: BLE001 — ANN не блокирует сайдкар
+                    stats.errors += 1
+                    stats.messages.append(
+                        f"ANN {model}: {exc.__class__.__name__}: {exc}"
+                    )
+
+            for offset in range(0, len(missing), _CHUNK_BATCH):
+                part = missing[offset : offset + _CHUNK_BATCH]
+                computed = embedder.embed([text[a:b] for _, a, b in part])
+                rows_for_db: list[tuple[str, int, bytes]] = []
+                for (index, start, end), vector in zip(part, computed, strict=True):
+                    blob = pack_f16_vectors([vector], embedder.dim)
+                    packed.append((start, end, blob))
+                    rows_for_db.append((doc_id, index, blob))
+                ids = self._store.put_embeddings(model, rows_for_db)
+                _ann_add(ids, computed, model, embedder)
+
             fingerprint = EmbedFingerprint(
                 model=embedder.name, dim=embedder.dim, quant="f16"
-            )
-            payload = [
-                (start, end, vectors[index]) for index, (start, end) in enumerate(spans)
-            ]
-            # Локальное производное (модуль 3): векторы в SQLite под модель —
-            # по ним работает векторный поиск (таблица embeddings, §8).
-            ids = self._store.put_embeddings(
-                model,
-                [
-                    (
-                        doc_id,
-                        index,
-                        pack_f16_vectors([vectors[index]], embedder.dim),
-                    )
-                    for index in range(len(spans))
-                ],
             )
             # Сайдкар — источник правды: пишется сразу после векторов в БД и до
             # ANN-индекса. Если бы первым шёл ANN, его сбой (битый .usearch от
@@ -239,22 +255,11 @@ class EmbedWorker:
                     path = virtual_sidecar_path(self._virtual_dir, doc_id, model)
                 else:
                     path = file_sidecar_path(target, model)
-                write_sidecar(path, fingerprint, params, payload)
+                write_sidecar_packed(path, fingerprint, params, packed)
                 stats.sidecars += 1
-            stats.chunks += len(payload)
+            stats.chunks += len(packed)
             self._store.drop_queue_rows([int(row["id"]) for row in model_rows])
             counted = True
-            # ANN-индекс USearch — локальное производное, не источник правды:
-            # его сбой не должен валить документ (сайдкар уже записан, задачи
-            # сняты). Ошибка уходит в stats.messages (→ вывод и embed_errors.log),
-            # чтобы было видно, что именно падает.
-            try:
-                index = self._index(model, embedder.dim)
-                if index is not None:
-                    index.add(ids, vectors)
-            except Exception as exc:  # noqa: BLE001 — ANN не блокирует сайдкар
-                stats.errors += 1
-                stats.messages.append(f"ANN {model}: {exc.__class__.__name__}: {exc}")
 
         if counted:
             stats.docs += 1

@@ -15,6 +15,11 @@
 #   ./run.sh --home PATH          — каталог приложения
 #   ./run.sh --host 0.0.0.0 --port 8756
 #
+# Лимит CPU для эмбеддингов (чтобы индексация не вешала ПК), в процентах:
+#
+#   PERSINDER_CPU_LIMIT=30 ./run.sh   # не больше 30% всех ядер
+#   PERSINDER_EMBED_WORKERS=2 ./run.sh  # параллельных мини-батчей (по умолчанию ~половина ядер)
+#
 # Вся логика — в `persinder serve` (src/persinder/__main__.py): поиск конфига,
 # создание home, watcher, эмбеддинги. Здесь только выбор python из venv и exec.
 #
