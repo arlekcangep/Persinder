@@ -4,7 +4,8 @@
 Скрипт **только читает** (БД открывается в режиме read-only) и печатает
 факты: где home и БД, какие модели активны и установлены, сколько источников
 с пустым путём, что лежит в очереди и таблице векторов, какие сайдкары уже
-есть рядом с файлами и в ``virtual/``.
+есть рядом с файлами и в ``virtual/``, состояние ANN-индексов (``ann/``,
+открываются ли) и хвост ``embed_errors.log``.
 
 Запуск (тот же python, что и у сервиса), сервис можно не останавливать:
 
@@ -83,7 +84,7 @@ def main() -> int:
     parser.add_argument("--home", type=Path, default=None)
     args = parser.parse_args()
 
-    home = (args.home or Settings.default().home).expanduser()
+    home: Path = (args.home or Settings.default().home).expanduser()
     settings = Settings(home=home)
     db_path = settings.db_path
     print(f"Home: {home}")
@@ -156,6 +157,7 @@ def main() -> int:
 
         print()
         print("Векторы в БД (таблица embeddings):")
+        vectors_by_model: dict[str, int] = {}
         try:
             rows = conn.execute(
                 "SELECT model, COUNT(*) AS n FROM embeddings GROUP BY model"
@@ -167,6 +169,7 @@ def main() -> int:
         if not rows:
             print("  пусто")
         for row in rows:
+            vectors_by_model[str(row["model"])] = int(row["n"])
             print(f"  {row['model']}: {row['n']}")
 
         print()
@@ -191,18 +194,65 @@ def main() -> int:
         if not virtual.is_dir():
             print("  папки нет")
         else:
-            model_dirs = sorted(p for p in virtual.iterdir() if p.is_dir())
-            if not model_dirs:
+            virtual_model_dirs = sorted(p for p in virtual.iterdir() if p.is_dir())
+            if not virtual_model_dirs:
                 print("  пусто")
-            for folder in model_dirs:
+            for folder in virtual_model_dirs:
                 print(f"  {folder.name}: {_count_pdr(folder)} pdr")
+
+        print()
+        print(f"ANN-индексы USearch ({settings.ann_dir}):")
+        if not settings.ann_dir.is_dir():
+            print("  папки нет")
+        else:
+            files = sorted(settings.ann_dir.iterdir())
+            if not files:
+                print("  пусто")
+            for path in files:
+                if not path.is_file():
+                    print(f"  {path.name}: не файл")
+                    continue
+                size = path.stat().st_size
+                print(f"  {path.name}: {size} байт", end="")
+                try:
+                    from persinder.vectorindex import UsannIndex
+
+                    index = UsannIndex(path, dim=384)
+                    print(f", ключей: {index.size}")
+                except Exception as exc:  # noqa: BLE001 — диагностика не падает
+                    print(f", НЕ ОТКРЫВАЕТСЯ: {exc.__class__.__name__}: {exc}")
+
+        log_path = home / "embed_errors.log"
+        print()
+        print(f"Лог ошибок эмбеддингов ({log_path}):")
+        if not log_path.is_file():
+            print("  файла нет (ошибок не было или сервис ещё не перезапускался)")
+        else:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if not lines:
+                print("  пуст")
+            for line in lines[-10:]:
+                print(f"  {line}")
 
         print()
         print("Диагноз:")
         e5 = models.embedding
+        e5_sidecars = any(
+            (root / ".persinder" / e5).is_dir()
+            for roots in roots_by_role.values()
+            for root in roots
+        )
         if e5 not in installed and e5 != "placeholder-v1":
             print(f"  модель {e5} НЕ установлена в {models_root(home)} —")
             print("  веса не скачаны, эмбеддинги этой моделью не считаются.")
+        if vectors_by_model.get(e5, 0) and not e5_sidecars:
+            print(
+                f"  векторы {e5} в БД есть ({vectors_by_model.get(e5, 0)}), а"
+                " сайдкаров нет:"
+            )
+            print("  документы не завершались на шаге после векторов (ANN/сайдкар).")
+            print("  Обнови сервис, перезапусти ./run.sh и пришли вывод и")
+            print(f"  {log_path} — там будет настоящая причина.")
         if empty_paths and models.embedding != "placeholder-v1":
             print("  есть пустые source_path — запусти scripts/fix_source_paths.py")
         if not empty_paths and models.embedding != "placeholder-v1":

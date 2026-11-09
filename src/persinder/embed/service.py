@@ -195,10 +195,12 @@ class EmbedWorker:
                     for index in range(len(spans))
                 ],
             )
-            # ANN-индекс USearch: ключи строк embeddings, векторы сразу при расчёте.
-            index = self._index(model, embedder.dim)
-            if index is not None:
-                index.add(ids, vectors)
+            # Сайдкар — источник правды: пишется сразу после векторов в БД и до
+            # ANN-индекса. Если бы первым шёл ANN, его сбой (битый .usearch от
+            # упавшего прогона, OOM) оставлял бы документ без сайдкара, а его
+            # задачи — в очереди: следующий проход пересчитывал бы документ
+            # заново, и так без конца (вечный re-embed — жрёт CPU и память).
+            # Так документ завершается, даже если ANN упадёт.
             targets = {str(row["source_path"]) for row in model_rows}
             for target in targets:
                 if not target:
@@ -212,6 +214,17 @@ class EmbedWorker:
             stats.chunks += len(payload)
             self._store.drop_queue_rows([int(row["id"]) for row in model_rows])
             counted = True
+            # ANN-индекс USearch — локальное производное, не источник правды:
+            # его сбой не должен валить документ (сайдкар уже записан, задачи
+            # сняты). Ошибка уходит в stats.messages (→ вывод и embed_errors.log),
+            # чтобы было видно, что именно падает.
+            try:
+                index = self._index(model, embedder.dim)
+                if index is not None:
+                    index.add(ids, vectors)
+            except Exception as exc:  # noqa: BLE001 — ANN не блокирует сайдкар
+                stats.errors += 1
+                stats.messages.append(f"ANN {model}: {exc.__class__.__name__}: {exc}")
 
         if counted:
             stats.docs += 1

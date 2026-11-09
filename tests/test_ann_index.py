@@ -57,6 +57,17 @@ class UsannIndexTest(unittest.TestCase):
         self.index.drop()
         self.assertFalse(self.path.exists())
 
+    def test_corrupt_file_recovers_fresh(self):
+        """Битый файл (обрыв сохранения упавшим прогоном) не валит индекс:
+        он удаляется и индекс строится с нуля — документы не застревают."""
+        self.path.write_bytes(b"not a usearch file" * 16)
+        index = UsannIndex(self.path, dim=4)  # открытие падает — не разваливается
+        self.assertFalse(self.path.exists(), "битый файл удалён")
+        index.add([1], [[1.0, 0.0, 0.0, 0.0]])
+        self.assertTrue(self.path.exists())
+        self.assertEqual(index.size, 1)
+        self.assertAlmostEqual(index.search([1.0, 0, 0, 0], 1)[0][1], 1.0, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()

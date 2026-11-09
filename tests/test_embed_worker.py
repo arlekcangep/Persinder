@@ -6,6 +6,7 @@ import hashlib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from persinder.domain import Area
 from persinder.embed import (
@@ -157,6 +158,42 @@ class EmbedWorkerTest(unittest.TestCase):
         reopened = UsannIndex(index_path, self.embedder.dim)
         self.assertEqual(reopened.keys(), live)
         self.assertEqual(reopened.size, 1)
+
+    def test_ann_failure_does_not_block_sidecar(self):
+        """Сайдкар — источник правды: сбой ANN (add) не мешает записать сайдкар
+        и снять задачи с очереди — иначе документ пересчитывался бы вечно."""
+        ann_dir = self.data / "ann"
+        ann_dir.mkdir()
+        worker = self._worker(ann_dir=ann_dir)
+        src = self._file("books/one.md", "заметка про квантовый флакс")
+        with mock.patch(
+            "persinder.vectorindex.UsannIndex.add",
+            side_effect=RuntimeError("index exploded"),
+        ):
+            stats = worker.run_once(limit=10)
+        self.assertEqual((stats.docs, stats.sidecars), (1, 1))
+        self.assertEqual(stats.errors, 1)
+        self.assertTrue(any("ANN" in m for m in stats.messages))
+        data = read_sidecar(file_sidecar_path(src, "placeholder-v1"))
+        self.assertIsNotNone(data)
+        # очередь опустела: задача снята, несмотря на падение ANN
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_corrupt_ann_file_rebuilt_without_losing_sidecar(self):
+        """Битый .usearch (обрыв прошлого прогона) не зацикливает документ:
+        воркер чинит индекс с нуля, сайдкар пишется, задачи снимаются."""
+        ann_dir = self.data / "ann"
+        ann_dir.mkdir()
+        bad = ann_dir / "placeholder-v1.usearch"
+        bad.write_bytes(b"corrupt leftovers from a crashed run" * 8)
+        worker = self._worker(ann_dir=ann_dir)
+        src = self._file("books/one.md", "заметка про квантовый флакс")
+        stats = worker.run_once(limit=10)
+        self.assertEqual((stats.docs, stats.sidecars, stats.errors), (1, 1, 0))
+        self.assertIsNotNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+        rebuilt = UsannIndex(bad, self.embedder.dim)
+        self.assertEqual(rebuilt.size, 1)
 
     def test_virtual_sidecar_in_virtual_dir(self):
         text = "вставленный текст без файла на диске"

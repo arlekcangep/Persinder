@@ -199,7 +199,16 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
 
     watcher = Watcher(areas, watch, on_events, journal=journal)
     embed_thread = threading.Thread(
-        target=_embed_loop, args=(embed_worker, stop, kick), daemon=True, name="embed"
+        target=_embed_loop,
+        args=(
+            embed_worker,
+            stop,
+            kick,
+            5.0,
+            settings.home / "embed_errors.log",
+        ),
+        daemon=True,
+        name="embed",
     )
 
     print(
@@ -208,6 +217,10 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     print(embed_label, flush=True)
     print(
         f"Очередь эмбеддингов при старте: {store.counts()['pending_embeddings']} задач",
+        flush=True,
+    )
+    print(
+        f"Ошибки эмбеддингов пишутся в {settings.home / 'embed_errors.log'}",
         flush=True,
     )
     watcher.start()
@@ -310,11 +323,27 @@ def _drain(worker: EmbedWorker, limit: int) -> EmbedStats:
     return total
 
 
+def _append_embed_error(log_path: Path | None, message: str) -> None:
+    """Дописать строку ошибки в ``<home>/embed_errors.log`` (best-effort).
+
+    Лог нужен, чтобы сбой был виден после факта: пользователь не сидит у
+    консоли, а отсутствие папки/сайдкара замечает позже.
+    """
+    if log_path is None:
+        return
+    try:
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except OSError:
+        pass  # лог не должен ронять сервис
+
+
 def _embed_loop(
     worker: EmbedWorker,
     stop: threading.Event,
     kick: threading.Event,
     interval: float = 5.0,
+    log_path: Path | None = None,
 ) -> None:
     """Фоновый разбор очереди эмбеддингов, пока сервис жив.
 
@@ -322,12 +351,15 @@ def _embed_loop(
     без паузы, на пустой очереди — пауза ``interval``. ``kick`` будит цикл сразу
     после индексации (иначе новые документы ждали бы тика). Ошибка одного
     прохода не валит сервис: задачи остаются в очереди и уходят в следующий тик.
+    Ошибки дублируются в ``log_path`` (``<home>/embed_errors.log``).
     """
     while not stop.is_set():
         try:
             stats = worker.run_once(100)
         except Exception as exc:  # noqa: BLE001 — сервис не должен падать
-            print(f"Embed: ошибка прохода: {exc}", flush=True)
+            message = f"ошибка прохода: {exc}"
+            print(f"Embed: {message}", flush=True)
+            _append_embed_error(log_path, message)
             kick.wait(interval)
             kick.clear()
             continue
@@ -335,6 +367,7 @@ def _embed_loop(
             print(format_embed(stats), flush=True)
             for message in stats.messages[:10]:
                 print(f"Embed: {message}", flush=True)
+                _append_embed_error(log_path, message)
         if stats.docs == 0:
             kick.wait(interval)
             kick.clear()
