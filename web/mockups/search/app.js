@@ -5,8 +5,7 @@ const DOCS = [
     id: "kuku",
     title: "куку1.lic",
     path: "D:\\Obsidian\\куку1.lic",
-    area: "personal",
-    areaLabel: "Личное",
+    area: "Личное",
     chunks: 1,
     sem: 0.8494,
     morph: 14.4987,
@@ -16,8 +15,7 @@ const DOCS = [
     id: "lebon",
     title: "Lebon_G_-_Psikhologia_narodov_i_mass_1995.pdf",
     path: "D:\\Library\\Books\\Lebon_G_-_Psikhologia_narodov_i_mass_1995.pdf",
-    area: "foreign",
-    areaLabel: "Чужое",
+    area: "Чужое",
     chunks: 544,
     sem: 0.8257,
     morph: 7.7539,
@@ -28,8 +26,7 @@ const DOCS = [
     id: "karamurza",
     title: "С.Г.Кара-Мурза-manipulation.pdf",
     path: "D:\\Library\\Books\\С.Г.Кара-Мурза-manipulation.pdf",
-    area: "foreign",
-    areaLabel: "Чужое",
+    area: "Чужое",
     chunks: 2309,
     sem: 0.8185,
     morph: null,
@@ -40,8 +37,7 @@ const DOCS = [
     id: "animals",
     title: "Заметки о поведении животных.md",
     path: "D:\\Obsidian\\Personal\\Заметки о поведении животных.md",
-    area: "personal",
-    areaLabel: "Личное",
+    area: "Личное",
     chunks: 12,
     sem: 0.8122,
     morph: 6.1044,
@@ -52,8 +48,7 @@ const DOCS = [
     id: "web-volk",
     title: "web-archive-volk.html",
     path: "D:\\WebArchive\\web-archive-volk.html",
-    area: "web",
-    areaLabel: "Web",
+    area: "Web",
     chunks: 8,
     sem: 0.8031,
     morph: null,
@@ -64,11 +59,10 @@ const DOCS = [
     id: "forest",
     title: "forest-notes.md",
     path: "D:\\Obsidian\\Personal\\forest-notes.md",
-    area: "personal",
-    areaLabel: "Личное",
+    area: "Личное",
     chunks: 4,
     sem: 0.7948,
-    morph: 4.2210,
+    morph: 4.221,
     snippet: "Лесные заметки: следы, повадки, наблюдения у кормушки.",
   },
 ];
@@ -81,6 +75,11 @@ const DEFAULTS = {
   semanticLimit: 20,
 };
 
+const STATUS = {
+  address: "127.0.0.1:8756",
+  vectors: 6829,
+};
+
 const state = {
   ...DEFAULTS,
   loading: false,
@@ -91,22 +90,30 @@ const state = {
 };
 
 const els = {
-  root: document.documentElement,
+  logo: document.querySelector("#logo"),
   form: document.querySelector("#search-form"),
   query: document.querySelector("#query"),
   clear: document.querySelector("#clear-btn"),
   results: document.querySelector("#results"),
-  summaryText: document.querySelector("#summary-text"),
-  summaryQuery: document.querySelector("#summary-query"),
+  summary: document.querySelector("#summary"),
+  countAll: document.querySelector("#count-all"),
+  countSemantic: document.querySelector("#count-semantic"),
+  countMorph: document.querySelector("#count-morph"),
   empty: document.querySelector("#empty-state"),
   notFound: document.querySelector("#not-found-state"),
   notFoundText: document.querySelector("#not-found-text"),
   error: document.querySelector("#error-state"),
   retry: document.querySelector("#retry-btn"),
-  theme: document.querySelector("#theme-toggle"),
+  searchView: document.querySelector("#search-view"),
+  settingsView: document.querySelector("#settings-view"),
+  settingsBtn: document.querySelector("#settings-btn"),
+  settingsBack: document.querySelector("#settings-back"),
+  settingsTabs: document.querySelector("#settings-tabs"),
+  statusBtn: document.querySelector("#status-btn"),
+  statusTip: document.querySelector("#status-tip"),
+  statsModal: document.querySelector("#stats-modal"),
   filterToggle: document.querySelector("#filter-toggle"),
-  filterPanel: document.querySelector("#filters-panel"),
-  filterCount: document.querySelector("#filter-count"),
+  filters: document.querySelector("#filters"),
   minScore: document.querySelector("#min-score"),
   minScoreValue: document.querySelector("#min-score-value"),
   morphLimit: document.querySelector("#morph-limit"),
@@ -141,7 +148,7 @@ function highlight(text, query) {
   const needle = query.trim();
   if (!needle) return safe;
   const pattern = new RegExp(`(${escapeRegExp(escapeHtml(needle))})`, "gi");
-  return safe.replace(pattern, "<mark>$1</mark>");
+  return safe.replace(pattern, "<b>$1</b>");
 }
 
 function plural(count, one, few, many) {
@@ -150,6 +157,12 @@ function plural(count, one, few, many) {
   if (mod10 === 1 && mod100 !== 11) return one;
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
   return many;
+}
+
+function splitPath(path) {
+  const index = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  if (index < 0) return { dir: "", file: path };
+  return { dir: path.slice(0, index + 1), file: path.slice(index + 1) };
 }
 
 function showToast(message) {
@@ -161,7 +174,7 @@ function showToast(message) {
   }, 2600);
 }
 
-/* ---------- данные для текущего состояния ---------- */
+/* ---------- демо-данные под текущее состояние ---------- */
 
 function matchesQuery(doc, query) {
   const needle = query.trim().toLowerCase();
@@ -172,8 +185,8 @@ function matchesQuery(doc, query) {
 }
 
 function semanticDocs() {
-  // Семантика в эскизе «расширяет» запрос: если хоть один документ содержит
-  // его текстом, показываем все близкие по демо-оценке. Иначе — пусто.
+  // Семантика в эскизе «расширяет» запрос: если запрос встречается в демо-данных,
+  // показываем документы, проходящие порог близости. Иначе — пусто.
   if (!DOCS.some((doc) => matchesQuery(doc, state.query))) return [];
   return DOCS.filter((doc) => doc.sem >= state.minScore)
     .sort((a, b) => b.sem - a.sem)
@@ -196,41 +209,37 @@ function visibleCounts() {
 
 /* ---------- разметка ---------- */
 
-function cardHtml(doc, layer) {
+function resultHtml(doc, layer) {
   const isSemantic = layer === "semantic";
   const score = isSemantic ? doc.sem.toFixed(4) : doc.morph.toFixed(4);
-  const label = isSemantic ? "cos" : "bm25";
-  const areaClass = `area-${escapeHtml(doc.area)}`;
+  const scoreLabel = isSemantic ? "cos" : "bm25";
+  const { dir, file } = splitPath(doc.path);
   const chunkWord = plural(doc.chunks, "чанк", "чанка", "чанков");
+  const id = escapeHtml(doc.id);
+
+  const pathHtml = dir
+    ? `${escapeHtml(dir)}<span class="sep">›</span>${escapeHtml(file)}`
+    : escapeHtml(file);
+
+  const snippet = doc.snippet.trim();
+  const snippetTail = /[.!?…»"”]$/.test(snippet) ? "" : "…";
 
   return `
-    <article class="card" data-doc="${escapeHtml(doc.id)}">
-      <div class="card-top">
-        <span class="file-icon"><svg class="icon"><use href="#i-file"></use></svg></span>
-        <div class="card-title">
-          <h3 title="${escapeHtml(doc.title)}">${escapeHtml(doc.title)}</h3>
-          <p class="path" title="${escapeHtml(doc.path)}">${escapeHtml(doc.path)}</p>
-        </div>
-        <span class="score ${layer}" title="${isSemantic ? "косинус" : "bm25"}">
-          <span class="score-value">${score}</span>
-          <span class="score-label">${label}</span>
+    <article class="result" data-doc="${id}">
+      <h3 class="result-title">
+        <a href="#" data-action="open" data-id="${id}">${escapeHtml(doc.title)}</a>
+      </h3>
+      <p class="result-path">
+        ${pathHtml}<span class="sep">·</span><span class="area">${escapeHtml(doc.area)}</span>
+      </p>
+      <p class="result-snippet">…${highlight(snippet, state.query)}${snippetTail}</p>
+      <div class="result-meta">
+        <span class="score">${scoreLabel} ${score}</span>
+        <span>${doc.chunks} ${chunkWord}</span>
+        <span class="result-actions">
+          <button class="link-btn" type="button" data-action="open" data-id="${id}">Открыть</button>
+          <button class="link-btn muted" type="button" data-action="reveal" data-id="${id}">Показать в папке</button>
         </span>
-      </div>
-      <p class="snippet">…${highlight(doc.snippet, state.query)}…</p>
-      <div class="card-foot">
-        <div class="tags">
-          <span class="tag ${areaClass}">${escapeHtml(doc.areaLabel)}</span>
-          <span class="tag">${doc.chunks} ${chunkWord}</span>
-        </div>
-        <div class="actions">
-          <button class="action-btn" type="button" data-action="open" data-id="${escapeHtml(doc.id)}" title="Открыть файл">
-            <svg class="icon"><use href="#i-external"></use></svg>
-            <span class="action-text">Открыть</span>
-          </button>
-          <button class="action-btn icon-only" type="button" data-action="reveal" data-id="${escapeHtml(doc.id)}" title="Показать в папке" aria-label="Показать в папке">
-            <svg class="icon"><use href="#i-folder"></use></svg>
-          </button>
-        </div>
       </div>
     </article>`;
 }
@@ -238,42 +247,24 @@ function cardHtml(doc, layer) {
 function groupHtml(layer, docs) {
   const isSemantic = layer === "semantic";
   const title = isSemantic ? "Семантика" : "Морфология";
-  const note = isSemantic ? "косинус · e5-small-int8-v1" : "bm25 · FTS5";
 
   return `
-    <section class="group" data-layer="${layer}">
-      <header class="group-head">
-        <span class="layer-dot ${layer}"></span>
-        <h2 class="group-title">${title}</h2>
-        <span class="group-count">${docs.length}</span>
-        <span class="group-note">${note}</span>
-      </header>
-      <div class="cards">${docs.map((doc) => cardHtml(doc, layer)).join("")}</div>
+    <section class="result-group" data-layer="${layer}">
+      <h2 class="group-title">${title} <span class="group-count">${docs.length}</span></h2>
+      ${docs.map((doc) => resultHtml(doc, layer)).join("")}
     </section>`;
 }
 
 function skeletonHtml() {
-  const card = `
-    <div class="skeleton-card">
-      <div class="sk-row">
-        <span class="sk-box"></span>
-        <span class="sk-lines">
-          <span class="sk-line short"></span>
-          <span class="sk-line tiny"></span>
-        </span>
-      </div>
-      <span class="sk-line"></span>
-      <span class="sk-line"></span>
+  const block = `
+    <div class="skeleton">
+      <div class="sk-line title"></div>
+      <div class="sk-line path"></div>
+      <div class="sk-line full"></div>
+      <div class="sk-line short"></div>
     </div>`;
 
-  return `
-    <section class="group">
-      <header class="group-head">
-        <span class="layer-dot semantic"></span>
-        <h2 class="group-title">Ищем…</h2>
-      </header>
-      <div class="cards">${card}${card}${card}</div>
-    </section>`;
+  return `${block}${block}${block}`;
 }
 
 /* ---------- рендер ---------- */
@@ -282,10 +273,14 @@ function render() {
   const query = state.query.trim();
   const counts = visibleCounts();
 
-  els.summaryQuery.textContent = query ? `Запрос: «${query}»` : "Запрос не задан";
+  els.countSemantic.textContent = String(semanticDocs().length);
+  els.countMorph.textContent = String(morphDocs().length);
+  els.countAll.textContent = String(
+    semanticDocs().length + morphDocs().length,
+  );
 
   if (state.error) {
-    els.summaryText.textContent = "Нет связи с сервером";
+    els.summary.textContent = "Нет связи с сервером";
     els.results.innerHTML = "";
     els.empty.hidden = true;
     els.notFound.hidden = true;
@@ -296,7 +291,7 @@ function render() {
   els.error.hidden = true;
 
   if (state.loading) {
-    els.summaryText.textContent = "Ищем по библиотеке…";
+    els.summary.textContent = "Ищем…";
     els.results.innerHTML = skeletonHtml();
     els.empty.hidden = true;
     els.notFound.hidden = true;
@@ -304,7 +299,7 @@ function render() {
   }
 
   if (!query) {
-    els.summaryText.textContent = "Введите запрос, чтобы искать по библиотеке";
+    els.summary.textContent = "Морфология и семантика по вашей библиотеке";
     els.results.innerHTML = "";
     els.empty.hidden = false;
     els.notFound.hidden = true;
@@ -320,12 +315,16 @@ function render() {
       state.layers === "morph"
         ? "В морфологическом слое совпадений нет — попробуйте включить семантику."
         : "Попробуйте другое слово или снизьте min_score.";
-    els.summaryText.textContent = "Ничего не найдено";
+    els.summary.textContent = "Ничего не найдено";
     return;
   }
 
   els.notFound.hidden = true;
-  els.summaryText.textContent = `Найдено ${counts.total} · семантика ${counts.sem.length} · морфология ${counts.morph.length}`;
+
+  const parts = [`Результатов: ${counts.total}`];
+  if (state.layers !== "morph") parts.push(`семантика ${counts.sem.length}`);
+  if (state.layers !== "semantic") parts.push(`морфология ${counts.morph.length}`);
+  els.summary.textContent = parts.join(" · ");
 
   const blocks = [];
   if (state.layers !== "morph") blocks.push(groupHtml("semantic", counts.sem));
@@ -360,24 +359,27 @@ function scheduleSearch(delay = 260) {
 
 /* ---------- фильтры и слои ---------- */
 
-function updateFilterBadge() {
-  let active = 0;
-  if (Number(els.minScore.value) !== DEFAULTS.minScore) active += 1;
-  if (Number(els.morphLimit.value) !== DEFAULTS.morphLimit) active += 1;
-  if (Number(els.semanticLimit.value) !== DEFAULTS.semanticLimit) active += 1;
-  els.filterCount.textContent = String(active);
-  els.filterCount.hidden = active === 0;
+function setLayer(layer) {
+  state.layers = layer;
+  for (const tab of document.querySelectorAll("#search-view .tab[data-layer]")) {
+    const active = tab.dataset.layer === layer;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-pressed", String(active));
+  }
+  render();
 }
 
 function applyFilters() {
   state.minScore = Number(els.minScore.value);
-  state.morphLimit = Math.max(1, Number(els.morphLimit.value) || DEFAULTS.morphLimit);
+  state.morphLimit = Math.max(
+    1,
+    Number(els.morphLimit.value) || DEFAULTS.morphLimit,
+  );
   state.semanticLimit = Math.max(
     1,
     Number(els.semanticLimit.value) || DEFAULTS.semanticLimit,
   );
-  updateFilterBadge();
-  els.filterPanel.hidden = true;
+  els.filters.hidden = true;
   els.filterToggle.setAttribute("aria-expanded", "false");
   render();
 }
@@ -390,49 +392,44 @@ function resetFilters() {
   applyFilters();
 }
 
-function setLayer(layer) {
-  state.layers = layer;
-  for (const button of document.querySelectorAll(".seg")) {
-    const active = button.dataset.layer === layer;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
+/* ---------- виды ---------- */
+
+let lastFocus = null;
+
+function showView(name) {
+  const isSettings = name === "settings";
+  els.searchView.hidden = isSettings;
+  els.settingsView.hidden = !isSettings;
+  els.settingsBtn.setAttribute("aria-pressed", String(isSettings));
+  window.scrollTo(0, 0);
+  if (isSettings) {
+    els.settingsBack.focus();
+  } else {
+    els.query.focus();
   }
-  render();
 }
 
-/* ---------- тема ---------- */
-
-function applyTheme(theme) {
-  els.root.dataset.theme = theme;
-  const use = els.theme.querySelector("use");
-  if (use) use.setAttribute("href", theme === "dark" ? "#i-sun" : "#i-moon");
-  els.theme.setAttribute(
-    "aria-label",
-    theme === "dark" ? "Включить светлую тему" : "Включить тёмную тему",
-  );
+function showSettingsPanel(panel) {
+  for (const tab of els.settingsTabs.querySelectorAll(".tab")) {
+    const active = tab.dataset.panel === panel;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-pressed", String(active));
+  }
+  for (const section of els.settingsView.querySelectorAll(".settings-panel")) {
+    section.hidden = section.dataset.panel !== panel;
+  }
 }
 
-function initTheme() {
-  let stored = null;
-  try {
-    stored = localStorage.getItem("persinder-mock-theme");
-  } catch {
-    stored = null;
-  }
-  const preferred =
-    stored ||
-    (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  applyTheme(preferred);
+function openStats() {
+  lastFocus = document.activeElement;
+  els.statsModal.hidden = false;
+  const close = els.statsModal.querySelector(".modal-close");
+  if (close) close.focus();
 }
 
-function toggleTheme() {
-  const next = els.root.dataset.theme === "dark" ? "light" : "dark";
-  applyTheme(next);
-  try {
-    localStorage.setItem("persinder-mock-theme", next);
-  } catch {
-    /* file:// или приватный режим — тема просто не запомнится */
-  }
+function closeStats() {
+  els.statsModal.hidden = true;
+  if (lastFocus instanceof HTMLElement) lastFocus.focus();
 }
 
 /* ---------- события ---------- */
@@ -440,11 +437,13 @@ function toggleTheme() {
 els.form.addEventListener("submit", (event) => {
   event.preventDefault();
   state.query = els.query.value;
+  if (!els.settingsView.hidden) showView("search");
   runSearch();
 });
 
 els.query.addEventListener("input", () => {
   state.query = els.query.value;
+  if (!els.settingsView.hidden) showView("search");
   scheduleSearch();
 });
 
@@ -460,76 +459,74 @@ els.clear.addEventListener("click", () => {
   els.query.focus();
 });
 
-els.theme.addEventListener("click", toggleTheme);
+for (const tab of document.querySelectorAll("#search-view .tab[data-layer]")) {
+  tab.addEventListener("click", () => setLayer(tab.dataset.layer));
+}
 
 els.filterToggle.addEventListener("click", () => {
-  const open = els.filterPanel.hidden;
-  els.filterPanel.hidden = !open;
+  const open = els.filters.hidden;
+  els.filters.hidden = !open;
   els.filterToggle.setAttribute("aria-expanded", String(open));
 });
 
 els.minScore.addEventListener("input", () => {
   els.minScoreValue.textContent = Number(els.minScore.value).toFixed(2);
-  updateFilterBadge();
 });
-
-els.morphLimit.addEventListener("input", updateFilterBadge);
-els.semanticLimit.addEventListener("input", updateFilterBadge);
 
 els.filterApply.addEventListener("click", applyFilters);
 els.filterReset.addEventListener("click", resetFilters);
-
 els.retry.addEventListener("click", runSearch);
 
-document.querySelectorAll(".seg").forEach((button) => {
-  button.addEventListener("click", () => setLayer(button.dataset.layer));
+els.settingsBtn.addEventListener("click", () => {
+  showView(els.settingsView.hidden ? "settings" : "search");
 });
 
-document.querySelectorAll("[data-query]").forEach((button) => {
+els.settingsBack.addEventListener("click", () => showView("search"));
+els.logo.addEventListener("click", (event) => {
+  event.preventDefault();
+  showView("search");
+});
+
+els.settingsTabs.addEventListener("click", (event) => {
+  const tab = event.target.closest(".tab[data-panel]");
+  if (tab) showSettingsPanel(tab.dataset.panel);
+});
+
+els.statusBtn.addEventListener("click", openStats);
+for (const node of els.statsModal.querySelectorAll("[data-close-stats]")) {
+  node.addEventListener("click", closeStats);
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-toast]");
+  if (button) showToast(button.dataset.toast);
+});
+
+els.results.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-action]");
+  if (!target) return;
+  if (target.tagName === "A") event.preventDefault();
+
+  const doc = DOCS.find((item) => item.id === target.dataset.id);
+  if (!doc) return;
+
+  if (target.dataset.action === "open") {
+    showToast(`Открыть «${doc.title}» — в приложении это сделает сервер.`);
+    return;
+  }
+
+  const { dir } = splitPath(doc.path);
+  showToast(`Проводник: ${dir.replace(/[\\/]$/, "")}`);
+});
+
+for (const button of document.querySelectorAll("[data-query]")) {
   button.addEventListener("click", () => {
     els.query.value = button.dataset.query;
     state.query = button.dataset.query;
     runSearch();
     els.query.focus();
   });
-});
-
-document.querySelectorAll("[data-view]").forEach((link) => {
-  link.addEventListener("click", (event) => {
-    event.preventDefault();
-    if (link.dataset.view === "search") {
-      els.query.focus();
-      return;
-    }
-    const labels = {
-      folders: "Папки",
-      models: "Модели",
-      settings: "Настройки",
-    };
-    showToast(`Раздел «${labels[link.dataset.view]}» — следующий шаг.`);
-  });
-});
-
-document.querySelector(".server-pill").addEventListener("click", (event) => {
-  event.preventDefault();
-  showToast("Демо: сервер 127.0.0.1:8756 доступен, данные не запрашиваются.");
-});
-
-els.results.addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-action]");
-  if (!button) return;
-
-  const doc = DOCS.find((item) => item.id === button.dataset.id);
-  if (!doc) return;
-
-  if (button.dataset.action === "open") {
-    showToast(`Открыть «${doc.title}» — в приложении это сделает сервер.`);
-    return;
-  }
-
-  const folder = doc.path.replace(/[\\/][^\\/]+$/, "");
-  showToast(`Проводник: ${folder}`);
-});
+}
 
 document.addEventListener("keydown", (event) => {
   const target = event.target;
@@ -538,16 +535,13 @@ document.addEventListener("keydown", (event) => {
     target instanceof HTMLTextAreaElement ||
     target instanceof HTMLSelectElement;
 
-  if (event.key === "/" && !typing) {
-    event.preventDefault();
-    els.query.focus();
-    els.query.select();
-    return;
-  }
-
   if (event.key === "Escape") {
-    if (!els.filterPanel.hidden) {
-      els.filterPanel.hidden = true;
+    if (!els.statsModal.hidden) {
+      closeStats();
+      return;
+    }
+    if (!els.filters.hidden) {
+      els.filters.hidden = true;
       els.filterToggle.setAttribute("aria-expanded", "false");
       return;
     }
@@ -558,12 +552,14 @@ document.addEventListener("keydown", (event) => {
       state.requestId += 1;
       render();
     }
+    return;
   }
 
-  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+  if (event.key === "/" && !typing) {
     event.preventDefault();
-    state.query = els.query.value;
-    runSearch();
+    if (!els.settingsView.hidden) showView("search");
+    els.query.focus();
+    els.query.select();
   }
 });
 
@@ -574,11 +570,15 @@ function initFromUrl() {
   if (params.has("q")) state.query = params.get("q") || "";
   if (params.get("error") === "1") state.error = true;
   els.query.value = state.query;
+  if (params.get("view") === "settings") {
+    showView("settings");
+    if (params.get("panel")) showSettingsPanel(params.get("panel"));
+  }
+  if (params.get("stats") === "1") openStats();
 }
 
-initTheme();
-initFromUrl();
+els.statusTip.textContent = `${STATUS.address} · ${STATUS.vectors.toLocaleString("ru-RU")} векторов`;
 els.minScore.value = String(DEFAULTS.minScore);
 els.minScoreValue.textContent = DEFAULTS.minScore.toFixed(2);
-updateFilterBadge();
+initFromUrl();
 render();

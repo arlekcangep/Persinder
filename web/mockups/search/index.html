@@ -1,276 +1,286 @@
 <!doctype html>
-<html lang="ru" data-theme="light">
+<html lang="ru">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="light">
   <title>Persinder — поиск</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <svg class="sprite" aria-hidden="true" focusable="false">
-    <symbol id="i-search" viewBox="0 0 24 24">
-      <circle cx="11" cy="11" r="7"></circle>
-      <path d="m20 20-3.5-3.5"></path>
-    </symbol>
-    <symbol id="i-layers" viewBox="0 0 24 24">
-      <path d="m12 3 9 5-9 5-9-5 9-5Z"></path>
-      <path d="m3 12 9 5 9-5"></path>
-      <path d="m3 16 9 5 9-5"></path>
-    </symbol>
-    <symbol id="i-folder" viewBox="0 0 24 24">
-      <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"></path>
-    </symbol>
-    <symbol id="i-chip" viewBox="0 0 24 24">
-      <rect x="7" y="7" width="10" height="10" rx="2"></rect>
-      <path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"></path>
-    </symbol>
-    <symbol id="i-settings" viewBox="0 0 24 24">
-      <circle cx="12" cy="12" r="3"></circle>
-      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4v-.2a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path>
-    </symbol>
-    <symbol id="i-sun" viewBox="0 0 24 24">
-      <circle cx="12" cy="12" r="4"></circle>
-      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
-    </symbol>
-    <symbol id="i-moon" viewBox="0 0 24 24">
-      <path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5Z"></path>
-    </symbol>
-    <symbol id="i-x" viewBox="0 0 24 24">
-      <path d="m6 6 12 12M18 6 6 18"></path>
-    </symbol>
-    <symbol id="i-filter" viewBox="0 0 24 24">
-      <path d="M4 6h16M7 12h10M10 18h4"></path>
-    </symbol>
-    <symbol id="i-external" viewBox="0 0 24 24">
-      <path d="M14 4h6v6M20 4l-9 9"></path>
-      <path d="M19 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4"></path>
-    </symbol>
-    <symbol id="i-file" viewBox="0 0 24 24">
-      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"></path>
-      <path d="M14 3v5h5M9 13h6M9 17h4"></path>
-    </symbol>
-    <symbol id="i-sparkles" viewBox="0 0 24 24">
-      <path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3Z"></path>
-      <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z"></path>
-      <path d="M5 14l.6 1.4L7 16l-1.4.6L5 18l-.6-1.4L3 16l1.4-.6L5 14Z"></path>
-    </symbol>
-    <symbol id="i-alert" viewBox="0 0 24 24">
-      <path d="M10.3 4.3 2.7 18a2 2 0 0 0 1.7 3h15.2a2 2 0 0 0 1.7-3L13.7 4.3a2 2 0 0 0-3.4 0Z"></path>
-      <path d="M12 9v4M12 17h.01"></path>
-    </symbol>
-    <symbol id="i-database" viewBox="0 0 24 24">
-      <ellipse cx="12" cy="5" rx="8" ry="3"></ellipse>
-      <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"></path>
-      <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"></path>
-    </symbol>
-    <symbol id="i-command" viewBox="0 0 24 24">
-      <path d="M9 6a3 3 0 1 0-3 3h3V6ZM15 6a3 3 0 1 1 3 3h-3V6ZM9 18a3 3 0 1 1-3-3h3v3ZM15 18a3 3 0 1 0 3-3h-3v3Z"></path>
-      <path d="M9 9h6v6H9z"></path>
-    </symbol>
-  </svg>
+  <header class="header">
+    <div class="header-inner">
+      <a class="logo" href="#" id="logo" aria-label="Persinder — к поиску">Persinder</a>
 
-  <div class="app-shell">
-    <aside class="sidebar">
-      <a class="brand" href="#" aria-label="Persinder — на главную">
-        <span class="brand-mark"><svg class="icon"><use href="#i-layers"></use></svg></span>
-        <span class="brand-text">
-          <strong>Persinder</strong>
-          <small>личная библиотека</small>
-        </span>
-      </a>
+      <form class="search-form" id="search-form" role="search">
+        <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"></circle>
+          <path d="m20 20-3.5-3.5"></path>
+        </svg>
+        <input
+          id="query"
+          name="q"
+          type="search"
+          value="волчок"
+          placeholder="Слово, фраза или вопрос"
+          autocomplete="off"
+          spellcheck="false"
+          aria-label="Поисковый запрос"
+        >
+        <button class="clear-btn" id="clear-btn" type="button" aria-label="Очистить запрос" title="Очистить">×</button>
+        <button class="search-submit" type="submit">Найти</button>
+      </form>
 
-      <nav class="nav" aria-label="Основная навигация">
-        <a class="nav-item active" href="#" data-view="search">
-          <svg class="icon"><use href="#i-search"></use></svg>
-          <span>Поиск</span>
-          <kbd>/</kbd>
-        </a>
-        <a class="nav-item" href="#" data-view="folders">
-          <svg class="icon"><use href="#i-folder"></use></svg>
-          <span>Папки</span>
-        </a>
-        <a class="nav-item" href="#" data-view="models">
-          <svg class="icon"><use href="#i-chip"></use></svg>
-          <span>Модели</span>
-          <span class="nav-badge">2</span>
-        </a>
-        <a class="nav-item" href="#" data-view="settings">
-          <svg class="icon"><use href="#i-settings"></use></svg>
-          <span>Настройки</span>
-        </a>
-      </nav>
-
-      <div class="sidebar-foot">
-        <div class="status-card">
-          <div class="status-line">
-            <span class="dot ok"></span>
-            <span>Сервер работает</span>
-          </div>
-          <div class="status-meta">6 829 документов · 6 829 векторов</div>
-          <div class="status-bar"><span style="width: 72%"></span></div>
-          <div class="status-meta">индекс обновлён 2 мин назад</div>
+      <div class="header-actions">
+        <div class="status-wrap">
+          <button class="status-btn" id="status-btn" type="button" aria-label="Статус сервера" aria-describedby="status-tip">
+            <span class="dot" aria-hidden="true"></span>
+            <span>Сервер</span>
+          </button>
+          <span class="status-tip" id="status-tip" role="tooltip">
+            127.0.0.1:8756 · 6 829 векторов
+          </span>
         </div>
+        <button class="icon-btn" id="settings-btn" type="button" aria-label="Настройки" title="Настройки">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4v-.2a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path>
+          </svg>
+        </button>
       </div>
-    </aside>
-
-    <div class="app-main">
-      <header class="topbar">
-        <div class="topbar-left">
-          <a class="mobile-brand" href="#" aria-label="Persinder">
-            <span class="brand-mark"><svg class="icon"><use href="#i-layers"></use></svg></span>
-            <strong>Persinder</strong>
-          </a>
-          <span class="crumbs">Библиотека <span>/</span> Поиск</span>
-          <span class="demo-tag">эскиз · демо-данные</span>
-        </div>
-        <div class="topbar-right">
-          <a class="server-pill" href="#" data-action="server">
-            <span class="dot ok"></span>
-            <span>127.0.0.1:8756</span>
-          </a>
-          <button class="icon-btn" id="theme-toggle" type="button" aria-label="Переключить тему" title="Тема">
-            <svg class="icon"><use href="#i-moon"></use></svg>
-          </button>
-          <div class="avatar" title="Профиль">A</div>
-        </div>
-      </header>
-
-      <main class="page">
-        <section class="page-head">
-          <div>
-            <h1>Поиск</h1>
-            <p>Морфология и семантика по вашей библиотеке.</p>
-          </div>
-          <div class="head-stats">
-            <span class="stat-chip"><strong>6 829</strong> документов</span>
-            <span class="stat-chip"><strong>2</strong> модели</span>
-          </div>
-        </section>
-
-        <form class="search-box" id="search-form" role="search">
-          <svg class="icon search-icon"><use href="#i-search"></use></svg>
-          <input
-            id="query"
-            name="q"
-            type="search"
-            value="волчок"
-            placeholder="Слово, фраза или вопрос…"
-            autocomplete="off"
-            spellcheck="false"
-            aria-label="Поисковый запрос"
-          >
-          <button class="clear-btn" id="clear-btn" type="button" aria-label="Очистить запрос" title="Очистить">
-            <svg class="icon"><use href="#i-x"></use></svg>
-          </button>
-          <button class="search-submit" type="submit">
-            <svg class="icon"><use href="#i-search"></use></svg>
-            <span>Найти</span>
-          </button>
-        </form>
-
-        <div class="search-hints">
-          <span>Попробовать:</span>
-          <button class="hint-chip" type="button" data-query="волчок">волчок</button>
-          <button class="hint-chip" type="button" data-query="медведь">медведь</button>
-          <button class="hint-chip" type="button" data-query="серый волчок">серый волчок</button>
-          <button class="hint-chip" type="button" data-query="ффф">ффф</button>
-          <span class="kbd-hint">Нажмите <kbd>/</kbd> для фокуса</span>
-        </div>
-
-        <div class="toolbar">
-          <div class="segmented" role="group" aria-label="Слои поиска">
-            <button class="seg active" type="button" data-layer="both" aria-pressed="true">Оба слоя</button>
-            <button class="seg" type="button" data-layer="semantic" aria-pressed="false">Семантика</button>
-            <button class="seg" type="button" data-layer="morph" aria-pressed="false">Морфология</button>
-          </div>
-          <div class="toolbar-right">
-            <span class="sort-label">по релевантности</span>
-            <button class="filter-btn" id="filter-toggle" type="button" aria-expanded="false" aria-controls="filters-panel">
-              <svg class="icon"><use href="#i-filter"></use></svg>
-              <span>Фильтры</span>
-              <span class="filter-count" id="filter-count" hidden>0</span>
-            </button>
-          </div>
-        </div>
-
-        <section class="filters-panel" id="filters-panel" hidden>
-          <div class="filter-field">
-            <label for="min-score">min_score <span>только семантика</span></label>
-            <div class="range-row">
-              <input type="range" id="min-score" min="0.70" max="0.95" step="0.01" value="0.80">
-              <output id="min-score-value" for="min-score">0.80</output>
-            </div>
-            <p class="hint">Порог косинуса. Выше — строже, ниже — больше шума.</p>
-          </div>
-          <div class="filter-field">
-            <label for="morph-limit">morph_limit</label>
-            <input type="number" id="morph-limit" min="1" max="50" value="20">
-            <p class="hint">Сколько хитов отдаёт морфологический слой.</p>
-          </div>
-          <div class="filter-field">
-            <label for="semantic-limit">semantic_limit</label>
-            <input type="number" id="semantic-limit" min="1" max="50" value="20">
-            <p class="hint">Сколько хитов отдаёт семантический слой.</p>
-          </div>
-          <div class="filter-actions">
-            <button class="btn ghost" id="filter-reset" type="button">Сбросить</button>
-            <button class="btn primary" id="filter-apply" type="button">Применить</button>
-          </div>
-        </section>
-
-        <div class="summary" aria-live="polite">
-          <span id="summary-text">Найдено 7 · семантика 5 · морфология 2</span>
-          <span class="summary-sep"></span>
-          <span id="summary-query">Запрос: «волчок»</span>
-        </div>
-
-        <div id="results" class="results"></div>
-
-        <section id="empty-state" class="state-card" hidden>
-          <span class="state-icon"><svg class="icon"><use href="#i-sparkles"></use></svg></span>
-          <h2>Начните с запроса</h2>
-          <p>Одно слово, фраза или вопрос. Морфология ищет точные формы, семантика — по смыслу.</p>
-          <div class="state-chips">
-            <button class="hint-chip" type="button" data-query="волчок">волчок</button>
-            <button class="hint-chip" type="button" data-query="медведь">медведь</button>
-            <button class="hint-chip" type="button" data-query="серый волчок">серый волчок</button>
-          </div>
-        </section>
-
-        <section id="not-found-state" class="state-card" hidden>
-          <span class="state-icon"><svg class="icon"><use href="#i-search"></use></svg></span>
-          <h2>Ничего не найдено</h2>
-          <p id="not-found-text">Попробуйте другое слово или снизьте min_score.</p>
-        </section>
-
-        <section id="error-state" class="state-card error" hidden>
-          <span class="state-icon"><svg class="icon"><use href="#i-alert"></use></svg></span>
-          <h2>Сервер не отвечает</h2>
-          <p>Проверьте, что запущен <code>persinder serve</code>, и обновите страницу.</p>
-          <button class="btn primary" id="retry-btn" type="button">Повторить</button>
-        </section>
-      </main>
     </div>
+  </header>
 
-    <nav class="mobile-nav" aria-label="Мобильная навигация">
-      <button class="mobile-nav-item active" type="button" data-view="search">
-        <svg class="icon"><use href="#i-search"></use></svg>
-        <span>Поиск</span>
+  <main class="main" id="search-view">
+    <nav class="tabs" aria-label="Слои поиска">
+      <button class="tab active" type="button" data-layer="both" aria-pressed="true">
+        Все <span id="count-all">7</span>
       </button>
-      <button class="mobile-nav-item" type="button" data-view="folders">
-        <svg class="icon"><use href="#i-folder"></use></svg>
-        <span>Папки</span>
+      <button class="tab" type="button" data-layer="semantic" aria-pressed="false">
+        Семантика <span id="count-semantic">5</span>
       </button>
-      <button class="mobile-nav-item" type="button" data-view="models">
-        <svg class="icon"><use href="#i-chip"></use></svg>
-        <span>Модели</span>
+      <button class="tab" type="button" data-layer="morph" aria-pressed="false">
+        Морфология <span id="count-morph">2</span>
       </button>
-      <button class="mobile-nav-item" type="button" data-view="settings">
-        <svg class="icon"><use href="#i-settings"></use></svg>
-        <span>Настройки</span>
+      <button class="tab-action" id="filter-toggle" type="button" aria-expanded="false" aria-controls="filters">
+        Параметры
       </button>
     </nav>
+
+    <section class="filters" id="filters" hidden>
+      <label class="filter-field">
+        <span class="field-label">min_score <em>только семантика</em></span>
+        <span class="field-row">
+          <input type="range" id="min-score" min="0.70" max="0.95" step="0.01" value="0.80">
+          <output id="min-score-value" for="min-score">0.80</output>
+        </span>
+      </label>
+      <label class="filter-field">
+        <span class="field-label">morph_limit</span>
+        <input type="number" id="morph-limit" min="1" max="50" value="20">
+      </label>
+      <label class="filter-field">
+        <span class="field-label">semantic_limit</span>
+        <input type="number" id="semantic-limit" min="1" max="50" value="20">
+      </label>
+      <span class="filter-actions">
+        <button class="link-btn muted" id="filter-reset" type="button">Сбросить</button>
+        <button class="link-btn" id="filter-apply" type="button">Применить</button>
+      </span>
+    </section>
+
+    <p class="summary" id="summary" aria-live="polite">
+      Результатов: 7 · семантика 5 · морфология 2
+    </p>
+
+    <div id="results"></div>
+
+    <section class="state" id="empty-state" hidden>
+      <p class="state-title">Введите запрос</p>
+      <p>Морфология ищет точные формы слов, семантика — по смыслу.</p>
+      <p class="state-examples">
+        Например:
+        <button class="link-btn" type="button" data-query="волчок">волчок</button>
+        <button class="link-btn" type="button" data-query="медведь">медведь</button>
+        <button class="link-btn" type="button" data-query="серый волчок">серый волчок</button>
+      </p>
+    </section>
+
+    <section class="state" id="not-found-state" hidden>
+      <p class="state-title" id="not-found-title">Ничего не найдено</p>
+      <p id="not-found-text">Попробуйте другое слово или снизьте min_score.</p>
+    </section>
+
+    <section class="state" id="error-state" hidden>
+      <p class="state-title">Не удалось связаться с сервером</p>
+      <p>Проверьте, что запущен <code>persinder serve</code>, и повторите запрос.</p>
+      <p><button class="link-btn" id="retry-btn" type="button">Повторить</button></p>
+    </section>
+  </main>
+
+  <main class="main settings" id="settings-view" hidden>
+    <div class="settings-head">
+      <button class="back-link" id="settings-back" type="button">← К поиску</button>
+      <h1>Настройки</h1>
+    </div>
+
+    <nav class="tabs" id="settings-tabs" aria-label="Разделы настроек">
+      <button class="tab active" type="button" data-panel="folders" aria-pressed="true">Папки</button>
+      <button class="tab" type="button" data-panel="models" aria-pressed="false">Модели</button>
+      <button class="tab" type="button" data-panel="general" aria-pressed="false">Общие</button>
+    </nav>
+
+    <section class="settings-panel" data-panel="folders">
+      <p class="section-label">Папки индексации</p>
+      <div class="settings-list">
+        <div class="settings-row">
+          <div class="row-main">
+            <div class="row-title">D:\Obsidian\Personal</div>
+            <div class="row-sub">Личное · markdown, text · рекурсивно</div>
+          </div>
+          <div class="row-actions">
+            <button class="link-btn" type="button" data-toast="Изменение папки — в следующем шаге.">Изменить</button>
+            <button class="link-btn muted" type="button" data-toast="Удаление папки — в следующем шаге.">Удалить</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="row-main">
+            <div class="row-title">D:\WebArchive</div>
+            <div class="row-sub">Web · html, mhtml · рекурсивно</div>
+          </div>
+          <div class="row-actions">
+            <button class="link-btn" type="button" data-toast="Изменение папки — в следующем шаге.">Изменить</button>
+            <button class="link-btn muted" type="button" data-toast="Удаление папки — в следующем шаге.">Удалить</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="row-main">
+            <div class="row-title">D:\Library\Books</div>
+            <div class="row-sub">Чужое · pdf · без эмбеддингов</div>
+          </div>
+          <div class="row-actions">
+            <button class="link-btn" type="button" data-toast="Изменение папки — в следующем шаге.">Изменить</button>
+            <button class="link-btn muted" type="button" data-toast="Удаление папки — в следующем шаге.">Удалить</button>
+          </div>
+        </div>
+      </div>
+      <p class="settings-add">
+        <button class="link-btn" type="button" data-toast="Добавление папки — в следующем шаге.">+ Добавить папку</button>
+      </p>
+      <p class="note">Изменения конфига потребуют перезапуска сервиса.</p>
+    </section>
+
+    <section class="settings-panel" data-panel="models" hidden>
+      <p class="section-label">Активные модели</p>
+      <div class="settings-list">
+        <div class="settings-row">
+          <div class="row-main">
+            <div class="row-title">embedding</div>
+            <div class="row-sub">e5-small-int8-v1 · установлена</div>
+          </div>
+          <div class="row-actions">
+            <button class="link-btn" type="button" data-toast="Смена embedding-модели — в следующем шаге.">Сменить</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="row-main">
+            <div class="row-title">search</div>
+            <div class="row-sub">e5-small-int8-v1 · установлена</div>
+          </div>
+          <div class="row-actions">
+            <button class="link-btn" type="button" data-toast="Смена поисковой модели — в следующем шаге.">Сменить</button>
+          </div>
+        </div>
+      </div>
+
+      <p class="section-label spaced">Доступные модели</p>
+      <div class="settings-list">
+        <div class="settings-row">
+          <div class="row-main">
+            <div class="row-title">e5-small-int8-v1</div>
+            <div class="row-sub">multilingual-e5-small (ONNX INT8) · 384 · ~120 МБ</div>
+          </div>
+          <div class="row-actions">
+            <button class="link-btn" type="button" data-toast="Переключение модели — в следующем шаге.">Использовать</button>
+            <button class="link-btn muted" type="button" data-toast="Удаление модели — в следующем шаге.">Удалить</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="row-main">
+            <div class="row-title">placeholder-v1</div>
+            <div class="row-sub">встроенная заглушка · без весов</div>
+          </div>
+          <div class="row-actions">
+            <span class="row-note">встроена</span>
+          </div>
+        </div>
+      </div>
+      <p class="settings-add">
+        <button class="link-btn" type="button" data-toast="Установка модели — в следующем шаге.">+ Установить модель</button>
+      </p>
+      <p class="note">Скачивание и переключение моделей появятся после API-слоя.</p>
+    </section>
+
+    <section class="settings-panel" data-panel="general" hidden>
+      <p class="section-label">Поиск и индексация</p>
+      <div class="settings-list">
+        <div class="settings-row">
+          <div class="row-main">
+            <div class="row-title">Семантика</div>
+            <div class="row-sub">считать эмбеддинги для новых и изменённых файлов</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" checked>
+            <span>включена</span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div class="row-main">
+            <div class="row-title">min_score</div>
+            <div class="row-sub">порог косинуса для семантического слоя; пусто — без порога</div>
+          </div>
+          <input class="inline-input" type="number" min="0" max="1" step="0.01" value="0.80">
+        </div>
+        <div class="settings-row">
+          <div class="row-main">
+            <div class="row-title">poll_interval</div>
+            <div class="row-sub">секунд между полными сканами папок</div>
+          </div>
+          <input class="inline-input" type="number" min="1" value="30">
+        </div>
+        <div class="settings-row">
+          <div class="row-main">
+            <div class="row-title">debounce</div>
+            <div class="row-sub">секунд тишины после изменения файла</div>
+          </div>
+          <input class="inline-input" type="number" min="0" value="2">
+        </div>
+      </div>
+      <p class="settings-add">
+        <button class="link-btn" type="button" data-toast="Сохранение настроек — в следующем шаге.">Сохранить</button>
+      </p>
+      <p class="note">Тема оформления и другие общие параметры добавим позже.</p>
+    </section>
+  </main>
+
+  <div class="modal" id="stats-modal" hidden>
+    <div class="modal-backdrop" data-close-stats></div>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="stats-title">
+      <div class="modal-head">
+        <h2 id="stats-title">Статистика</h2>
+        <button class="modal-close" type="button" data-close-stats aria-label="Закрыть">×</button>
+      </div>
+      <dl class="stats-list">
+        <div><dt>Сервер</dt><dd>127.0.0.1:8756</dd></div>
+        <div><dt>Документов</dt><dd>6 829</dd></div>
+        <div><dt>Векторов</dt><dd>6 829</dd></div>
+        <div><dt>Модель поиска</dt><dd>e5-small-int8-v1</dd></div>
+        <div><dt>Очередь эмбеддингов</dt><dd>0 задач</dd></div>
+        <div><dt>Последняя индексация</dt><dd>2 мин назад</dd></div>
+        <div><dt>Время работы</dt><dd>1 ч 12 мин</dd></div>
+      </dl>
+      <p class="note">Полный состав показателей уточним отдельно.</p>
+    </div>
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
