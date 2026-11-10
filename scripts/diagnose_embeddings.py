@@ -97,15 +97,21 @@ def _find_docs(conn: sqlite3.Connection, needle: str) -> list[sqlite3.Row]:
     rows = conn.execute(sql, (f"%{needle}%", f"%{needle}%")).fetchall()
     if rows:
         return rows
-    from persinder.morphology import default_stemmer
+    from persinder.morphology import analyze_to_string, default_stemmer
 
-    stem = " ".join(default_stemmer().stem([needle])) or needle
+    # В ``chunks_fts`` лежат уже стеммированные токены. Стеммим запрос тем же
+    # анализатором, что и при индексации, и склеиваем токены через AND:
+    # иначе фраза («серый волчок») ищется как один несуществующий токен.
+    terms = analyze_to_string(needle, default_stemmer()).split()
+    if not terms:
+        return []
+    match = " ".join(f'"{term}"*' for term in terms)
     try:
         ids = [
             str(row["doc_id"])
             for row in conn.execute(
                 "SELECT DISTINCT doc_id FROM chunks_fts WHERE chunks_fts MATCH ?",
-                (f'"{stem}"*',),
+                (match,),
             )
         ]
     except sqlite3.OperationalError:
