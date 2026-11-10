@@ -9,18 +9,23 @@ from __future__ import annotations
 
 import io
 import os
+import socket
+import threading
 import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest import mock
 
 from persinder import __main__ as cli
+from persinder.api import make_server
 from persinder.config import Settings
 from persinder.domain import Area
 from persinder.embed import ModelState
 from persinder.interfaces import Ingest, Search
+from persinder.search import SearchHit, SearchQuery, SearchResult
 from persinder.sources import AreaConfig
 from persinder.store import SqliteStore
 
@@ -253,6 +258,117 @@ class SearchScopesTest(unittest.TestCase):
         self.assertEqual(
             cli.models_for_source(areas, "/a/x.md", models, semantic=False), ()
         )
+
+
+class _StubSearch:
+    """Заглушка сервиса поиска: предсказуемый ответ для HTTP-тестов."""
+
+    def __init__(self) -> None:
+        self.queries: list[SearchQuery] = []
+
+    def search(self, query: SearchQuery) -> SearchResult:
+        self.queries.append(query)
+        return SearchResult(
+            query=query.text,
+            hits=(SearchHit("doc-1", 0, 0.75, "контекст"),),
+            semantic_hits=(SearchHit("doc-2", 1, 0.5, None),),
+        )
+
+
+class SearchHttpTest(unittest.TestCase):
+    """CLI ``search``: HTTP-first и локальный fallback."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.stub = _StubSearch()
+        self.server = make_server(
+            cast(Ingest, None), self.stub, host="127.0.0.1", port=0
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.settings = Settings(
+            home=self.root / "data", port=self.server.server_address[1]
+        )
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self._tmp.cleanup()
+
+    def test_search_over_http_round_trip(self):
+        result = cli.search_over_http(self.settings, "кот", 3)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.query, "кот")
+        self.assertEqual(result.hits, (SearchHit("doc-1", 0, 0.75, "контекст"),))
+        self.assertEqual(result.semantic_hits, (SearchHit("doc-2", 1, 0.5, None),))
+        self.assertEqual(self.stub.queries, [SearchQuery(text="кот", limit=3)])
+
+    def test_search_over_http_unreachable_returns_none(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        settings = Settings(home=self.root / "data", port=port)
+
+        self.assertIsNone(cli.search_over_http(settings, "кот", 3))
+
+    def test_run_search_prefers_http(self):
+        result = SearchResult(query="кот", hits=(SearchHit("doc-1", 0, 0.5),))
+        out = io.StringIO()
+        with (
+            mock.patch.object(cli, "search_over_http", return_value=result),
+            mock.patch.object(cli, "_local_search") as local,
+            redirect_stdout(out),
+        ):
+            rc = cli.run_search(None, "кот", 5, port=self.settings.port)
+
+        self.assertEqual(rc, 0)
+        local.assert_not_called()
+        self.assertIn("морфология: 1, семантика: 0", out.getvalue())
+
+    def test_run_search_falls_back_to_local(self):
+        result = SearchResult(query="кот", semantic_hits=(SearchHit("d", 0, 0.5),))
+        out = io.StringIO()
+        with (
+            mock.patch.object(cli, "search_over_http", return_value=None),
+            mock.patch.object(cli, "_local_search", return_value=result) as local,
+            redirect_stdout(out),
+        ):
+            rc = cli.run_search(None, "кот", 5, port=self.settings.port)
+
+        self.assertEqual(rc, 0)
+        local.assert_called_once()
+        self.assertEqual(local.call_args.args[1:], ("кот", 5, None))
+        self.assertIn("ВНИМАНИЕ", out.getvalue())
+
+    def test_run_search_local_flag_skips_http(self):
+        result = SearchResult(query="кот")
+        with (
+            mock.patch.object(cli, "search_over_http") as http,
+            mock.patch.object(cli, "_local_search", return_value=result),
+            redirect_stdout(io.StringIO()),
+        ):
+            rc = cli.run_search(None, "кот", 5, local=True)
+
+        self.assertEqual(rc, 0)
+        http.assert_not_called()
+
+    def test_run_search_explicit_config_is_local(self):
+        config = self.root / "custom.yaml"
+        result = SearchResult(query="кот")
+        with (
+            mock.patch.object(cli, "search_over_http") as http,
+            mock.patch.object(cli, "_local_search", return_value=result) as local,
+            redirect_stdout(io.StringIO()),
+        ):
+            rc = cli.run_search(None, "кот", 5, config)
+
+        self.assertEqual(rc, 0)
+        http.assert_not_called()
+        local.assert_called_once()
+        self.assertEqual(local.call_args.args[3], config)
 
 
 if __name__ == "__main__":

@@ -247,8 +247,11 @@ HTTP-сервис слушает только локальный интерфе�
   API/CLI не ломаются. Объединение в единый рейтинг (D16) — следующий шаг.
   `SearchService` с `TextStore` обогащает каждый хит полем `context` — текст
   чанка плюс три строки до и три после (`search/context.py`).
-- **CLI/API.** `persinder search <text> [--limit N] [--home …]`;
-  `persinder ann rebuild [--model KEY]`; `GET /search` отвечает
+- **CLI/API.** `persinder search <text> [--limit N] [--home …] [--host …]
+  [--port …]` — HTTP-first: если запущенный `serve` отвечает, CLI делает
+  `GET /search` и видит те же модели и скоупы, что сервер; локальный поиск —
+  fallback с предупреждением, а `--local` (или явный `--config`) включает его
+  принудительно. `persinder ann rebuild [--model KEY]`; `GET /search` отвечает
   `{query, hits, semantic_hits}`, у каждого хита есть
   `{document_id, chunk_index, score, context}`.
 - **Дальше.** При росте базы — шардирование индекса по коллекциям и компакция

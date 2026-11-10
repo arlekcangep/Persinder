@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import threading
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 from .api import serve
 from .config import Settings
@@ -30,7 +34,7 @@ from .embed import (
 )
 from .ingest import IngestJournal, IngestService, RecoveryStats
 from .morphology import default_stemmer
-from .search import SearchQuery, SearchService
+from .search import SearchHit, SearchQuery, SearchResult, SearchService
 from .sources import (
     JOURNAL_RETENTION_DAYS,
     AreaConfig,
@@ -689,21 +693,84 @@ def run_model_remove(settings: Settings, key: str) -> int:
     return 0
 
 
-def run_search(
-    home: Path | None,
+SEARCH_HTTP_TIMEOUT = 10.0  # секунд; локальный сервер отвечает или отказывает сразу
+
+
+def _json_str(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("string expected")
+    return value
+
+
+def _json_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("int expected")
+    return value
+
+
+def _json_float(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("number expected")
+    return float(value)
+
+
+def _hits_from_json(raw: object) -> tuple[SearchHit, ...]:
+    """Разобрать список хитов ответа ``GET /search``; ошибка — ``ValueError``."""
+    if not isinstance(raw, list):
+        raise ValueError("hits list expected")
+    hits: list[SearchHit] = []
+    for item in cast("list[object]", raw):
+        if not isinstance(item, dict):
+            raise ValueError("hit object expected")
+        data = cast("dict[str, object]", item)
+        context = data.get("context")
+        hits.append(
+            SearchHit(
+                document_id=_json_str(data["document_id"]),
+                chunk_index=_json_int(data["chunk_index"]),
+                score=_json_float(data["score"]),
+                context=None if context is None else _json_str(context),
+            )
+        )
+    return tuple(hits)
+
+
+def search_over_http(settings: Settings, text: str, limit: int) -> SearchResult | None:
+    """Поиск через запущенный ``serve``; ``None`` — сервер недоступен.
+
+    Скоупы и модели берутся у сервера, поэтому CLI видит то же, что HTTP.
+    Любая ошибка транспорта или формы ответа — повод для локального fallback.
+    """
+    query = urllib.parse.urlencode({"q": text, "limit": str(limit)})
+    url = f"http://{settings.host}:{settings.port}/search?{query}"
+    try:
+        with urllib.request.urlopen(url, timeout=SEARCH_HTTP_TIMEOUT) as resp:
+            raw: object = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(raw, dict):
+            return None
+        data = cast("dict[str, object]", raw)
+        echo = data.get("query")
+        return SearchResult(
+            query=text if echo is None else _json_str(echo),
+            hits=_hits_from_json(data.get("hits")),
+            semantic_hits=_hits_from_json(data.get("semantic_hits")),
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _local_search(
+    settings: Settings,
     text: str,
     limit: int,
     config_path: Path | None = None,
-) -> int:
-    """Поиск из консоли: морфология + семантика (модуль 3).
+) -> SearchResult:
+    """Локальный поиск в БД профиля (сервера нет или запрошен ``--local``).
 
     Если найден конфиг областей, семантика ищет по всем активным моделям и
     только в тех папках, где этими моделями индексировали; глобальное
     ``semantic: false`` выключает векторный слой совсем.
     """
-    settings = Settings.default()
-    if home:
-        settings = replace(settings, home=home)
     settings.ensure()
     areas: tuple[AreaConfig, ...] | None = None
     semantic = True
@@ -718,9 +785,12 @@ def run_search(
         semantic = watch.semantic
     _ingest, search, store = build_service(settings, areas=areas, semantic=semantic)
     try:
-        result = search.search(SearchQuery(text=text, limit=limit))
+        return search.search(SearchQuery(text=text, limit=limit))
     finally:
         store.close()
+
+
+def _print_search_result(result: SearchResult) -> None:
     print(f"морфология: {len(result.hits)}, семантика: {len(result.semantic_hits)}")
     for kind, hits in (
         ("морфология", result.hits),
@@ -730,6 +800,47 @@ def run_search(
             print(
                 f"  [{kind}] {hit.document_id} чанк {hit.chunk_index} = {hit.score:.4f}"
             )
+
+
+def run_search(
+    home: Path | None,
+    text: str,
+    limit: int,
+    config_path: Path | None = None,
+    *,
+    host: str | None = None,
+    port: int | None = None,
+    local: bool = False,
+) -> int:
+    """Поиск из консоли: сначала через запущенный сервер, затем локально.
+
+    HTTP-first: сервер — источник истины по моделям и скоупам, поэтому CLI
+    видит те же результаты, что ``GET /search``. Локальный поиск — fallback,
+    когда сервер не отвечает, или принудительно (``--local``). Явный
+    ``--config`` тоже включает локальный режим: он задаёт конфиг CLI, а не
+    сервера.
+    """
+    settings = Settings.default()
+    if home:
+        settings = replace(settings, home=home)
+    if host:
+        settings = replace(settings, host=host)
+    if port is not None:
+        settings = replace(settings, port=port)
+
+    if not (local or config_path is not None):
+        result = search_over_http(settings, text, limit)
+        if result is not None:
+            _print_search_result(result)
+            return 0
+        print(
+            f"ВНИМАНИЕ: сервер http://{settings.host}:{settings.port} не отвечает — "
+            "локальный поиск; скоупы и модели могут отличаться от сервера.",
+            flush=True,
+        )
+
+    result = _local_search(settings, text, limit, config_path)
+    _print_search_result(result)
     return 0
 
 
@@ -840,7 +951,19 @@ def main(argv: list[str] | None = None) -> int:
         "--config",
         type=Path,
         default=None,
-        help="YAML-конфиг областей (по умолчанию ищется в cwd и <home>)",
+        help="YAML-конфиг областей для локального поиска (включает --local; "
+        "по умолчанию ищется в cwd и <home>)",
+    )
+    search_p.add_argument(
+        "--host", default=None, help="хост сервера (по умолчанию 127.0.0.1)"
+    )
+    search_p.add_argument(
+        "--port", type=int, default=None, help="порт сервера (по умолчанию 8756)"
+    )
+    search_p.add_argument(
+        "--local",
+        action="store_true",
+        help="не обращаться к серверу, искать в БД профиля",
     )
     search_p.add_argument("--limit", type=int, default=20)
     search_p.add_argument("text")
@@ -871,7 +994,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "embed":
         return run_embed(args.home, args.limit, args.all, args.model, args.background)
     if args.command == "search":
-        return run_search(args.home, args.text, args.limit, args.config)
+        return run_search(
+            args.home,
+            args.text,
+            args.limit,
+            args.config,
+            host=args.host,
+            port=args.port,
+            local=args.local,
+        )
     if args.command == "ann":
         return run_ann_rebuild(args.home, args.model)
     if args.command == "model":

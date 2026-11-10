@@ -59,7 +59,9 @@ PYTHONPATH=src python3 -m persinder model install e5-small-int8-v1   # веса 
 PYTHONPATH=src python3 -m persinder embed --background               # разобрать очередь до пустой
 PYTHONPATH=src python3 -m persinder model use e5-small-int8-v1       # переключить поиск
 
-# семантический поиск (модуль 3): морфология + семантика
+# семантический поиск (модуль 3): морфология + семантика.
+# Идёт через запущенный serve (GET /search) и видит его модели и скоупы;
+# --local — искать в БД профиля без сервера.
 PYTHONPATH=src python3 -m persinder search "коты сидят" --limit 10
 
 # ANN-индекс USearch: пересобрать из таблицы (холодный старт/рассинхрон)
