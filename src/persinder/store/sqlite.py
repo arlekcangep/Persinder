@@ -617,15 +617,35 @@ class SqliteStore:
             rows = self._conn.execute(
                 "SELECT doc_id, area, filename, source_path FROM document_sources"
             ).fetchall()
-        return [
-            SourceRow(
-                doc_id=str(row["doc_id"]),
-                area=str(row["area"]),
-                filename=str(row["filename"]),
-                source_path=str(row["source_path"]),
-            )
-            for row in rows
-        ]
+        return [self._source_row(row) for row in rows]
+
+    def sources_for_docs(self, doc_ids: list[str]) -> list[SourceRow]:
+        """Источники документов (для выдачи пути в результатах поиска).
+
+        У документа может быть несколько источников (одинаковый текст в разных
+        местах). Порядок — реальные файлы раньше виртуальных, затем по ``id``:
+        потребитель берёт первый и получает стабильный «главный» источник.
+        """
+        if not doc_ids:
+            return []
+        placeholders = ",".join("?" for _ in doc_ids)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT doc_id, area, filename, source_path FROM document_sources"
+                f" WHERE doc_id IN ({placeholders})"
+                " ORDER BY CASE WHEN source_path = '' THEN 1 ELSE 0 END, id",
+                doc_ids,
+            ).fetchall()
+        return [self._source_row(row) for row in rows]
+
+    @staticmethod
+    def _source_row(row: sqlite3.Row) -> SourceRow:
+        return SourceRow(
+            doc_id=str(row["doc_id"]),
+            area=str(row["area"]),
+            filename=str(row["filename"]),
+            source_path=str(row["source_path"]),
+        )
 
     # --- эмбеддинги (локальное производное для векторного поиска, модуль 3) ---
 

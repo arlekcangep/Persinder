@@ -245,7 +245,9 @@ HTTP-сервис слушает только локальный интерфе�
 - **Форма результата.** Семантические хиты — отдельное поле `semantic_hits`
   рядом с морфологическими `hits` (модуль 1): группы видны и сравнимы,
   API/CLI не ломаются. Объединение в единый рейтинг (D16) — следующий шаг.
-  `SearchService` с `TextStore` обогащает каждый хит полем `context` — текст
+  `SearchService` обогащает каждый хит источником (`area`, `source_path`,
+  `filename` из `document_sources`; у дубликата берётся реальный файл, а не
+  виртуальная запись) и, если есть `TextStore`, полем `context` — текст
   чанка плюс три строки до и три после (`search/context.py`).
 - **CLI/API.** `persinder search <text> [--limit N] [--home …] [--host …]
   [--port …]` — HTTP-first: если запущенный `serve` отвечает, CLI делает
@@ -253,6 +255,6 @@ HTTP-сервис слушает только локальный интерфе�
   fallback с предупреждением, а `--local` (или явный `--config`) включает его
   принудительно. `persinder ann rebuild [--model KEY]`; `GET /search` отвечает
   `{query, hits, semantic_hits}`, у каждого хита есть
-  `{document_id, chunk_index, score, context}`.
+  `{document_id, chunk_index, score, context, area, source_path, filename}`.
 - **Дальше.** При росте базы — шардирование индекса по коллекциям и компакция
   (§8); формат векторов (f16-блоб) и интерфейс `VectorSearch` зафиксированы.

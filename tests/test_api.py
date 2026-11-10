@@ -92,6 +92,9 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(body["hits"])
         hit = body["hits"][0]
         self.assertEqual(hit["chunk_index"], 0)
+        self.assertEqual(hit["area"], "personal")
+        self.assertEqual(hit["filename"], "ctx.txt")
+        self.assertEqual(hit["source_path"], "", "HTTP-вставка — виртуальный документ")
         # Контекст — от найденного слова, по 3 предложения назад и вперёд,
         # а не весь чанк (строки с 4-й по 7-ю не попадают).
         self.assertEqual(

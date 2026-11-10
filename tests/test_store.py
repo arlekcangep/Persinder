@@ -169,6 +169,20 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertTrue(any(row["source_path"] == "/x/b.txt" for row in sources))
         self.assertTrue(any(row["source_path"] == "" for row in sources))
 
+    def test_sources_for_docs_prefers_real_file(self):
+        self._save()
+        self.store.add_source("d1", "web", "web-note", source_path="")
+        self.store.add_source("d1", "personal", "a.txt", source_path="/notes/a.txt")
+
+        rows = self.store.sources_for_docs(["d1", "nope"])
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["area"], "personal")
+        self.assertEqual(rows[0]["filename"], "a.txt")
+        self.assertEqual(rows[0]["source_path"], "/notes/a.txt")
+        self.assertIn("", [row["source_path"] for row in rows])
+        self.assertEqual(self.store.sources_for_docs([]), [])
+
     def test_embeddings_roundtrip(self):
         self._save()
         blob = b"\x00\x3c" * 2  # 384 f16 = 768 байт: заполняем нулями

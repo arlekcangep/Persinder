@@ -18,13 +18,18 @@ class SearchHit:
     """Одно попадание поиска.
 
     ``context`` — текст вокруг чанка (строки хита плюс несколько строк до и
-    после, ``None`` — если сырой текст недоступен).
+    после, ``None`` — если сырой текст недоступен). ``area``, ``source_path``
+    и ``filename`` — источник документа: область, полный путь на диске и имя
+    файла (``source_path`` пуст у виртуального документа — web/вставка).
     """
 
     document_id: str
     chunk_index: int
     score: float
     context: str | None = None
+    area: str = ""
+    source_path: str = ""
+    filename: str = ""
 
 
 @dataclass(frozen=True)

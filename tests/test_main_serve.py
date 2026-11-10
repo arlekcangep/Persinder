@@ -270,7 +270,17 @@ class _StubSearch:
         self.queries.append(query)
         return SearchResult(
             query=query.text,
-            hits=(SearchHit("doc-1", 0, 0.75, "контекст"),),
+            hits=(
+                SearchHit(
+                    "doc-1",
+                    0,
+                    0.75,
+                    "контекст",
+                    area="personal",
+                    source_path="/notes/a.md",
+                    filename="a.md",
+                ),
+            ),
             semantic_hits=(SearchHit("doc-2", 1, 0.5, None),),
         )
 
@@ -302,7 +312,20 @@ class SearchHttpTest(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.query, "кот")
-        self.assertEqual(result.hits, (SearchHit("doc-1", 0, 0.75, "контекст"),))
+        self.assertEqual(
+            result.hits,
+            (
+                SearchHit(
+                    "doc-1",
+                    0,
+                    0.75,
+                    "контекст",
+                    area="personal",
+                    source_path="/notes/a.md",
+                    filename="a.md",
+                ),
+            ),
+        )
         self.assertEqual(result.semantic_hits, (SearchHit("doc-2", 1, 0.5, None),))
         self.assertEqual(self.stub.queries, [SearchQuery(text="кот", limit=3)])
 
@@ -315,7 +338,19 @@ class SearchHttpTest(unittest.TestCase):
         self.assertIsNone(cli.search_over_http(settings, "кот", 3))
 
     def test_run_search_prefers_http(self):
-        result = SearchResult(query="кот", hits=(SearchHit("doc-1", 0, 0.5),))
+        result = SearchResult(
+            query="кот",
+            hits=(
+                SearchHit(
+                    "doc-1",
+                    0,
+                    0.5,
+                    area="personal",
+                    source_path="/notes/a.md",
+                    filename="a.md",
+                ),
+            ),
+        )
         out = io.StringIO()
         with (
             mock.patch.object(cli, "search_over_http", return_value=result),
@@ -327,6 +362,7 @@ class SearchHttpTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         local.assert_not_called()
         self.assertIn("морфология: 1, семантика: 0", out.getvalue())
+        self.assertIn("/notes/a.md (personal)", out.getvalue())
 
     def test_run_search_falls_back_to_local(self):
         result = SearchResult(query="кот", semantic_hits=(SearchHit("d", 0, 0.5),))

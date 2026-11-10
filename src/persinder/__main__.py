@@ -714,6 +714,10 @@ def _json_float(value: object) -> float:
     return float(value)
 
 
+def _json_opt_str(value: object) -> str:
+    return "" if value is None else _json_str(value)
+
+
 def _hits_from_json(raw: object) -> tuple[SearchHit, ...]:
     """Разобрать список хитов ответа ``GET /search``; ошибка — ``ValueError``."""
     if not isinstance(raw, list):
@@ -730,6 +734,9 @@ def _hits_from_json(raw: object) -> tuple[SearchHit, ...]:
                 chunk_index=_json_int(data["chunk_index"]),
                 score=_json_float(data["score"]),
                 context=None if context is None else _json_str(context),
+                area=_json_opt_str(data.get("area")),
+                source_path=_json_opt_str(data.get("source_path")),
+                filename=_json_opt_str(data.get("filename")),
             )
         )
     return tuple(hits)
@@ -790,6 +797,12 @@ def _local_search(
         store.close()
 
 
+def _hit_source(hit: SearchHit) -> str:
+    """Источник для строки результата: путь (или имя) и область."""
+    label = hit.source_path or hit.filename or hit.document_id
+    return f"{label} ({hit.area})" if hit.area else label
+
+
 def _print_search_result(result: SearchResult) -> None:
     print(f"морфология: {len(result.hits)}, семантика: {len(result.semantic_hits)}")
     for kind, hits in (
@@ -798,7 +811,8 @@ def _print_search_result(result: SearchResult) -> None:
     ):
         for hit in hits:
             print(
-                f"  [{kind}] {hit.document_id} чанк {hit.chunk_index} = {hit.score:.4f}"
+                f"  [{kind}] {_hit_source(hit)} "
+                f"чанк {hit.chunk_index} = {hit.score:.4f}"
             )
 
 

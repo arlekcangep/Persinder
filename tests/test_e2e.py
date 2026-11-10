@@ -85,6 +85,10 @@ class EndToEndTest(unittest.TestCase):
         self.assertTrue(hits)
         self.assertIn(hits[0]["document_id"], {doc_id})
         self.assertEqual(hits[0]["chunk_index"], 0)
+        # источник: area и имя файла; путь пуст — это HTTP-вставка (виртуальный)
+        self.assertEqual(hits[0]["area"], "personal")
+        self.assertEqual(hits[0]["filename"], "note.md")
+        self.assertEqual(hits[0]["source_path"], "")
         # модуль 3: семантический слой — отдельное поле; до эмбеддингов пуст
         self.assertIn("semantic_hits", result)
         self.assertEqual(result["semantic_hits"], [])

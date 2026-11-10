@@ -150,6 +150,14 @@ class MetaStore(Protocol):
         """Все источники (для удаления сайдкаров модели)."""
         ...
 
+    def sources_for_docs(self, doc_ids: list[str]) -> list[SourceRow]:
+        """Источники документов (area, filename, source_path) для результатов поиска.
+
+        У документа может быть несколько источников; порядок — реальные файлы
+        раньше виртуальных (``source_path = ''``), затем по порядку добавления.
+        """
+        ...
+
     def put_embeddings(
         self, model: str, rows: list[tuple[str, int, bytes]]
     ) -> list[int]:
