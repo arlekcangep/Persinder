@@ -23,6 +23,7 @@ from __future__ import annotations
 import time
 import unittest
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -31,6 +32,7 @@ from persinder.embed import (
     EmbedWorker,
     PlaceholderEmbedder,
     file_sidecar_path,
+    pack_f16_vectors,
     read_sidecar,
 )
 from persinder.ingest import IngestService
@@ -46,9 +48,11 @@ from persinder.sources import (
 )
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
+from persinder.vectorindex import UsannIndex
 
 POLL = 0.2  # интервал скана watcher'а в тестах
 SETTLE = 0.6  # сколько ждать после старта watcher'а
+MODEL = "placeholder-v1"  # модель эмбеддингов в этих тестах
 
 
 class WatcherEmbedE2ETest(unittest.TestCase):
@@ -94,8 +98,21 @@ class WatcherEmbedE2ETest(unittest.TestCase):
     def _pending(self) -> int:
         return self.store.counts()["pending_embeddings"]
 
-    def _run_watcher(self, journal: Journal, duration: float = SETTLE) -> list[str]:
-        """Запустить watcher на время, собрать отпечатки всех сканов."""
+    def _ann_size(self) -> int:
+        """Сколько ключей в ANN-индексе (должно совпадать с таблицей)."""
+        return UsannIndex(self.data / "ann" / f"{MODEL}.usearch", dim=384).size
+
+    def _run_watcher(
+        self,
+        journal: Journal,
+        duration: float = SETTLE,
+        during: Callable[[], None] | None = None,
+    ) -> list[str]:
+        """Запустить watcher на время, собрать отпечатки всех сканов.
+
+        ``during`` выполняется, пока сервис работает, — так проверяются
+        сценарии «файл изменился на живом сервисе», а не между запусками.
+        """
         prints: list[str] = []
 
         def on_events(result: ScanResult):
@@ -117,6 +134,9 @@ class WatcherEmbedE2ETest(unittest.TestCase):
         watcher = Watcher((self.area,), self.watch, on_events, journal=journal)
         watcher.start()
         time.sleep(duration)
+        if during is not None:
+            during()
+            time.sleep(duration)
         watcher.stop()
         return prints
 
@@ -195,20 +215,53 @@ class WatcherEmbedE2ETest(unittest.TestCase):
             )
 
     def test_modified_file_is_reindexed(self):
-        """Изменённый файл переиндексируется; сайдкар обновляется."""
-        self._write("note.md", "версия один про котиков")
+        """Файл правится при живом watcher'е: индекс переезжает целиком.
+
+        Раньше здесь проверялось только «документов по-прежнему один» — такой
+        тест проходит и когда новый текст не попал в поиск, а векторы, ключи
+        ANN и сайдкар остались от прежнего содержимого. Теперь сверяются все
+        производные, и правка делается, пока сервис запущен.
+        """
+        source = self._write("note.md", "версия один про котиков и собак")
         journal = Journal(self.data / "journal.jsonl")
         self._run_watcher(journal)
         self._drain_embeddings()
-        self.assertEqual(self.store.counts()["documents"], 1)
+        old_id = self.store.source_document(Area.PERSONAL.value, "note.md")
+        self.assertIsNotNone(old_id)
+        self.assertEqual(len(self.store.search_morph("котиков")), 1)
 
-        time.sleep(0.05)  # иной mtime_ns
-        self._write("note.md", "версия два про флакс и глубокое обучение")
-        self._run_watcher(journal)
-        # либо indexed=1 (сразу), либо modified прошёл через те же события
-        self.assertEqual(self.store.counts()["documents"], 1)
+        time.sleep(0.05)  # иной mtime_ns — иначе правку не видно
+
+        def _edit() -> None:
+            self._write("note.md", "версия два про флакс")
+
+        self._run_watcher(journal, during=_edit)
         self._drain_embeddings()
-        self.assertEqual(self._pending(), 0)
+
+        new_id = self.store.source_document(Area.PERSONAL.value, "note.md")
+        assert new_id is not None, "после правки у файла должен быть документ"
+        self.assertNotEqual(new_id, old_id, "doc_id — хэш содержимого")
+        self.assertEqual(self.store.counts()["documents"], 1)
+        # 1. Морфология: старый текст ушёл, новый на месте.
+        self.assertEqual(self.store.search_morph("котиков"), [])
+        self.assertEqual(len(self.store.search_morph("флакс")), 1)
+        # 2. Векторов старой версии не осталось.
+        assert old_id is not None
+        self.assertEqual(self.store.embeddings_for_doc(MODEL, old_id), [])
+        chunks = self.store.counts()["chunks"]
+        self.assertEqual(self.store.count_embeddings(MODEL), chunks)
+        # 3. Ключи ANN совпадают с таблицей — старых нет.
+        self.assertEqual(self._ann_size(), chunks, "в ANN остались ключи старой версии")
+        # 4. Сайдкар пересчитан от нового содержимого, а не оставлен старым.
+        sidecar = read_sidecar(file_sidecar_path(source, MODEL))
+        assert sidecar is not None, "сайдкар должен перечитаться"
+        rows = self.store.embeddings_for_doc(MODEL, new_id)
+        self.assertEqual(len(sidecar.chunks), len(rows))
+        self.assertEqual(
+            pack_f16_vectors([list(sidecar.chunks[0].vector)], PlaceholderEmbedder.dim),
+            bytes(rows[0]["vector"]),
+            "вектор в сайдкаре тот же, что в таблице",
+        )
 
     def test_deleted_file_cleans_document_and_sidecar(self):
         """Удалённый файл убирает документ, сырой текст и сайдкар."""

@@ -87,6 +87,120 @@ def _count_pdr(folder: Path) -> int:
     return sum(1 for _ in folder.rglob("*.pdr"))
 
 
+def _find_docs(conn: sqlite3.Connection, needle: str) -> list[sqlite3.Row]:
+    """Документы по подстроке пути/имени, иначе — по тексту чанка (со стемом)."""
+    sql = (
+        "SELECT DISTINCT d.id, s.area, s.source_path, s.filename, d.char_count"
+        " FROM documents d JOIN document_sources s ON s.doc_id = d.id"
+        " WHERE s.source_path LIKE ? OR s.filename LIKE ?"
+    )
+    rows = conn.execute(sql, (f"%{needle}%", f"%{needle}%")).fetchall()
+    if rows:
+        return rows
+    from persinder.morphology import default_stemmer
+
+    stem = " ".join(default_stemmer().stem([needle])) or needle
+    try:
+        ids = [
+            str(row["doc_id"])
+            for row in conn.execute(
+                "SELECT DISTINCT doc_id FROM chunks_fts WHERE chunks_fts MATCH ?",
+                (f'"{stem}"*',),
+            )
+        ]
+    except sqlite3.OperationalError:
+        return []
+    if not ids:
+        return []
+    marks = ",".join("?" for _ in ids)
+    return conn.execute(
+        "SELECT DISTINCT d.id, s.area, s.source_path, s.filename, d.char_count"
+        " FROM documents d JOIN document_sources s ON s.doc_id = d.id"
+        f" WHERE d.id IN ({marks})",
+        ids,
+    ).fetchall()
+
+
+def _score_doc(
+    conn: sqlite3.Connection,
+    doc_id: str,
+    model: str,
+    query: str,
+    models_dir: Path,
+) -> None:
+    """Лучший косинус документа и его позиция в корпусе — на реальной модели."""
+    from persinder.embed import build_embedder, unpack_f16_vectors
+
+    embedder = build_embedder(models_dir, model)
+    query_vector = embedder.embed_query([query])[0]
+    dim = embedder.dim
+    lengths: dict[int, int] = {}
+    for row in conn.execute(
+        "SELECT chunk_index, char_start, char_end FROM chunks WHERE doc_id = ?",
+        (doc_id,),
+    ):
+        lengths[int(row["chunk_index"])] = int(row["char_end"]) - int(row["char_start"])
+
+    own: dict[int, float] = {}
+    for row in conn.execute(
+        "SELECT chunk_index, vector FROM embeddings WHERE model = ? AND doc_id = ?",
+        (model, doc_id),
+    ):
+        vector = unpack_f16_vectors(bytes(row["vector"]), dim)[0]
+        own[int(row["chunk_index"])] = sum(
+            a * b for a, b in zip(query_vector, vector, strict=True)
+        )
+    if not own:
+        print("    score: векторов под моделью поиска нет — считать нечего")
+        return
+    best_index = max(own, key=lambda index: own[index])
+    best = own[best_index]
+
+    above = 0
+    for row in conn.execute(
+        "SELECT vector FROM embeddings WHERE model = ? AND doc_id != ?",
+        (model, doc_id),
+    ):
+        vector = unpack_f16_vectors(bytes(row["vector"]), dim)[0]
+        score = sum(a * b for a, b in zip(query_vector, vector, strict=True))
+        if score > best:
+            above += 1
+
+    print(f"    запрос {query!r}: лучший косинус {best:.4f}")
+    print(
+        f"      чанк {best_index}, длина {lengths.get(best_index, '?')} симв.;"
+        f" чанков в документе: {len(own)}"
+    )
+    if lengths:
+        print(
+            f"      длины чанков: мин {min(lengths.values())},"
+            f" макс {max(lengths.values())} симв."
+        )
+    print(
+        f"      чанков корпуса с косинусом выше: {above}"
+        f" → документ примерно на позиции {above + 1} в семантическом рейтинге"
+    )
+    position = above + 1
+    chunk_max = max(lengths.values()) if lengths else 0
+    if position <= 5:
+        print(
+            "      ВЫВОД: документ в топ-5 семантики — поиск обязан его"
+            " показывать (если нет, смотри лимиты слоя и min_score)."
+        )
+    elif best < 0.85 and chunk_max > 600:
+        print(
+            "      ВЫВОД: фраза лежит в длинном чанке, а у e5 короткий запрос"
+            " против 1000+ символов даёт ~0.82 и у релевантного, и у фона:"
+            " документ в индексе, но его обгоняет шум. Это про ранжирование"
+            " (cross-encoder / мелкие чанки), а не про потерю данных."
+        )
+    else:
+        print(
+            "      ВЫВОД: документ ниже топа при нормальном косинусе —"
+            " проверь min_score и лимит семантического слоя."
+        )
+
+
 def _explain_doc(
     conn: sqlite3.Connection,
     needle: str,
@@ -95,16 +209,12 @@ def _explain_doc(
     areas: tuple[AreaConfig, ...],
     models: ModelState,
     ann_dir: Path,
+    query: str | None = None,
 ) -> None:
-    """Почему документ не находится семантикой: векторы, сайдкар, скоуп, ANN."""
+    """Разбор документа: векторы, сайдкар, скоуп, ANN и его место в рейтинге."""
     print()
-    print(f"Документ по подстроке {needle!r}:")
-    rows = conn.execute(
-        "SELECT d.id, s.area, s.source_path, s.filename, d.char_count"
-        " FROM documents d JOIN document_sources s ON s.doc_id = d.id"
-        " WHERE s.source_path LIKE ? OR s.filename LIKE ?",
-        (f"%{needle}%", f"%{needle}%"),
-    ).fetchall()
+    print(f"Документ по подстроке {needle!r} (путь/имя, иначе текст чанка):")
+    rows = _find_docs(conn, needle)
     if not rows:
         print("  не найден в БД: файл не проиндексирован (или другой home).")
         return
@@ -168,27 +278,30 @@ def _explain_doc(
             state = "входит" if inside else "ВНЕ"
             print(f"    скоуп модели {search_model}: {state}")
 
+        if query:
+            _score_doc(conn, doc_id, search_model, query, settings.models_dir)
+
         if vectors.get(search_model, 0) < chunks:
             print(
-                "    ПРИЧИНА: векторов под моделью поиска меньше, чем чанков:"
-                " документ не эмбеддился этой моделью (смотри отпечаток сайдкара)."
-                " Чинится точечно для документа, без переиндексации корпуса."
+                "    ВНИМАНИЕ: в таблице меньше векторов, чем чанков —"
+                " сайдкар покрывает больше, чем лежит в БД."
             )
         elif scope is not None and not inside:
             print(
-                "    ПРИЧИНА: документ вне скоупа модели — проверь path области"
+                "    ВНИМАНИЕ: документ вне скоупа модели — проверь path области"
                 " в конфиге (та же раскладка путей, что в source_path)."
             )
         elif ann_size is not None and ann_size < total_vectors:
             print(
-                f"    ПРИЧИНА: в ANN {ann_size} ключей при {total_vectors} векторах"
-                " в таблице. `persinder ann rebuild` — это сборка индекса из"
-                " готовых векторов, без пересчёта эмбеддингов."
+                f"    ВНИМАНИЕ: в ANN {ann_size} ключей при {total_vectors} векторах"
+                " в таблице. `persinder ann rebuild` — сборка индекса из готовых"
+                " векторов, без пересчёта эмбеддингов."
             )
-        else:
+        elif not query:
             print(
-                "    Векторы и скоуп в порядке: документ должен находиться"
-                " семантикой (смотри его score при большом --semantic-limit)."
+                "    Векторы, сайдкар, скоуп и ANN согласованы: документ в"
+                ' индексе. Добавь --query "слово", чтобы увидеть его косинус'
+                " и место в рейтинге."
             )
 
 
@@ -199,8 +312,14 @@ def main() -> int:
     parser.add_argument(
         "--doc",
         default=None,
-        help="подстрока пути/имени файла: разобрать, почему документ "
-        "не находится семантикой (только чтение)",
+        help="подстрока пути/имени файла или слова из текста: разобрать,"
+        " почему документ не находится семантикой (только чтение)",
+    )
+    parser.add_argument(
+        "--query",
+        default=None,
+        help="запрос для замера: показать лучший косинус документа и его место"
+        " в рейтинге (нужна установленная модель)",
     )
     args = parser.parse_args()
 
@@ -374,7 +493,14 @@ def main() -> int:
             print(f"  {log_path} — там будет настоящая причина.")
         if args.doc:
             _explain_doc(
-                conn, args.doc, home, settings, areas, models, settings.ann_dir
+                conn,
+                args.doc,
+                home,
+                settings,
+                areas,
+                models,
+                settings.ann_dir,
+                args.query,
             )
         if empty_paths and models.embedding != "placeholder-v1":
             print("  есть пустые source_path — запусти scripts/fix_source_paths.py")

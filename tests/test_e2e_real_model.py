@@ -24,7 +24,7 @@ from persinder.morphology import default_stemmer
 from persinder.search import SearchQuery, SearchService
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
-from persinder.vectorindex import VectorSearch
+from persinder.vectorindex import UsannIndex, VectorSearch
 
 MODEL = "e5-small-int8-v1"
 
@@ -132,6 +132,37 @@ class RealModelSearchTest(unittest.TestCase):
         stale.write_bytes(b"")
         hits = self.search.search(query).semantic_hits
         self.assertEqual(hits[0].document_id, doc_id, "точный скан спасает")
+
+    def test_live_edit_moves_semantics_to_new_text(self):
+        """Файл поправили при работающем сервисе: семантика едет за новым текстом.
+
+        Так выглядит пользовательский сценарий: заметку дописали в редакторе,
+        watcher переиндексировал файл. Новое содержимое — новый ``doc_id``
+        (хэш текста), и вместе с ним должны переехать чанки, векторы, ключи
+        ANN и сайдкар. Если хоть одно звено осталось от старой версии, поиск
+        по смыслу будет искать по устаревшему тексту.
+        """
+        v1 = self._ingest("note.txt", "заметка про котиков и собак")
+        self._embed()
+        first = self.search.search(SearchQuery(text="котики", semantic_limit=5))
+        self.assertEqual(first.semantic_hits[0].document_id, v1)
+
+        v2 = self._ingest("note.txt", "жил был медведь, он приходил к пасеке за мёдом")
+        self._embed()
+
+        self.assertNotEqual(v2, v1, "новая версия — новый doc_id")
+        self.assertEqual(self.store.counts()["documents"], 1)
+        self.assertEqual(
+            self.search.search(SearchQuery(text="котики", morph_limit=5)).hits, ()
+        )
+        hits = self.search.search(SearchQuery(text="медвежонок", semantic_limit=5))
+        self.assertEqual(hits.semantic_hits[0].document_id, v2)
+        self.assertGreater(hits.semantic_hits[0].score, 0.8)
+        # Производные согласованы: чанки = векторы = ключи ANN.
+        chunks = self.store.counts()["chunks"]
+        ann = UsannIndex(self.settings.ann_dir / f"{MODEL}.usearch", self.embedder.dim)
+        self.assertEqual(self.store.count_embeddings(MODEL), chunks)
+        self.assertEqual(ann.size, chunks, "в ANN остались ключи старой версии")
 
     def _vector_blob(self, text: str) -> bytes:
         from persinder.embed import pack_f16_vectors
