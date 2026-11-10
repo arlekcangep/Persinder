@@ -60,6 +60,33 @@ areas:
         self.assertEqual(watch.debounce, 2.0)
         self.assertEqual(watch.ignore, ())
 
+    def test_formats_preserved_not_normalized(self):
+        # имена форматов не схлопываются в классы: markdown остаётся markdown,
+        # чтобы реестр мог ограничить класс только этим форматом
+        cfg_path = self._write(
+            f"""
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+    formats: [markdown, structure-text]
+"""
+        )
+        known = frozenset({"markdown", "structure-text"})
+        areas, _ = load_config(cfg_path, known_formats=known)
+        self.assertEqual(areas[0].formats, ("markdown", "structure-text"))
+
+    def test_unknown_format_rejected(self):
+        cfg_path = self._write(
+            f"""
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+    formats: [nope]
+"""
+        )
+        with self.assertRaises(ConfigError):
+            load_config(cfg_path, known_formats=frozenset({"markdown"}))
+
     def test_bad_role(self):
         cfg_path = self._write(
             f"""

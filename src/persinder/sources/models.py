@@ -27,7 +27,7 @@ class AreaConfig:
     recursive: bool = True
     formats: tuple[
         str, ...
-    ] = ()  # имена классов экстракторов; пусто — не индексировать
+    ] = ()  # класс (весь класс) или конкретный формат; пусто — не индексировать
 
 
 @dataclass(frozen=True)

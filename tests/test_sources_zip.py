@@ -402,6 +402,24 @@ class RegistryArchiveTest(unittest.TestCase):
         assert parts is not None
         self.assertEqual([part.name for part in parts], ["b.txt"])
 
+    def test_format_name_restricts_class_inside_archive(self):
+        # только markdown из структурированного текста: html-запись пропускается
+        path = self._zip(
+            "a.zip",
+            {
+                "a.md": "# заголовок",
+                "b.html": "<html><body>html-текст</body></html>",
+            },
+        )
+        reg = default_registry()
+        only_md = reg.extract(path, self._area(("archive", "markdown")))
+        assert only_md is not None
+        self.assertEqual([part.name for part in only_md], ["a.md"])
+        # имя класса structure-text включает обе записи
+        whole = reg.extract(path, self._area(("archive", "structure-text")))
+        assert whole is not None
+        self.assertEqual(sorted(part.name for part in whole), ["a.md", "b.html"])
+
     def test_plain_file_extract_is_single_part(self):
         path = self.root / "note.md"
         path.write_text("#tag заметка", encoding="utf-8")

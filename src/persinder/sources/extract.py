@@ -10,7 +10,8 @@
 - **Реестр** ``ExtractorRegistry`` при обработке файла **опрашивает все
   экстракторы**, передавая им расширение и класс контента; откликнувшиеся
   запускаются **один за другим**. Конфиг области (``AreaConfig.formats``) —
-  белый список **классов**.
+  белый список: имя **класса** включает весь класс, имя **конкретного формата**
+  (``markdown``, ``pdf``) — только его.
 - Контейнер (``ArchiveExtractor``) раскрывает записи через ту же
   классификацию по байтам (``_AreaEntryResolver``).
 
@@ -797,8 +798,9 @@ class ExtractorRegistry:
     регистрируются явно. При обработке файла реестр (1) классифицирует
     содержимое (``classify``), (2) **опрашивает все экстракторы**, передавая
     расширение и совпадения классов, (3) запускает откликнувшихся по очереди.
-    Список классов области (``AreaConfig.formats``) — белый список: экстрактор
-    работает, только если его ``format_class`` в нём.
+    Белый список области (``AreaConfig.formats``) содержит либо **класс**
+    (``structure-text`` — весь класс), либо **конкретный формат**
+    (``markdown`` — только он; см. ``_is_enabled``).
     """
 
     def __init__(
@@ -825,13 +827,14 @@ class ExtractorRegistry:
         self._classifiers = classifiers or default_classifiers()
 
     def known_names(self) -> frozenset[str]:
-        """Доступные в конфиге имена: классы + легаси-имена экстракторов.
+        """Доступные в конфиге имена: классы + зарезервированные + форматы.
 
-        Возвращается общее множество, чтобы старые конфиги (``formats:
-        [markdown, …]``) продолжали валидироваться; ``load_config`` нормализует
-        легаси-имена в классы (см. ``CLASS_ALIASES``).
+        Возвращается общее множество имён экстракторов, классов,
+        зарезервированных классов и легаси-алиасов, чтобы ``load_config``
+        валидировал и классы (``structure-text``), и конкретные форматы
+        (``markdown``, ``pdf``).
         """
-        return frozenset(self._classes | RESERVED | set(CLASS_ALIASES))
+        return frozenset(self._names | self._classes | RESERVED | set(CLASS_ALIASES))
 
     def known_classes(self) -> frozenset[str]:
         """Классы этого реестра (без легаси-алиасов)."""
@@ -846,11 +849,10 @@ class ExtractorRegistry:
         area: AreaConfig,
     ) -> list[Extractor]:
         """Обычные экстракторы области, откликнувшиеся на (расширение + классы)."""
-        enabled = self._enabled_classes(area)
         return [
             extractor
             for extractor in self._extractors
-            if extractor.format_class in enabled
+            if self._is_enabled(extractor, area)
             and extractor.responds(extension, matches)
         ]
 
@@ -861,9 +863,8 @@ class ExtractorRegistry:
         area: AreaConfig,
     ) -> ContainerExtractor | None:
         """Контейнер области, откликнувшийся на (расширение + классы)."""
-        enabled = self._enabled_classes(area)
         for container in self._containers:
-            if container.format_class in enabled and container.responds(
+            if self._is_enabled(container, area) and container.responds(
                 extension, matches
             ):
                 return container
@@ -874,15 +875,19 @@ class ExtractorRegistry:
         return _AreaEntryResolver(self, area, self._classifiers)
 
     @staticmethod
-    def _enabled_classes(area: AreaConfig) -> frozenset[str]:
-        """Классы области с нормализацией легаси-имён экстракторов.
+    def _is_enabled(
+        extractor: Extractor | ContainerExtractor, area: AreaConfig
+    ) -> bool:
+        """Включён ли экстрактор в области.
 
-        ``AreaConfig.formats`` создаётся из конфига уже классами (``load_config``
-        применяет ``CLASS_ALIASES``); но область могут построить напрямую со
-        старыми именами (``markdown``, ``html``, ``pdf``…) — здесь они
-        приводятся к классам, чтобы конфиги до перехода продолжали работать.
+        ``AreaConfig.formats`` может называть:
+        - **класс** (``structure-text``) — тогда работает весь класс
+          (md+html+mhtml), различаясь по подтипу/расширению;
+        - **конкретный формат** (``markdown``, ``pdf``) — тогда из всего класса
+          работает только он (``[markdown]`` не индексирует html).
         """
-        return frozenset(CLASS_ALIASES.get(f, f) for f in area.formats)
+        names = frozenset(area.formats)
+        return extractor.format_class in names or extractor.name in names
 
     # --- main вход: файл области → части ---
 

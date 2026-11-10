@@ -12,7 +12,6 @@ from typing import cast
 import yaml
 
 from ..domain import Area
-from .extract import CLASS_ALIASES
 from .models import AreaConfig, WatchConfig
 
 
@@ -40,15 +39,21 @@ def load_config(
         areas:
           - path: ~/Obsidian/Personal
             role: personal
-            formats: [text, structure-text]   # классы экстракторов
+            formats: [text, structure-text]   # классы / конкретные форматы
         watch:
           poll_interval: 30
           debounce: 2
           ignore: ["**/drafts/**"]
 
-    ``known_formats`` — имена доступных **классов** (и легаси-имена экстракторов,
-    которые нормализуются в классы); если задан, неизвестное имя в ``formats`` —
-    ошибка конфига.
+    ``formats`` — имена **классов** (``text``, ``structure-text``,
+    ``pub-formats``, ``archive``…) либо **конкретных форматов** (``markdown``,
+    ``html``, ``pdf``…). Имя класса включает весь класс, имя формата — только
+    его (``[structure-text]`` индексирует md+html+mhtml, ``[markdown]`` —
+    только markdown).
+
+    ``known_formats`` — доступные имена: классы, зарезервированные классы и
+    легаси-имена форматов; если задан, неизвестное имя в ``formats`` — ошибка
+    конфига.
 
     Относительные пути ``path`` считаются от каталога, где лежит конфиг, —
     профиль переносим между машинами.
@@ -96,10 +101,8 @@ def load_config(
                     f"areas[{i}].formats: неизвестные форматы {sorted(unknown)} "
                     f"(доступно: {sorted(known_formats)})"
                 )
-        # Конфиг называет классы; старые имена экстракторов нормализуются в
-        # классы (например ``markdown`` → ``structure-text``), чтобы конфиги
-        # до перехода не ломались.
-        formats = tuple(CLASS_ALIASES.get(f, f) for f in formats)
+        # Имена не нормализуются: класс включает весь класс, конкретный формат —
+        # только себя (разбор — в ExtractorRegistry._is_enabled).
         area = AreaConfig(
             path=_expand(path_raw),
             role=role,

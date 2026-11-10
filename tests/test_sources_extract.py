@@ -45,8 +45,9 @@ class RegistryTest(unittest.TestCase):
         # зарезервированные под будущее классы валидны в конфиге
         self.assertIn("ocr", names)
         self.assertIn("science", names)
-        # легаси-имена экстракторов тоже принимаются (нормализуются в классы)
+        # легаси-имена конкретных форматов тоже принимаются
         self.assertIn("markdown", names)
+        self.assertIn("fb2", names)
 
     def test_md_resolved_to_markdown_structure_text(self):
         reg = default_registry()
@@ -64,6 +65,44 @@ class RegistryTest(unittest.TestCase):
         only_struct = area(self.root, ("structure-text",))
         self.assertIsNotNone(reg.extract(md_path, only_struct))
         self.assertIsNone(reg.extract(txt_path, only_struct))
+
+    def test_class_name_enables_whole_class(self):
+        # имя класса structure-text включает md и html
+        reg = default_registry()
+        md_path = self._write("a.md", "# Заголовок")
+        html_path = self._write("a.html", "<html><body>привет</body></html>")
+        whole = area(self.root, ("structure-text",))
+        self.assertIsNotNone(reg.extract(md_path, whole))
+        self.assertIsNotNone(reg.extract(html_path, whole))
+
+    def test_format_name_restricts_to_single_format(self):
+        # имя формата markdown/HTML включает только его из всего класса
+        reg = default_registry()
+        md_path = self._write("a.md", "# Заголовок")
+        html_path = self._write("a.html", "<html><body>привет</body></html>")
+
+        only_md = area(self.root, ("markdown",))
+        self.assertIsNotNone(reg.extract(md_path, only_md))
+        self.assertIsNone(reg.extract(html_path, only_md))
+
+        only_html = area(self.root, ("html",))
+        self.assertIsNone(reg.extract(md_path, only_html))
+        self.assertIsNotNone(reg.extract(html_path, only_html))
+
+    def test_format_name_restricts_pub_formats(self):
+        # fb2 — конкретный формат класса pub-formats: только он, без text
+        reg = default_registry()
+        fb2_path = self._write(
+            "a.fb2",
+            "<?xml version='1.0'?><FictionBook xmlns='x'>"
+            "<body><p>fb2 текст</p></body></FictionBook>",
+        )
+        txt_path = self._write("a.txt", "обычный текст")
+        only_fb2 = area(self.root, ("fb2",))
+        self.assertIsNotNone(reg.extract(fb2_path, only_fb2))
+        self.assertIsNone(reg.extract(txt_path, only_fb2))
+        # класс pub-formats по-прежнему включает fb2
+        self.assertIsNotNone(reg.extract(fb2_path, area(self.root, ("pub-formats",))))
 
     def test_empty_formats_disables_area(self):
         reg = default_registry()
