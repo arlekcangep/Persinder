@@ -48,11 +48,11 @@ Docker. Сама модель эмбеддингов (~120 МБ) — не в п�
 # тесты
 PYTHONPATH=src python3 -m unittest discover -s tests
 
-# запуск сервиса приёма (модуль 1)
-PYTHONPATH=src python3 -m persinder --data-dir ~/.persinder --port 8756
+# единый сервис: HTTP (приём+поиск) + watcher + эмбеддинги; Ctrl+C — стоп
+PYTHONPATH=src python3 -m persinder serve --config persinder.yaml --home ~/.persinder
 
-# эмбеддинги по требованию: очередь → векторы → сайдкары (модуль 2)
-PYTHONPATH=src python3 -m persinder embed --data-dir ~/.persinder
+# только эмбеддинги по требованию: очередь → векторы → сайдкары (модуль 2)
+PYTHONPATH=src python3 -m persinder embed --home ~/.persinder
 
 # модель эмбеддингов: установка и переключение (D24)
 PYTHONPATH=src python3 -m persinder model install e5-small-int8-v1   # веса + миграция в очередь
@@ -75,7 +75,7 @@ curl -s -X POST localhost:8756/ingest \
 Реализованы **модуль 1** (`ingest` — приём текста, морфологический слой FTS5,
 журнал вызовов, инлайн-удаление), **модуль 2** (`embed` — воркер очереди:
 текст → векторы → сайдкары, реестр моделей и явный модель-менеджмент) и
-**модуль 3** (`vectorindex` — семантический поиск: ANN USearch `data_dir/ann/`
+**модуль 3** (`vectorindex` — семантический поиск: ANN USearch `home/ann/`
 поверх таблицы `embeddings`, точный скан таблицы как фолбэк).
 Эмбеддер — реальная модель e5-small (ONNX INT8, `persinder model install`)
 или детерминированная заглушка (`placeholder-v1`, встроена). У файла живут
@@ -84,7 +84,9 @@ curl -s -X POST localhost:8756/ingest \
 `persinder model use`; удаление `persinder model remove` убирает веса, все
 сайдкары и векторы модели в один момент. Векторный поиск идёт активной
 поисковой моделью (`model use`), в ответе `/search` семантические хиты —
-отдельным полем `semantic_hits` рядом с `hits`. Векторный поиск идёт по
+отдельным полем `semantic_hits` рядом с `hits`. У каждого хита есть поле
+`context` — текст чанка вместе с тремя строками до и тремя после (по сырому
+тексту документа; `null`, если текст недоступен). Векторный поиск идёт по
 USearch-индексу (mmap-файл на модель, `persinder ann rebuild` пересобирает);
 единое ранжирование (D16) — следующий шаг. Карта и интерфейсы — в
 `docs/modules.md`.

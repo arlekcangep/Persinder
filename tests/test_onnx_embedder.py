@@ -1,7 +1,7 @@
 """Тесты OnnxEmbedder (ONNX e5-small INT8) — реальная модель.
 
 Модель-зависимые тесты пропускаются, если каталог пуст (скачать:
-``PERSINDER_MODEL_DIR=… python scripts/download_model.py``). Тест на
+``persinder download_model --home …``). Тест на
 отсутствие модели — наоборот, модели не требует и бежит всегда.
 """
 
@@ -13,6 +13,7 @@ from pathlib import Path
 
 from persinder.config import Settings
 from persinder.embed import OnnxEmbedder
+from persinder.embed.onnx import _BATCH_SIZE  # pyright: ignore[reportPrivateUsage]
 
 
 def model_dir() -> Path:
@@ -75,6 +76,65 @@ class OnnxEmbedderNoModelTest(unittest.TestCase):
 
     def test_available_false_on_empty_dir(self) -> None:
         self.assertFalse(OnnxEmbedder.available(Path("/несуществующий/каталог/модели")))
+
+
+class _FakeEncoded:
+    def __init__(self, ids: list[int]) -> None:
+        self.ids = ids
+
+
+class _FakeTokenizer:
+    def __init__(self) -> None:
+        self._n = 0
+
+    def encode(self, text: str) -> _FakeEncoded:
+        self._n += 1
+        length = (self._n % 17) + 3  # разные длины, но всегда < 512
+        return _FakeEncoded(list(range(1, length + 1)))
+
+
+class _FakeSession:
+    """Записывает размеры батчей; возвращает hidden-состояние нужной формы."""
+
+    def __init__(self) -> None:
+        self.batch_sizes: list[int] = []
+        self.lengths: list[int] = []
+
+    def run(self, outputs: object, feeds: dict[str, list[list[int]]]) -> object:
+        input_ids = feeds["input_ids"]
+        batch = len(input_ids)
+        length = len(input_ids[0])
+        self.batch_sizes.append(batch)
+        self.lengths.append(length)
+        hidden = [[[1.0] * 384 for _ in range(length)] for _ in range(batch)]
+        return [hidden]
+
+
+class OnnxEmbedderBatchingTest(unittest.TestCase):
+    """Мини-батчи: большой список текстов не идёт в модель одним куском."""
+
+    def test_batch_is_capped(self) -> None:
+        session = _FakeSession()
+        embedder = OnnxEmbedder.__new__(OnnxEmbedder)
+        embedder._tokenizer = _FakeTokenizer()  # pyright: ignore[reportPrivateUsage]
+        embedder._session = session  # pyright: ignore[reportPrivateUsage]
+        vectors = embedder.embed(["текст"] * 40)
+        self.assertEqual(len(vectors), 40)
+        self.assertGreater(len(session.batch_sizes), 1)
+        for size in session.batch_sizes:
+            self.assertLessEqual(
+                size, _BATCH_SIZE, "каждый прогон — не больше _BATCH_SIZE"
+            )
+
+    def test_query_path_batches_too(self) -> None:
+        session = _FakeSession()
+        embedder = OnnxEmbedder.__new__(OnnxEmbedder)
+        embedder._tokenizer = _FakeTokenizer()  # pyright: ignore[reportPrivateUsage]
+        embedder._session = session  # pyright: ignore[reportPrivateUsage]
+        vectors = embedder.embed_query(["запрос"] * 35)
+        self.assertEqual(len(vectors), 35)
+        for size in session.batch_sizes:
+            self.assertLessEqual(size, _BATCH_SIZE)
 
 
 if __name__ == "__main__":

@@ -4,14 +4,24 @@
 — если передан. Пока результаты отдаются отдельными группами; порядок внутри
 группы: точные совпадения → семантика → морфология → тэги (ADR D16) — единый
 рейтинг будет следующим шагом.
+
+Если передан ``TextStore``, каждый хит обогащается контекстом — текстом
+документа вокруг чанка (несколько строк до и после, см. ``context_around``).
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from ..interfaces import MetaStore, Stemmer
+from ..interfaces import MetaStore, Stemmer, TextStore
 from ..morphology import analyze_to_string
+from .context import (
+    DEFAULT_CONTEXT_LINES,
+    DEFAULT_CONTEXT_SENTENCES,
+    context_around,
+    hit_context,
+)
 from .models import SearchHit, SearchQuery, SearchResult
 
 if TYPE_CHECKING:
@@ -26,10 +36,20 @@ class SearchService:
         store: MetaStore,
         stemmer: Stemmer,
         vector_search: VectorSearch | None = None,
+        textstore: TextStore | None = None,
+        context_lines: int = DEFAULT_CONTEXT_LINES,
+        context_sentences: int = DEFAULT_CONTEXT_SENTENCES,
     ) -> None:
+        if context_lines < 0:
+            raise ValueError("число строк контекста не может быть отрицательным")
+        if context_sentences < 0:
+            raise ValueError("число предложений контекста не может быть отрицательным")
         self._store = store
         self._stemmer = stemmer
         self._vector_search = vector_search
+        self._textstore = textstore
+        self._context_lines = context_lines
+        self._context_sentences = context_sentences
 
     def search(self, query: SearchQuery) -> SearchResult:
         text = query.text.strip()
@@ -38,19 +58,72 @@ class SearchService:
 
         semantic: tuple[SearchHit, ...] = ()
         if self._vector_search is not None:
-            semantic = tuple(self._vector_search.search(text, query.limit))
+            semantic = self._with_context(
+                tuple(self._vector_search.search(text, query.limit))
+            )
 
         stemmed = analyze_to_string(text, self._stemmer)
         if not stemmed.strip():
             return SearchResult(query=query.text, semantic_hits=semantic)
 
         rows = self._store.search_morph(stemmed, limit=query.limit)
-        hits = tuple(
-            SearchHit(
-                document_id=row["doc_id"],
-                chunk_index=row["chunk_index"],
-                score=row["score"],
-            )
-            for row in rows
+        hits = self._with_context(
+            tuple(
+                SearchHit(
+                    document_id=row["doc_id"],
+                    chunk_index=row["chunk_index"],
+                    score=row["score"],
+                )
+                for row in rows
+            ),
+            stems=frozenset(stemmed.split()),
         )
         return SearchResult(query=query.text, hits=hits, semantic_hits=semantic)
+
+    def _with_context(
+        self,
+        hits: tuple[SearchHit, ...],
+        stems: frozenset[str] | None = None,
+    ) -> tuple[SearchHit, ...]:
+        """Обогатить хиты контекстом (если есть ``TextStore``).
+
+        Морфологический слой (``stems`` задан): контекст от найденного слова —
+        ``context_sentences`` предложений до и после него. Семантический слой
+        (``stems is None``): строки вокруг чанка — ``context_lines``.
+        """
+        if self._textstore is None or not hits:
+            return hits
+
+        textstore = self._textstore
+        texts: dict[str, str | None] = {}
+        enriched: list[SearchHit] = []
+        for hit in hits:
+            doc_id = hit.document_id
+            if doc_id not in texts:
+                texts[doc_id] = self._read_text(textstore, doc_id)
+            text = texts[doc_id]
+            span = (
+                None
+                if text is None
+                else self._store.chunk_span(doc_id, hit.chunk_index)
+            )
+            if text is None or span is None:
+                enriched.append(hit)
+                continue
+            if stems is None:
+                context = context_around(text, span[0], span[1], self._context_lines)
+            else:
+                context = hit_context(
+                    text, span, stems, self._stemmer, self._context_sentences
+                )
+            enriched.append(replace(hit, context=context))
+        return tuple(enriched)
+
+    def _read_text(self, textstore: TextStore, doc_id: str) -> str | None:
+        """Сырой текст документа; ``None`` — если его нет или он недоступен."""
+        try:
+            if not textstore.exists(doc_id):
+                return None
+            return textstore.read(doc_id)
+        except OSError:
+            return None

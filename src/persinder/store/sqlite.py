@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from ..domain import Chunk, Document, EmbeddingJob, utcnow
@@ -204,12 +205,35 @@ class SqliteStore:
             for row in rows
         ]
 
+    def chunk_span(self, doc_id: str, chunk_index: int) -> tuple[int, int] | None:
+        """Границы чанка в сыром тексте: ``(char_start, char_end)``."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT char_start, char_end FROM chunks "
+                "WHERE doc_id = ? AND chunk_index = ?",
+                (doc_id, chunk_index),
+            ).fetchone()
+        if row is None:
+            return None
+        return (int(row["char_start"]), int(row["char_end"]))
+
     def pending_embeddings(self, limit: int = 100) -> list[EmbeddingQueueItem]:
+        """Задачи на эмбеддинги, малые документы первыми.
+
+        ``ORDER BY`` — по числу невыполненных задач документа, затем по id:
+        один гигантский документ (большой PDF — десятки тысяч чанков) не
+        замораживает очередь, пока считаются мелкие — сайдкары продолжают
+        появляться, а крупный молотится между ними.
+        """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, doc_id, chunk_index, area, source_path, model "
-                "FROM embedding_queue WHERE status = 'pending' "
-                "ORDER BY id LIMIT ?",
+                "FROM embedding_queue "
+                "WHERE status = 'pending' "
+                "ORDER BY (SELECT COUNT(*) FROM embedding_queue q2"
+                "          WHERE q2.status = 'pending'"
+                "          AND q2.doc_id = embedding_queue.doc_id),"
+                "         id LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._queue_item(row) for row in rows]
@@ -303,8 +327,11 @@ class SqliteStore:
                 self._purge_document(old_id)
                 evicted.append(old_id)
         self._conn.execute(
-            "INSERT OR IGNORE INTO document_sources"
-            "(doc_id, area, filename, source_path, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO document_sources"
+            "(doc_id, area, filename, source_path, created_at) VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(doc_id, area, filename) DO UPDATE SET source_path ="
+            " CASE WHEN excluded.source_path != '' THEN excluded.source_path"
+            " ELSE document_sources.source_path END",
             (doc_id, area, filename, source_path, utcnow()),
         )
         return evicted
@@ -345,6 +372,17 @@ class SqliteStore:
                 (area, filename),
             ).fetchone()
         return str(row["source_path"]) if row else ""
+
+    def source_filenames_under(self, area: str, prefix: str) -> list[str]:
+        """Имена источников области, начинающихся с ``prefix`` (части контейнера)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT filename FROM document_sources"
+                " WHERE area = ? AND substr(filename, 1, ?) = ?"
+                " ORDER BY filename",
+                (area, len(prefix), prefix),
+            ).fetchall()
+        return [str(row["filename"]) for row in rows]
 
     def _purge_document(self, doc_id: str) -> None:
         """Удалить документ и все производные строки (нужен открытый `with`)."""
@@ -496,6 +534,39 @@ class SqliteStore:
                         ),
                     )
 
+    def enqueue_missing(
+        self,
+        models: list[str],
+        has_sidecar: Callable[[str, str, str], bool],
+    ) -> None:
+        """Поставить задачи только для источников без сайдкара под моделью.
+
+        То же, что ``enqueue_all``, но уже отработанные источники (сайдкар на
+        месте) в очередь не возвращает. Нужно ``--reindex``: рестарт не должен
+        перезаполнять очередь всем подряд — только тем, чего реально нет.
+        """
+        for model in models:
+            with self._lock, self._conn:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT doc_id, area, source_path FROM document_sources"
+                ).fetchall()
+                for row in rows:
+                    doc_id, area, source_path = (
+                        str(row["doc_id"]),
+                        str(row["area"]),
+                        str(row["source_path"]),
+                    )
+                    if has_sidecar(model, doc_id, source_path):
+                        continue
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO embedding_queue"
+                        "(doc_id, chunk_index, area, source_path, model, "
+                        "status, created_at) "
+                        "SELECT doc_id, chunk_index, ?, ?, ?, 'pending', ?"
+                        " FROM chunks WHERE doc_id = ?",
+                        (area, source_path, model, utcnow(), doc_id),
+                    )
+
     def all_sources(self) -> list[SourceRow]:
         """Все источники (для удаления сайдкаров модели)."""
         with self._lock:
@@ -549,6 +620,21 @@ class SqliteStore:
                 "SELECT id, doc_id, chunk_index, vector FROM embeddings "
                 "WHERE model = ? ORDER BY doc_id, chunk_index",
                 (model,),
+            ).fetchall()
+        return [self._embedding_row(row) for row in rows]
+
+    def embeddings_for_doc(self, model: str, doc_id: str) -> list[EmbeddingRow]:
+        """Векторы чанков одного документа под моделью.
+
+        Нужно воркеру, чтобы не пересчитывать чанки, которые уже в БД
+        (упавший прогон оставил векторы, но не сайдкар): повторный проход
+        берёт их из таблицы и считает только недостающие.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, doc_id, chunk_index, vector FROM embeddings "
+                "WHERE model = ? AND doc_id = ? ORDER BY chunk_index",
+                (model, doc_id),
             ).fetchall()
         return [self._embedding_row(row) for row in rows]
 

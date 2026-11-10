@@ -69,8 +69,11 @@ src/persinder/
     watcher.py       # цикл скана, запуск по требованию
     journal.py       # журнал статусов файлов (JSONL) — состояние watcher'а (D21),
                      # обрезка истории переходов
-    extract.py       # экстракторы (markdown/text/html/mht/pdf) + реестр
-    pipeline.py      # события → экстракция → ingest → журнал
+    extract.py       # экстракторы (markdown/text/html/mht/pdf), контейнер
+                     # archive (zip/7z/tar/gz/rar), фабрика и реестр
+                     # (ExtractorFactory, ContainerExtractor)
+    pipeline.py      # события → экстракция (файл или части контейнера) →
+                     # ingest (документ на каждую часть) → журнал
 ```
 
 Переход между слоями — только через явные мапперы (`IngestPayload.to_request`,
@@ -164,6 +167,7 @@ class MetaStore(Protocol):
     def pending_for_docs(self, doc_ids: list[str]) -> list[EmbeddingQueueItem]: ...
     def drop_queue_rows(self, ids: list[int]) -> None: ...
     def search_morph(self, stemmed_query: str, limit: int) -> list[dict]: ...
+    def chunk_span(self, doc_id: str, chunk_index: int) -> tuple[int, int] | None: ...
 
 
 class Embedder(Protocol):
@@ -201,7 +205,7 @@ class Embedder(Protocol):
   обеими моделями.
 - Эмбеддер — детерминированная заглушка `PlaceholderEmbedder` (`placeholder-v1`,
   встроена) или реальная модель `OnnxEmbedder` (e5-small INT8, §12.1) из
-  `~/.persinder/models/<ключ>/` (`PERSINDER_MODEL_DIR` — корень). Эмбеддер
+  `<home>/models/<ключ>/` (корень — `Settings.models_dir`). Эмбеддер
   подбирается **фабрикой по ключу задачи** очереди — один проход уживает задачи
   разных моделей.
 - Удаление модели (`model remove`) убирает веса и **все её сайдкары в один момент**
@@ -241,8 +245,11 @@ HTTP-сервис слушает только локальный интерфе�
 - **Форма результата.** Семантические хиты — отдельное поле `semantic_hits`
   рядом с морфологическими `hits` (модуль 1): группы видны и сравнимы,
   API/CLI не ломаются. Объединение в единый рейтинг (D16) — следующий шаг.
-- **CLI/API.** `persinder search <text> [--limit N] [--data-dir …]`;
+  `SearchService` с `TextStore` обогащает каждый хит полем `context` — текст
+  чанка плюс три строки до и три после (`search/context.py`).
+- **CLI/API.** `persinder search <text> [--limit N] [--home …]`;
   `persinder ann rebuild [--model KEY]`; `GET /search` отвечает
-  `{query, hits, semantic_hits}`.
+  `{query, hits, semantic_hits}`, у каждого хита есть
+  `{document_id, chunk_index, score, context}`.
 - **Дальше.** При росте базы — шардирование индекса по коллекциям и компакция
   (§8); формат векторов (f16-блоб) и интерфейс `VectorSearch` зафиксированы.

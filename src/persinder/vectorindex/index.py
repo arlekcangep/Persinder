@@ -51,9 +51,18 @@ class UsannIndex:
         self._path = Path(path)
         self._index: Any
         if self._path.exists():
-            self._index = index_class(
-                ndim=dim, metric="cos", dtype="f32", path=str(self._path)
-            )
+            try:
+                self._index = index_class(
+                    ndim=dim, metric="cos", dtype="f32", path=str(self._path)
+                )
+            except Exception:  # noqa: BLE001 — битый файл не валит сервис
+                # Файл повреждён (обрыв _save() упавшим прогоном, частичная
+                # запись) и открытие падает бы на каждом проходе — документы
+                # застревали бы вечно. Начинаем с чистого индекса и удаляем
+                # битый файл, иначе _save() испортит новый. Векторы не теряются:
+                # они в БД (таблица embeddings), ANN — производное.
+                self._path.unlink(missing_ok=True)
+                self._index = index_class(ndim=dim, metric="cos", dtype="f32")
         else:
             self._index = index_class(ndim=dim, metric="cos", dtype="f32")
 
