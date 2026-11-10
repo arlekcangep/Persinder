@@ -249,12 +249,16 @@ HTTP-сервис слушает только локальный интерфе�
   `filename` из `document_sources`; у дубликата берётся реальный файл, а не
   виртуальная запись) и, если есть `TextStore`, полем `context` — текст
   чанка плюс три строки до и три после (`search/context.py`).
-- **CLI/API.** `persinder search <text> [--limit N] [--home …] [--host …]
-  [--port …]` — HTTP-first: если запущенный `serve` отвечает, CLI делает
-  `GET /search` и видит те же модели и скоупы, что сервер; локальный поиск —
-  fallback с предупреждением, а `--local` (или явный `--config`) включает его
-  принудительно. `persinder ann rebuild [--model KEY]`; `GET /search` отвечает
-  `{query, hits, semantic_hits}`, у каждого хита есть
+- **CLI/API.** `persinder search <text> [--limit N] [--min-score S] [--home …]
+  [--host …] [--port …]` — HTTP-first: если запущенный `serve` отвечает, CLI
+  делает `GET /search` и видит те же модели и скоупы, что сервер; локальный
+  поиск — fallback с предупреждением, а `--local` (или явный `--config`)
+  включает его принудительно. `min_score` — абсолютный порог косинуса только
+  для семантического слоя (морфология остаётся по `limit`); значение зависит
+  от модели и подбирается под корпус. По умолчанию порог задаётся в конфиге
+  (`search.min_score`), а `min_score` запроса/`--min-score` его перекрывает.
+  `persinder ann rebuild [--model KEY]`;
+  `GET /search` отвечает `{query, hits, semantic_hits}`, у каждого хита есть
   `{document_id, chunk_index, score, context, area, source_path, filename}`.
 - **Дальше.** При росте базы — шардирование индекса по коллекциям и компакция
   (§8); формат векторов (f16-блоб) и интерфейс `VectorSearch` зафиксированы.

@@ -71,8 +71,14 @@ class VectorSearch:
         # None — скоупа нет (ищем по всем источникам, как раньше).
         self._scopes = dict(scopes) if scopes is not None else None
 
-    def search(self, text: str, limit: int = 20) -> list[SearchHit]:
-        """Top-k семантических хитов: по каждой модели отдельно, затем слияние."""
+    def search(
+        self, text: str, limit: int = 20, min_score: float | None = None
+    ) -> list[SearchHit]:
+        """Top-k семантических хитов: по каждой модели отдельно, затем слияние.
+
+        ``min_score`` — порог косинуса: хиты ниже него не возвращаются (порог
+        применяется к слитому результату, до обрезки по ``limit``).
+        """
         if not text.strip() or limit <= 0 or not self._models:
             return []
         by_key: dict[tuple[str, int], SearchHit] = {}
@@ -83,6 +89,8 @@ class VectorSearch:
                 if previous is None or hit.score > previous.score:
                     by_key[key] = hit
         hits = sorted(by_key.values(), key=lambda hit: hit.score, reverse=True)
+        if min_score is not None:
+            hits = [hit for hit in hits if hit.score >= min_score]
         return hits[:limit]
 
     def _model_hits(self, text: str, model: str, limit: int) -> list[SearchHit]:

@@ -39,6 +39,7 @@ class SearchService:
         textstore: TextStore | None = None,
         context_lines: int = DEFAULT_CONTEXT_LINES,
         context_sentences: int = DEFAULT_CONTEXT_SENTENCES,
+        default_min_score: float | None = None,
     ) -> None:
         if context_lines < 0:
             raise ValueError("число строк контекста не может быть отрицательным")
@@ -50,6 +51,7 @@ class SearchService:
         self._textstore = textstore
         self._context_lines = context_lines
         self._context_sentences = context_sentences
+        self._default_min_score = default_min_score
 
     def search(self, query: SearchQuery) -> SearchResult:
         text = query.text.strip()
@@ -58,8 +60,15 @@ class SearchService:
 
         semantic: tuple[SearchHit, ...] = ()
         if self._vector_search is not None:
+            min_score = (
+                query.min_score
+                if query.min_score is not None
+                else self._default_min_score
+            )
             semantic = self._enrich(
-                tuple(self._vector_search.search(text, query.limit))
+                tuple(
+                    self._vector_search.search(text, query.limit, min_score=min_score)
+                )
             )
 
         stemmed = analyze_to_string(text, self._stemmer)

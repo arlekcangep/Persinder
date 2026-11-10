@@ -7,10 +7,16 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SearchQuery:
-    """Запрос поиска."""
+    """Запрос поиска.
+
+    ``min_score`` — порог косинуса для семантического слоя (``None`` — без
+    порога, только ``limit``). Абсолютное значение зависит от модели: его
+    подбирают под конкретную модель/корпус, а не считают вероятностью.
+    """
 
     text: str
     limit: int = 20
+    min_score: float | None = None
 
 
 @dataclass(frozen=True)

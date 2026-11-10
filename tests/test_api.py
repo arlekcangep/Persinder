@@ -78,6 +78,11 @@ class ApiTest(unittest.TestCase):
         with urllib.request.urlopen(f"{self.base}/search?{params}") as resp:
             return json.load(resp)
 
+    def test_search_invalid_min_score(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(self.base + "/search?q=x&min_score=abc")
+        self.assertEqual(ctx.exception.code, 400)
+
     def test_search_hit_has_context_three_sentences_around(self):
         text = (
             "line one\nline two\nline three\nline four\nline five\n"

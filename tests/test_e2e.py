@@ -114,6 +114,13 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn(semantic[0]["document_id"], {doc_id})
         self.assertEqual(semantic[0]["chunk_index"], 0)
 
+        # Порог косинуса отсекает всё: выше 1.0 семантических хитов быть не может.
+        filtered = self._get(
+            "/search?q=" + urllib.parse.quote("коты сидят") + "&min_score=2.0"
+        )
+        self.assertEqual(filtered["semantic_hits"], [])
+        self.assertTrue(filtered["hits"], "порог не влияет на морфологический слой")
+
     def test_semantic_hits_via_ann_index(self):
         """Модуль 3: воркер с ann_dir строит USearch-индекс, поиск идёт по нему."""
         with self._post(

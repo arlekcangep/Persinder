@@ -59,6 +59,33 @@ areas:
         self.assertEqual(watch.poll_interval, 30.0)
         self.assertEqual(watch.debounce, 2.0)
         self.assertEqual(watch.ignore, ())
+        self.assertIsNone(watch.min_score, "по умолчанию порога нет")
+
+    def test_search_min_score(self):
+        cfg_path = self._write(
+            f"""
+search:
+  min_score: 0.87
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+"""
+        )
+        _, watch = load_config(cfg_path)
+        self.assertEqual(watch.min_score, 0.87)
+
+    def test_search_min_score_rejects_non_number(self):
+        cfg_path = self._write(
+            f"""
+search:
+  min_score: "высокий"
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+"""
+        )
+        with self.assertRaises(ConfigError):
+            load_config(cfg_path)
 
     def test_area_embedding_model(self):
         cfg_path = self._write(

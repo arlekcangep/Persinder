@@ -140,6 +140,7 @@ def build_service(
     *,
     areas: tuple[AreaConfig, ...] | None = None,
     semantic: bool = True,
+    min_score: float | None = None,
 ) -> tuple[IngestService, SearchService, SqliteStore]:
     """Собрать сервисы приёма и поиска из настроек.
 
@@ -147,7 +148,8 @@ def build_service(
     (модель ищет только там, где ею индексировали). ``None`` — конфига нет
     (HTTP-only): поиск глобальной моделью без скоупа, как раньше.
     ``semantic=False`` — семантика выключена полностью: эмбеддинги не ставятся
-    в очередь, векторного слоя поиска нет.
+    в очередь, векторного слоя поиска нет. ``min_score`` — порог косинуса
+    семантического слоя по умолчанию (из блока ``search`` конфига).
     """
     settings.ensure()
     store = SqliteStore(settings.db_path)
@@ -184,6 +186,7 @@ def build_service(
         stemmer=stemmer,
         vector_search=vector_search,
         textstore=textstore,
+        default_min_score=min_score,
     )
     return ingest, search, store
 
@@ -263,7 +266,7 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     )
 
     ingest, search, store = build_service(
-        settings, areas=areas, semantic=watch.semantic
+        settings, areas=areas, semantic=watch.semantic, min_score=watch.min_score
     )
     embed_worker: EmbedWorker | None = None
     embed_store: SqliteStore | None = None
@@ -742,13 +745,21 @@ def _hits_from_json(raw: object) -> tuple[SearchHit, ...]:
     return tuple(hits)
 
 
-def search_over_http(settings: Settings, text: str, limit: int) -> SearchResult | None:
+def search_over_http(
+    settings: Settings,
+    text: str,
+    limit: int,
+    min_score: float | None = None,
+) -> SearchResult | None:
     """Поиск через запущенный ``serve``; ``None`` — сервер недоступен.
 
     Скоупы и модели берутся у сервера, поэтому CLI видит то же, что HTTP.
     Любая ошибка транспорта или формы ответа — повод для локального fallback.
     """
-    query = urllib.parse.urlencode({"q": text, "limit": str(limit)})
+    params = {"q": text, "limit": str(limit)}
+    if min_score is not None:
+        params["min_score"] = str(min_score)
+    query = urllib.parse.urlencode(params)
     url = f"http://{settings.host}:{settings.port}/search?{query}"
     try:
         with urllib.request.urlopen(url, timeout=SEARCH_HTTP_TIMEOUT) as resp:
@@ -771,6 +782,7 @@ def _local_search(
     text: str,
     limit: int,
     config_path: Path | None = None,
+    min_score: float | None = None,
 ) -> SearchResult:
     """Локальный поиск в БД профиля (сервера нет или запрошен ``--local``).
 
@@ -781,6 +793,7 @@ def _local_search(
     settings.ensure()
     areas: tuple[AreaConfig, ...] | None = None
     semantic = True
+    config_min_score: float | None = None
     config_path = config_path or _candidate_config(settings)
     if config_path is not None:
         registry = default_registry()
@@ -790,9 +803,15 @@ def _local_search(
             known_models=_known_models(settings),
         )
         semantic = watch.semantic
-    _ingest, search, store = build_service(settings, areas=areas, semantic=semantic)
+        config_min_score = watch.min_score
+    _ingest, search, store = build_service(
+        settings,
+        areas=areas,
+        semantic=semantic,
+        min_score=config_min_score,
+    )
     try:
-        return search.search(SearchQuery(text=text, limit=limit))
+        return search.search(SearchQuery(text=text, limit=limit, min_score=min_score))
     finally:
         store.close()
 
@@ -825,6 +844,7 @@ def run_search(
     host: str | None = None,
     port: int | None = None,
     local: bool = False,
+    min_score: float | None = None,
 ) -> int:
     """Поиск из консоли: сначала через запущенный сервер, затем локально.
 
@@ -832,7 +852,7 @@ def run_search(
     видит те же результаты, что ``GET /search``. Локальный поиск — fallback,
     когда сервер не отвечает, или принудительно (``--local``). Явный
     ``--config`` тоже включает локальный режим: он задаёт конфиг CLI, а не
-    сервера.
+    сервера. ``min_score`` — порог косинуса семантического слоя.
     """
     settings = Settings.default()
     if home:
@@ -843,7 +863,7 @@ def run_search(
         settings = replace(settings, port=port)
 
     if not (local or config_path is not None):
-        result = search_over_http(settings, text, limit)
+        result = search_over_http(settings, text, limit, min_score)
         if result is not None:
             _print_search_result(result)
             return 0
@@ -853,7 +873,7 @@ def run_search(
             flush=True,
         )
 
-    result = _local_search(settings, text, limit, config_path)
+    result = _local_search(settings, text, limit, config_path, min_score)
     _print_search_result(result)
     return 0
 
@@ -979,6 +999,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="не обращаться к серверу, искать в БД профиля",
     )
+    search_p.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help="порог косинуса семантического слоя (например 0.85); "
+        "абсолютное значение зависит от модели",
+    )
     search_p.add_argument("--limit", type=int, default=20)
     search_p.add_argument("text")
 
@@ -1016,6 +1043,7 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             local=args.local,
+            min_score=args.min_score,
         )
     if args.command == "ann":
         return run_ann_rebuild(args.home, args.model)

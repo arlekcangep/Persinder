@@ -64,6 +64,9 @@ PYTHONPATH=src python3 -m persinder model use e5-small-int8-v1       # пере�
 # --local — искать в БД профиля без сервера.
 PYTHONPATH=src python3 -m persinder search "коты сидят" --limit 10
 
+# только семантические хиты с косинусом не ниже порога (порог зависит от модели)
+PYTHONPATH=src python3 -m persinder search "кузя" --min-score 0.87
+
 # ANN-индекс USearch: пересобрать из таблицы (холодный старт/рассинхрон)
 PYTHONPATH=src python3 -m persinder ann rebuild
 

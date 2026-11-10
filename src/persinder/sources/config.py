@@ -6,6 +6,7 @@ PyYAML — опциональная зависимость (extra ``config``). �
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -30,6 +31,24 @@ def _expand(path_str: str) -> Path:
     return Path(path_str).expanduser()
 
 
+def _search_min_score(raw: object) -> float | None:
+    """Порог косинуса из блока ``search`` (``None`` — без порога)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("search: ожидается таблица (mapping)")
+    data = cast("dict[str, object]", raw)
+    value = data.get("min_score")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError("search.min_score: ожидается число")
+    score = float(value)
+    if not math.isfinite(score):
+        raise ConfigError("search.min_score: нужно конечное число")
+    return score
+
+
 def load_config(
     path: Path,
     known_formats: frozenset[str] | None = None,
@@ -40,6 +59,8 @@ def load_config(
     Формат:
 
         semantic: true            # false — полностью выключить семантику
+        search:
+          min_score: 0.85         # порог косинуса семантического слоя
         areas:
           - path: ~/Obsidian/Personal
             role: personal
@@ -161,7 +182,11 @@ def load_config(
             raise ConfigError(f"areas[{i}]: каталог не существует: {area.path}")
         areas.append(area)
 
-    watch = replace(WatchConfig.from_dict(top.get("watch")), semantic=semantic_enabled)
+    watch = replace(
+        WatchConfig.from_dict(top.get("watch")),
+        semantic=semantic_enabled,
+        min_score=_search_min_score(top.get("search")),
+    )
     if not areas:
         raise ConfigError("areas: пустой список — нечего индексировать")
     return tuple(areas), watch

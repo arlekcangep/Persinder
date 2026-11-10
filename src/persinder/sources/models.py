@@ -59,6 +59,8 @@ class WatchConfig:
     ignore: tuple[str, ...] = ()
     semantic: bool = True
     """``False`` (верхний уровень конфига) — полностью выключить семантику."""
+    min_score: float | None = None
+    """Порог косинуса семантического поиска по умолчанию (блок ``search``)."""
 
     @classmethod
     def from_dict(cls, raw: object) -> WatchConfig:

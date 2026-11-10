@@ -104,6 +104,19 @@ class VectorSearchTest(unittest.TestCase):
             [("d1", 0), ("d2", 1)],
         )
 
+    def test_min_score_filters_low_similarity(self):
+        self._seed()
+        hits = self.search.search("запрос", limit=10, min_score=0.6)
+        self.assertEqual(
+            [(h.document_id, h.chunk_index) for h in hits],
+            [("d1", 0), ("d2", 1)],
+            "остаются только хиты с косинусом >= 0.6",
+        )
+
+    def test_min_score_above_all_returns_empty(self):
+        self._seed()
+        self.assertEqual(self.search.search("запрос", limit=10, min_score=2.0), [])
+
     def test_empty_table_returns_empty(self):
         self.assertEqual(self.search.search("ничего нет"), [])
 
@@ -213,6 +226,15 @@ class VectorSearchAnnTest(unittest.TestCase):
             (h.document_id, h.chunk_index) for h in self.scan.search("запрос", 10)
         ]
         self.assertEqual(ann_hits, scan_hits)
+
+    def test_ann_min_score_filters(self):
+        self._seed()
+        rebuild_index(self.store, self.factory, self.ann_dir, "m1")
+        hits = self.ann.search("запрос", 10, min_score=0.75)
+        self.assertEqual(
+            [(h.document_id, h.chunk_index) for h in hits],
+            [("d1", 0), ("d2", 1)],
+        )
 
     def test_stale_key_filtered_after_document_delete(self):
         self._seed()
