@@ -44,6 +44,7 @@ class PipelineTest(unittest.TestCase):
         self.texts = self.data / "texts"
         ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
         registry = ExtractorRegistry((MarkdownExtractor(), TextExtractor()))
+        self.registry = registry
         self.journal = Journal(self.data / "journal.jsonl")
         self.pipeline = IndexingPipeline(ingest, registry, journal=self.journal)
         self.scanner = AreaScanner(WatchConfig(debounce=0.0))
@@ -73,6 +74,50 @@ class PipelineTest(unittest.TestCase):
         stats = self.pipeline.process(self._scan())
         self.assertEqual(stats.indexed, 1)
         self.assertEqual(self.store.counts()["documents"], 1)
+
+    def test_area_model_overrides_global_queue(self):
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("markdown",),
+            embedding_model="m-area",
+        )
+        self._write("note.md", "заметка только для модели папки")
+        stats = self.pipeline.process(self._scan(area))
+        self.assertEqual(stats.indexed, 1)
+        self.assertEqual(
+            [item["model"] for item in self.store.pending_embeddings(limit=100)],
+            ["m-area"],
+            "глобальная placeholder-v1 в этой папке не должна ставиться",
+        )
+
+    def test_area_semantic_false_skips_embeddings(self):
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("markdown",),
+            semantic=False,
+        )
+        self._write("note.md", "морфология без семантики")
+        stats = self.pipeline.process(self._scan(area))
+        self.assertEqual(stats.indexed, 1)
+        self.assertEqual(self.store.pending_embeddings(limit=100), [])
+
+    def test_global_semantic_false_skips_embeddings(self):
+        ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
+        pipeline = IndexingPipeline(
+            ingest, self.registry, journal=self.journal, semantic=False
+        )
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("markdown",),
+            embedding_model="m-area",
+        )
+        self._write("note.md", "семантика выключена глобально")
+        stats = pipeline.process(self._scan(area))
+        self.assertEqual(stats.indexed, 1)
+        self.assertEqual(self.store.pending_embeddings(limit=100), [])
 
     def test_modified_same_text_is_duplicate(self):
         self._write("note.md", "первая версия")

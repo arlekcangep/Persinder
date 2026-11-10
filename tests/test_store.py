@@ -17,7 +17,9 @@ class SqliteStoreTest(unittest.TestCase):
         self.store.close()
         self._tmp.cleanup()
 
-    def _save(self, doc_id: str = "d1", stemmed: str = "привет мир") -> None:
+    def _save(
+        self, doc_id: str = "d1", stemmed: str = "привет мир", filename: str = "a.txt"
+    ) -> None:
         doc = Document(
             id=doc_id,
             content_hash=doc_id,
@@ -35,7 +37,7 @@ class SqliteStoreTest(unittest.TestCase):
                 created_at="2026-01-01T00:00:00+00:00",
             )
         ]
-        self.store.save_document(doc, "personal", "a.txt", chunks, jobs)
+        self.store.save_document(doc, "personal", filename, chunks, jobs)
 
     def test_save_and_find_by_hash(self):
         self._save()
@@ -81,6 +83,49 @@ class SqliteStoreTest(unittest.TestCase):
         self.store.enqueue_all(["m1", "m2"])
         pending = self.store.pending_embeddings(limit=100)
         self.assertEqual(len(pending), 3)  # placeholder-v1 + m1 + m2
+
+    def test_enqueue_missing_uses_resolver(self):
+        self._save("d1")
+        self.store.drop_queue_model("placeholder-v1")
+        self.store.add_source("d1", "personal", "b.txt", source_path="/vault/a/b.md")
+        self.store.add_source("d1", "personal", "c.txt", source_path="/vault/b/c.md")
+
+        def models_for(_area: str, source_path: str) -> tuple[str, ...]:
+            return ("m-virtual",) if not source_path else ("m-a",)
+
+        self.store.enqueue_missing(
+            ["global"], lambda _model, _doc, _path: False, models_for=models_for
+        )
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual(
+            sorted(item["model"] for item in pending),
+            ["m-a", "m-a", "m-virtual"],
+            "резолвер выбирает модель по источнику, а не общий список",
+        )
+
+    def test_enqueue_missing_resolver_empty_skips(self):
+        self._save()
+        self.store.drop_queue_model("placeholder-v1")
+        self.store.enqueue_missing(
+            ["global"],
+            lambda _model, _doc, _path: False,
+            models_for=lambda _area, _path: (),
+        )
+        self.assertEqual(self.store.pending_embeddings(limit=100), [])
+
+    def test_doc_ids_in_paths(self):
+        self._save("d1")  # виртуальный источник (source_path = "")
+        self.store.add_source("d1", "personal", "b.txt", source_path="/vault/a/b.md")
+        self._save("d2", filename="d2.txt")
+        self.store.add_source("d2", "personal", "d.txt", source_path="/vault/b/d.md")
+        self.assertEqual(self.store.doc_ids_in_paths(["/vault/a/"]), {"d1"})
+        self.assertEqual(self.store.doc_ids_in_paths(["/vault/"]), {"d1", "d2"})
+        self.assertEqual(self.store.doc_ids_in_paths(["/other/"]), set())
+        # виртуальные источники — только по явному разрешению
+        self.assertEqual(
+            self.store.doc_ids_in_paths([], include_virtual=True), {"d1", "d2"}
+        )
+        self.assertEqual(self.store.doc_ids_in_paths([]), set())
 
     def test_pending_embeddings_small_docs_first(self):
         """Очередь отдаёт малые документы раньше гигантских: большой PDF не

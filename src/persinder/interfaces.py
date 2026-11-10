@@ -126,9 +126,20 @@ class MetaStore(Protocol):
         self,
         models: list[str],
         has_sidecar: Callable[[str, str, str], bool],
+        models_for: Callable[[str, str], tuple[str, ...]] | None = None,
     ) -> None:
         """Поставить задачи только для источников без сайдкара под моделью
-        (``--reindex``: уже отработанное заново в очередь не возвращается)."""
+        (``--reindex``: уже отработанное заново в очередь не возвращается).
+
+        ``models_for(area, source_path)`` — модели конкретного источника по
+        конфигу; ``None`` — общий список ``models``.
+        """
+        ...
+
+    def doc_ids_in_paths(
+        self, prefixes: list[str], *, include_virtual: bool = False
+    ) -> set[str]:
+        """id документов с источником под одним из префиксов путей (скоуп поиска)."""
         ...
 
     def drop_queue_model(self, model: str) -> None:

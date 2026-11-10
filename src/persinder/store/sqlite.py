@@ -542,24 +542,35 @@ class SqliteStore:
         self,
         models: list[str],
         has_sidecar: Callable[[str, str, str], bool],
+        models_for: Callable[[str, str], tuple[str, ...]] | None = None,
     ) -> None:
         """Поставить задачи только для источников без сайдкара под моделью.
 
         То же, что ``enqueue_all``, но уже отработанные источники (сайдкар на
         месте) в очередь не возвращает. Нужно ``--reindex``: рестарт не должен
         перезаполнять очередь всем подряд — только тем, чего реально нет.
+
+        ``models_for(area, source_path)`` — модели конкретного источника по
+        конфигу (своя модель папки, выключенная семантика); ``None`` — брать
+        общий список ``models``. Пустой результат — источник не индексируется
+        семантически.
         """
-        for model in models:
-            with self._lock, self._conn:
-                rows = self._conn.execute(
-                    "SELECT DISTINCT doc_id, area, source_path FROM document_sources"
-                ).fetchall()
-                for row in rows:
-                    doc_id, area, source_path = (
-                        str(row["doc_id"]),
-                        str(row["area"]),
-                        str(row["source_path"]),
-                    )
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT DISTINCT doc_id, area, source_path FROM document_sources"
+            ).fetchall()
+            for row in rows:
+                doc_id, area, source_path = (
+                    str(row["doc_id"]),
+                    str(row["area"]),
+                    str(row["source_path"]),
+                )
+                chosen = (
+                    models_for(area, source_path)
+                    if models_for is not None
+                    else tuple(models)
+                )
+                for model in chosen:
                     if has_sidecar(model, doc_id, source_path):
                         continue
                     self._conn.execute(
@@ -570,6 +581,35 @@ class SqliteStore:
                         " FROM chunks WHERE doc_id = ?",
                         (area, source_path, model, utcnow(), doc_id),
                     )
+
+    def doc_ids_in_paths(
+        self, prefixes: list[str], *, include_virtual: bool = False
+    ) -> set[str]:
+        """id документов, у которых есть источник под одним из префиксов путей.
+
+        Нужно для скоупа векторного поиска: модель ищет только там, где ею
+        индексировали, — старые векторы из других папок не дают мусор.
+        ``prefixes`` — каталоги областей (как хранится ``source_path``);
+        ``include_virtual`` — добавить источники без файла на диске
+        (``source_path = ''``, web/вставленный текст).
+        """
+        conditions: list[str] = []
+        params: list[object] = []
+        for prefix in prefixes:
+            if not prefix:
+                continue
+            conditions.append("substr(source_path, 1, ?) = ?")
+            params.extend([len(prefix), prefix])
+        if include_virtual:
+            conditions.append("source_path = ''")
+        if not conditions:
+            return set()
+        sql = "SELECT DISTINCT doc_id FROM document_sources WHERE " + " OR ".join(
+            conditions
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return {str(row["doc_id"]) for row in rows}
 
     def all_sources(self) -> list[SourceRow]:
         """Все источники (для удаления сайдкаров модели)."""

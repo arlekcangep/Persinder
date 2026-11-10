@@ -60,6 +60,84 @@ areas:
         self.assertEqual(watch.debounce, 2.0)
         self.assertEqual(watch.ignore, ())
 
+    def test_area_embedding_model(self):
+        cfg_path = self._write(
+            f"""
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+    embedding_model: m1
+"""
+        )
+        areas, _ = load_config(
+            cfg_path, known_models=frozenset({"m1", "placeholder-v1"})
+        )
+        self.assertEqual(areas[0].embedding_model, "m1")
+        self.assertTrue(areas[0].semantic)
+
+    def test_area_without_embedding_model_uses_global(self):
+        cfg_path = self._write(
+            f"""
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+"""
+        )
+        areas, _ = load_config(cfg_path)
+        self.assertIsNone(areas[0].embedding_model)
+        self.assertTrue(areas[0].semantic)
+
+    def test_area_semantic_false(self):
+        cfg_path = self._write(
+            f"""
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+    semantic: false
+"""
+        )
+        areas, watch = load_config(cfg_path)
+        self.assertFalse(areas[0].semantic)
+        self.assertTrue(watch.semantic, "глобальная семантика не выключена")
+
+    def test_global_semantic_false(self):
+        cfg_path = self._write(
+            f"""
+semantic: false
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+    semantic: true
+"""
+        )
+        areas, watch = load_config(cfg_path)
+        self.assertFalse(watch.semantic)
+        self.assertTrue(areas[0].semantic, "область свою настройку сохраняет")
+
+    def test_unknown_embedding_model_rejected(self):
+        cfg_path = self._write(
+            f"""
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+    embedding_model: nope
+"""
+        )
+        with self.assertRaises(ConfigError):
+            load_config(cfg_path, known_models=frozenset({"m1"}))
+
+    def test_bad_semantic_type(self):
+        cfg_path = self._write(
+            f"""
+semantic: maybe
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+"""
+        )
+        with self.assertRaises(ConfigError):
+            load_config(cfg_path)
+
     def test_formats_preserved_not_normalized(self):
         # имена форматов не схлопываются в классы: markdown остаётся markdown,
         # чтобы реестр мог ограничить класс только этим форматом

@@ -39,6 +39,7 @@ from .models import (
     ChangeKind,
     ScanResult,
     WatchConfig,
+    queue_models_for,
 )
 from .pipeline import IndexingPipeline, PipelineStats
 from .scanner import BUILTIN_IGNORES, AreaScanner
@@ -87,4 +88,5 @@ __all__ = [
     "default_registry",
     "extract_html",
     "load_config",
+    "queue_models_for",
 ]

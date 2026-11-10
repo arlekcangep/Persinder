@@ -98,7 +98,12 @@ class IngestService:
             for old_id in evicted:
                 delete_virtual_sidecars(self._virtual_dir, old_id)
 
-    def _models_without_sidecar(self, doc_id: str, source_path: str) -> list[str]:
+    def _models_without_sidecar(
+        self,
+        doc_id: str,
+        source_path: str,
+        models: tuple[str, ...] | None = None,
+    ) -> list[str]:
         """Модели, под которыми у источника ещё нет сайдкара.
 
         Сайдкар — признак того, что документ уже отработан под моделью для
@@ -107,9 +112,12 @@ class IngestService:
         скан watcher'а (он снова видит те же файлы) пересчитывал бы эмбеддинги
         всех документов, постоянно нагружая процессор. Полный пересчёт — это
         именно ``--reindex`` (он ставит в очередь все источники разом).
+
+        ``models`` — модели именно этой записи (область задала свою или
+        выключила семантику); ``None`` — глобальные модели сервиса.
         """
         missing: list[str] = []
-        for model in self._embedding_models:
+        for model in self._embedding_models if models is None else models:
             if source_path:
                 path = file_sidecar_path(source_path, model)
             elif self._virtual_dir is not None:
@@ -128,6 +136,13 @@ class IngestService:
         text = request.text or ""
         area = request.area.value
         source_path = request.source_path or ""
+        # Модели этой записи: область могла выбрать свою или выключить семантику;
+        # None — глобальные модели профиля (старое поведение).
+        models = (
+            request.embedding_models
+            if request.embedding_models is not None
+            else self._embedding_models
+        )
         if not text.strip():
             self._log(
                 IngestEvent.REJECTED,
@@ -162,7 +177,7 @@ class IngestService:
             # активной моделью (D24: пока embedding ≠ search, файл считается обеими).
             # Но только если сайдкара ещё нет: повторный скан watcher'а не
             # должен заново считать уже посчитанные эмбеддинги.
-            pending_models = self._models_without_sidecar(existing, source_path)
+            pending_models = self._models_without_sidecar(existing, source_path, models)
             if pending_models:
                 self._store.enqueue_document(
                     existing, area, source_path, models=pending_models
@@ -220,7 +235,7 @@ class IngestService:
                 model=model,
             )
             for chunk in chunks
-            for model in self._embedding_models
+            for model in models
         ]
 
         evicted = self._store.save_document(

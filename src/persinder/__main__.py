@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import threading
 import time
 from dataclasses import replace
@@ -32,22 +33,118 @@ from .morphology import default_stemmer
 from .search import SearchQuery, SearchService
 from .sources import (
     JOURNAL_RETENTION_DAYS,
+    AreaConfig,
+    ConfigError,
     IndexingPipeline,
     Journal,
     ScanResult,
     Watcher,
     default_registry,
     load_config,
+    queue_models_for,
 )
 from .store import SqliteStore
 from .textstore import FsTextStore
-from .vectorindex import VectorSearch, rebuild_index
+from .vectorindex import ModelScope, VectorSearch, rebuild_index
+
+
+def _area_prefix(area: AreaConfig) -> str:
+    """Префикс ``source_path`` области: каталог + разделитель (без соседей)."""
+    return str(area.path) + os.sep
+
+
+def _match_area(areas: tuple[AreaConfig, ...], source_path: str) -> AreaConfig | None:
+    """Область источника (самый длинный подходящий префикс); ``None`` — вне."""
+    if not source_path:
+        return None
+    best: tuple[int, AreaConfig] | None = None
+    for area in areas:
+        prefix = _area_prefix(area)
+        if source_path.startswith(prefix) and (best is None or len(prefix) > best[0]):
+            best = (len(prefix), area)
+    return best[1] if best is not None else None
+
+
+def models_for_source(
+    areas: tuple[AreaConfig, ...],
+    source_path: str,
+    models: ModelState,
+    *,
+    semantic: bool = True,
+) -> tuple[str, ...]:
+    """Модели источника при старте: та же логика, что у конвейера индексации."""
+    if not semantic:
+        return ()
+    area = _match_area(areas, source_path)
+    if area is None:
+        return models.queue_models()  # виртуальный документ или путь вне областей
+    resolved = queue_models_for(area, semantic_enabled=semantic)
+    return models.queue_models() if resolved is None else resolved
+
+
+def search_scopes(
+    areas: tuple[AreaConfig, ...], models: ModelState
+) -> dict[str, ModelScope]:
+    """Скоупы поиска: каждая активная модель → только её области.
+
+    Активная модель — текущая глобальная (``models.search``) плюс модели,
+    указанные в конфиге папок, даже если папка ещё не проиндексирована.
+    Папка со своей моделью исключается из скоупа глобальной (даже если от неё
+    остались старые эмбеддинги), ``semantic: false`` — из всех моделей.
+    """
+    global_paths: list[str] = []
+    area_paths: dict[str, list[str]] = {}
+    for area in areas:
+        if not area.semantic:
+            continue
+        if area.embedding_model:
+            area_paths.setdefault(area.embedding_model, []).append(_area_prefix(area))
+        else:
+            global_paths.append(_area_prefix(area))
+    # Глобальная модель активна всегда; виртуальные документы (web/вставка)
+    # принадлежат профилю, а не папке.
+    scopes: dict[str, ModelScope] = {
+        models.search: ModelScope(paths=tuple(global_paths), allow_virtual=True)
+    }
+    for model, paths in area_paths.items():
+        existing = scopes.get(model)
+        if existing is not None:
+            # та же модель, что глобальная: области складываются
+            scopes[model] = ModelScope(
+                paths=existing.paths + tuple(paths), allow_virtual=True
+            )
+        else:
+            scopes[model] = ModelScope(paths=tuple(paths))
+    return scopes
+
+
+def _known_models(settings: Settings) -> frozenset[str]:
+    """Установленные модели профиля + встроенная заглушка (для валидации)."""
+    return frozenset(installed_keys(settings.models_dir)) | {PLACEHOLDER}
+
+
+def _candidate_config(settings: Settings) -> Path | None:
+    """Первый существующий конфиг из стандартных мест (``--config`` не задан)."""
+    for candidate in _config_candidates(settings):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def build_service(
     settings: Settings,
+    *,
+    areas: tuple[AreaConfig, ...] | None = None,
+    semantic: bool = True,
 ) -> tuple[IngestService, SearchService, SqliteStore]:
-    """Собрать сервисы приёма и поиска из настроек."""
+    """Собрать сервисы приёма и поиска из настроек.
+
+    ``areas`` — области из конфига: по ним строится скоуп каждой модели
+    (модель ищет только там, где ею индексировали). ``None`` — конфига нет
+    (HTTP-only): поиск глобальной моделью без скоупа, как раньше.
+    ``semantic=False`` — семантика выключена полностью: эмбеддинги не ставятся
+    в очередь, векторного слоя поиска нет.
+    """
     settings.ensure()
     store = SqliteStore(settings.db_path)
     textstore = FsTextStore(settings.text_dir)
@@ -61,14 +158,23 @@ def build_service(
         chunk_overlap=settings.chunk_overlap,
         journal=IngestJournal(settings.home / "ingest.jsonl"),
         virtual_dir=settings.virtual_dir,
-        embedding_models=models.queue_models(),
+        embedding_models=models.queue_models() if semantic else (),
     )
-    vector_search = VectorSearch(
-        store=store,
-        embedder_factory=lambda key: build_embedder(settings.models_dir, key),
-        search_model=models.search,
-        ann_dir=settings.ann_dir,
-    )
+    vector_search: VectorSearch | None = None
+    if semantic:
+        if areas is None:
+            search_model: str | tuple[str, ...] = models.search
+            scopes = None
+        else:
+            scopes = search_scopes(areas, models)
+            search_model = tuple(scopes)
+        vector_search = VectorSearch(
+            store=store,
+            embedder_factory=lambda key: build_embedder(settings.models_dir, key),
+            search_model=search_model,
+            ann_dir=settings.ann_dir,
+            scopes=scopes,
+        )
     search = SearchService(
         store=store,
         stemmer=stemmer,
@@ -81,11 +187,17 @@ def build_service(
 def run_watch(config_path: Path, home: Path | None) -> int:
     """Запустить watcher: скан областей и индексация найденного."""
     registry = default_registry()
-    areas, watch = load_config(config_path, known_formats=registry.known_names())
     settings = Settings.default()
     if home:
         settings = replace(settings, home=home)
-    ingest, _search, store = build_service(settings)
+    areas, watch = load_config(
+        config_path,
+        known_formats=registry.known_names(),
+        known_models=_known_models(settings),
+    )
+    ingest, _search, store = build_service(
+        settings, areas=areas, semantic=watch.semantic
+    )
     journal = Journal(settings.home / "journal.jsonl")
     dropped = journal.compact()
     if dropped:
@@ -96,7 +208,9 @@ def run_watch(config_path: Path, home: Path | None) -> int:
     recovery = ingest.recover()
     if recovery.removed:
         print(format_recovery(recovery))
-    pipeline = IndexingPipeline(ingest, registry, journal=journal)
+    pipeline = IndexingPipeline(
+        ingest, registry, journal=journal, semantic=watch.semantic
+    )
 
     print(f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с")
     watcher = Watcher(
@@ -138,14 +252,29 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     settings.ensure()
     print(f"Home: {settings.home}", flush=True)
     registry = default_registry()
-    areas, watch = load_config(config_path, known_formats=registry.known_names())
+    areas, watch = load_config(
+        config_path,
+        known_formats=registry.known_names(),
+        known_models=_known_models(settings),
+    )
 
-    ingest, search, store = build_service(settings)
-    embed_worker, embed_store, embed_label = build_embed_worker(settings)
+    ingest, search, store = build_service(
+        settings, areas=areas, semantic=watch.semantic
+    )
+    embed_worker: EmbedWorker | None = None
+    embed_store: SqliteStore | None = None
+    if watch.semantic:
+        embed_worker, embed_store, embed_label = build_embed_worker(settings)
+    else:
+        embed_label = (
+            "Semantic: выключено конфигом (semantic: false) — эмбеддинги не считаются"
+        )
 
     models_state = load(settings.models_state_path)
-    if models_state.embedding != PLACEHOLDER and not is_installed(
-        settings.models_dir, models_state.embedding
+    if (
+        watch.semantic
+        and models_state.embedding != PLACEHOLDER
+        and not is_installed(settings.models_dir, models_state.embedding)
     ):
         print(
             f"ВНИМАНИЕ: активная модель {models_state.embedding} не установлена "
@@ -177,7 +306,13 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
             return file_sidecar_path(source_path, model).exists()
         return virtual_sidecar_path(settings.virtual_dir, doc_id, model).exists()
 
-    store.enqueue_missing([models.embedding], _has_sidecar)
+    store.enqueue_missing(
+        list(models.queue_models()) if watch.semantic else [],
+        _has_sidecar,
+        models_for=lambda _area, source_path: models_for_source(
+            areas, source_path, models, semantic=watch.semantic
+        ),
+    )
     dropped = journal.compact()
     if dropped:
         print(
@@ -189,7 +324,9 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     if recovery.removed:
         print(format_recovery(recovery), flush=True)
 
-    pipeline = IndexingPipeline(ingest, registry, journal=journal)
+    pipeline = IndexingPipeline(
+        ingest, registry, journal=journal, semantic=watch.semantic
+    )
     stop = threading.Event()
     kick = threading.Event()
 
@@ -208,18 +345,20 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
             kick.set()  # новые документы в очереди — будим эмбеддинги сразу
 
     watcher = Watcher(areas, watch, on_events, journal=journal)
-    embed_thread = threading.Thread(
-        target=_embed_loop,
-        args=(
-            embed_worker,
-            stop,
-            kick,
-            5.0,
-            settings.home / "embed_errors.log",
-        ),
-        daemon=True,
-        name="embed",
-    )
+    embed_thread: threading.Thread | None = None
+    if embed_worker is not None:
+        embed_thread = threading.Thread(
+            target=_embed_loop,
+            args=(
+                embed_worker,
+                stop,
+                kick,
+                5.0,
+                settings.home / "embed_errors.log",
+            ),
+            daemon=True,
+            name="embed",
+        )
 
     print(
         f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с", flush=True
@@ -238,12 +377,11 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     # упал раньше (конфиг, импорт, OOM) — тогда смотри вывод run.sh.
     _append_embed_error(
         settings.home / "embed_errors.log",
-        "запуск: активная модель эмбеддингов "
-        f"{load(settings.models_state_path).embedding}, "
-        f"очередь {store.counts()['pending_embeddings']} задач",
+        "запуск: " + embed_label,
     )
     watcher.start()
-    embed_thread.start()
+    if embed_thread is not None:
+        embed_thread.start()
     print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)
     try:
         serve(ingest, search, settings.host, settings.port)
@@ -254,9 +392,10 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
         stop.set()
         kick.set()
         watcher.stop()
-        embed_thread.join(10.0)
-        if not embed_thread.is_alive():
-            embed_store.close()
+        if embed_thread is not None:
+            embed_thread.join(10.0)
+            if not embed_thread.is_alive() and embed_store is not None:
+                embed_store.close()
         store.close()
         print("Persinder остановлен.", flush=True)
     return 0
@@ -514,6 +653,22 @@ def run_model_remove(settings: Settings, key: str) -> int:
     if key in (models.embedding, models.search):
         print(f"модель {key} активна — сначала переключи: persinder model use ...")
         return 1
+    # Модель может быть активной не только в models.json, но и для папки в
+    # конфиге: убирать её тогда нельзя, иначе конфиг станет невалидным.
+    config_path = _candidate_config(settings)
+    if config_path is not None:
+        try:
+            areas, _watch = load_config(
+                config_path, known_formats=default_registry().known_names()
+            )
+        except ConfigError:
+            areas = ()
+        if any(area.embedding_model == key for area in areas):
+            print(
+                f"модель {key} выбрана для папки в {config_path} — "
+                "сначала убери embedding_model из конфига."
+            )
+            return 1
     root = settings.models_dir
     if not is_installed(root, key):
         print(f"модель не установлена: {key}.")
@@ -534,25 +689,35 @@ def run_model_remove(settings: Settings, key: str) -> int:
     return 0
 
 
-def run_search(home: Path | None, text: str, limit: int) -> int:
-    """Поиск из консоли: морфология + семантика (модуль 3)."""
+def run_search(
+    home: Path | None,
+    text: str,
+    limit: int,
+    config_path: Path | None = None,
+) -> int:
+    """Поиск из консоли: морфология + семантика (модуль 3).
+
+    Если найден конфиг областей, семантика ищет по всем активным моделям и
+    только в тех папках, где этими моделями индексировали; глобальное
+    ``semantic: false`` выключает векторный слой совсем.
+    """
     settings = Settings.default()
     if home:
         settings = replace(settings, home=home)
     settings.ensure()
-    store = SqliteStore(settings.db_path)
+    areas: tuple[AreaConfig, ...] | None = None
+    semantic = True
+    config_path = config_path or _candidate_config(settings)
+    if config_path is not None:
+        registry = default_registry()
+        areas, watch = load_config(
+            config_path,
+            known_formats=registry.known_names(),
+            known_models=_known_models(settings),
+        )
+        semantic = watch.semantic
+    _ingest, search, store = build_service(settings, areas=areas, semantic=semantic)
     try:
-        stemmer = default_stemmer()
-        models = load(settings.models_state_path)
-        vector_search = VectorSearch(
-            store=store,
-            embedder_factory=lambda key: build_embedder(settings.models_dir, key),
-            search_model=models.search,
-            ann_dir=settings.ann_dir,
-        )
-        search = SearchService(
-            store=store, stemmer=stemmer, vector_search=vector_search
-        )
         result = search.search(SearchQuery(text=text, limit=limit))
     finally:
         store.close()
@@ -671,6 +836,12 @@ def main(argv: list[str] | None = None) -> int:
         "search", help="поиск из консоли (морфология + семантика)"
     )
     search_p.add_argument("--home", type=Path, default=default_home, help=home_help)
+    search_p.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="YAML-конфиг областей (по умолчанию ищется в cwd и <home>)",
+    )
     search_p.add_argument("--limit", type=int, default=20)
     search_p.add_argument("text")
 
@@ -700,7 +871,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "embed":
         return run_embed(args.home, args.limit, args.all, args.model, args.background)
     if args.command == "search":
-        return run_search(args.home, args.text, args.limit)
+        return run_search(args.home, args.text, args.limit, args.config)
     if args.command == "ann":
         return run_ann_rebuild(args.home, args.model)
     if args.command == "model":

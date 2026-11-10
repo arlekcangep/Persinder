@@ -23,7 +23,7 @@ from ..ingest import IngestRequest, IngestResult
 from ..interfaces import Ingest
 from .extract import Extracted, ExtractorRegistry
 from .journal import Journal, JournalEvent
-from .models import AreaConfig, ChangeEvent, ChangeKind, ScanResult
+from .models import AreaConfig, ChangeEvent, ChangeKind, ScanResult, queue_models_for
 
 
 @dataclass
@@ -47,10 +47,14 @@ class IndexingPipeline:
         ingest: Ingest,
         registry: ExtractorRegistry,
         journal: Journal | None = None,
+        semantic: bool = True,
     ) -> None:
         self._ingest = ingest
         self._registry = registry
         self._journal = journal
+        # Глобальный переключатель семантики из конфига: false — ни одна
+        # область не ставит эмбеддинги в очередь.
+        self._semantic = semantic
 
     def _record(
         self,
@@ -155,6 +159,9 @@ class IndexingPipeline:
                     text=part.text,
                     source_path=source_path,
                     extractor=part.extractor or None,
+                    embedding_models=queue_models_for(
+                        area, semantic_enabled=self._semantic
+                    ),
                 )
             )
             if outcome.status == IngestResult.INDEXED:
