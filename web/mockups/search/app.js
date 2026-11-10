@@ -111,6 +111,7 @@ const els = {
   settingsTabs: document.querySelector("#settings-tabs"),
   statusBtn: document.querySelector("#status-btn"),
   statusTip: document.querySelector("#status-tip"),
+  themeBtn: document.querySelector("#theme-btn"),
   statsModal: document.querySelector("#stats-modal"),
   filterToggle: document.querySelector("#filter-toggle"),
   filters: document.querySelector("#filters"),
@@ -172,6 +173,41 @@ function showToast(message) {
   showToast.timer = window.setTimeout(() => {
     els.toast.classList.remove("show");
   }, 2600);
+}
+
+/* ---------- тема ---------- */
+
+function applyTheme(theme) {
+  const dark = theme === "dark";
+  document.documentElement.dataset.theme = theme;
+  const meta = document.querySelector('meta[name="color-scheme"]');
+  if (meta) meta.content = dark ? "dark" : "light";
+  const label = dark ? "Светлая тема" : "Тёмная тема";
+  els.themeBtn.setAttribute("aria-label", label);
+  els.themeBtn.title = label;
+}
+
+function initTheme() {
+  let stored = null;
+  try {
+    stored = localStorage.getItem("persinder-mock-theme");
+  } catch {
+    stored = null;
+  }
+  const preferred =
+    stored ||
+    (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  applyTheme(preferred);
+}
+
+function toggleTheme() {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  applyTheme(next);
+  try {
+    localStorage.setItem("persinder-mock-theme", next);
+  } catch {
+    /* файл открыт напрямую в приватном режиме — тема просто не запомнится */
+  }
 }
 
 /* ---------- демо-данные под текущее состояние ---------- */
@@ -477,6 +513,8 @@ els.filterApply.addEventListener("click", applyFilters);
 els.filterReset.addEventListener("click", resetFilters);
 els.retry.addEventListener("click", runSearch);
 
+els.themeBtn.addEventListener("click", toggleTheme);
+
 els.settingsBtn.addEventListener("click", () => {
   showView(els.settingsView.hidden ? "settings" : "search");
 });
@@ -580,5 +618,6 @@ function initFromUrl() {
 els.statusTip.textContent = `${STATUS.address} · ${STATUS.vectors.toLocaleString("ru-RU")} векторов`;
 els.minScore.value = String(DEFAULTS.minScore);
 els.minScoreValue.textContent = DEFAULTS.minScore.toFixed(2);
+initTheme();
 initFromUrl();
 render();
