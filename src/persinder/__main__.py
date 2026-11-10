@@ -961,7 +961,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="YAML-конфиг областей (по умолчанию <home>/persinder.yaml|yml)",
     )
-    serve_p.add_argument("--home", type=Path, default=default_home, help=home_help)
+    serve_p.add_argument("--home", type=Path, default=None, help=home_help)
     serve_p.add_argument("--host", default=None)
     serve_p.add_argument("--port", type=int, default=None)
     serve_p.add_argument(
@@ -973,10 +973,10 @@ def main(argv: list[str] | None = None) -> int:
 
     watch_p = sub.add_parser("watch", help="следить за областями и индексировать")
     watch_p.add_argument("--config", type=Path, required=True, help="YAML-конфиг")
-    watch_p.add_argument("--home", type=Path, default=default_home, help=home_help)
+    watch_p.add_argument("--home", type=Path, default=None, help=home_help)
 
     embed_p = sub.add_parser("embed", help="эмбеддинги: очередь → векторы → сайдкары")
-    embed_p.add_argument("--home", type=Path, default=default_home, help=home_help)
+    embed_p.add_argument("--home", type=Path, default=None, help=home_help)
     embed_p.add_argument("--limit", type=int, default=100, help="задач за проход")
     embed_p.add_argument(
         "--all",
@@ -992,7 +992,7 @@ def main(argv: list[str] | None = None) -> int:
 
     model_p = sub.add_parser("model", help="управление моделями эмбеддингов (D24)")
     model_common = argparse.ArgumentParser(add_help=False)
-    model_common.add_argument("--home", type=Path, default=default_home, help=home_help)
+    model_common.add_argument("--home", type=Path, default=None, help=home_help)
     model_sub = model_p.add_subparsers(dest="model_command")
 
     model_sub.add_parser(
@@ -1014,7 +1014,7 @@ def main(argv: list[str] | None = None) -> int:
     search_p = sub.add_parser(
         "search", help="поиск из консоли (морфология + семантика)"
     )
-    search_p.add_argument("--home", type=Path, default=default_home, help=home_help)
+    search_p.add_argument("--home", type=Path, default=None, help=home_help)
     search_p.add_argument(
         "--config",
         type=Path,
@@ -1056,7 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
     search_p.add_argument("text")
 
     ann_p = sub.add_parser("ann", help="ANN-индекс (USearch): пересборка из таблицы")
-    ann_p.add_argument("--home", type=Path, default=default_home, help=home_help)
+    ann_p.add_argument("--home", type=Path, default=None, help=home_help)
     ann_p.add_argument(
         "--model", default=None, help="только эта модель (по умолчанию все)"
     )
@@ -1068,14 +1068,24 @@ def main(argv: list[str] | None = None) -> int:
         help="операция (сейчас только rebuild)",
     )
 
-    # Совместимость: без подкоманды — serve с флагами.
+    # Совместимость: без подкоманды — serve с флагами. ``dest`` отдельный:
+    # значение, переданное до подкоманды, не должно затираться её дефолтом.
     parser.add_argument(
-        "--home", type=Path, default=default_home, help=argparse.SUPPRESS
+        "--home", dest="home_top", type=Path, default=None, help=argparse.SUPPRESS
     )
-    parser.add_argument("--host", default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--host", dest="host_top", default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--port", dest="port_top", type=int, default=None, help=argparse.SUPPRESS
+    )
 
     args = parser.parse_args(argv)
+    # ``--home`` понимается и до подкоманды, и после: у подкоманд свой флаг.
+    # Без этого ``persinder --home X search`` молча искал бы в ~/.persinder.
+    args.home = getattr(args, "home", None) or args.home_top or default_home
+    if getattr(args, "host", None) is None:
+        args.host = getattr(args, "host_top", None)
+    if getattr(args, "port", None) is None:
+        args.port = getattr(args, "port_top", None)
     if args.command == "watch":
         return run_watch(args.config, args.home)
     if args.command == "embed":

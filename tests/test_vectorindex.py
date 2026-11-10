@@ -11,7 +11,7 @@ from persinder.domain import Chunk, Document, EmbeddingJob
 from persinder.embed import pack_f16_vectors
 from persinder.interfaces import Embedder
 from persinder.store import SqliteStore
-from persinder.vectorindex import ModelScope, VectorSearch, rebuild_index
+from persinder.vectorindex import ModelScope, UsannIndex, VectorSearch, rebuild_index
 
 DIM = 4
 
@@ -226,6 +226,20 @@ class VectorSearchAnnTest(unittest.TestCase):
             (h.document_id, h.chunk_index) for h in self.scan.search("запрос", 10)
         ]
         self.assertEqual(ann_hits, scan_hits)
+
+    def test_incomplete_index_falls_back_to_scan(self):
+        self._seed()
+        # Индекс есть, но в нём не все векторы (оборванный проход/сбой записи):
+        # файл индекса не должен молча прятать документы.
+        index = UsannIndex(self.ann_dir / "m1.usearch", DIM)
+        index.add([999999], [[0.0, 0.0, 1.0, 0.0]])
+
+        hits = self.ann.search("запрос", 10)
+
+        self.assertEqual(
+            [(h.document_id, h.chunk_index) for h in hits],
+            [("d1", 0), ("d2", 1), ("d1", 1), ("d2", 0)],
+        )
 
     def test_ann_min_score_filters(self):
         self._seed()

@@ -547,8 +547,13 @@ class SqliteStore:
         """Поставить задачи только для источников без сайдкара под моделью.
 
         То же, что ``enqueue_all``, но уже отработанные источники (сайдкар на
-        месте) в очередь не возвращает. Нужно ``--reindex``: рестарт не должен
-        перезаполнять очередь всем подряд — только тем, чего реально нет.
+        месте **и** векторы в таблице есть) в очередь не возвращает. Нужно
+        ``--reindex``: рестарт не должен перезаполнять очередь всем подряд —
+        только тем, чего реально нет.
+
+        Сайдкар без векторов в таблице «отработанным» не считается: так
+        восстанавливается профиль, где БД новая/потерянная, а сайдкары
+        приехали из синка — иначе документ был бы невидим для семантики.
 
         ``models_for(area, source_path)`` — модели конкретного источника по
         конфигу (своя модель папки, выключенная семантика); ``None`` — брать
@@ -571,7 +576,9 @@ class SqliteStore:
                     else tuple(models)
                 )
                 for model in chosen:
-                    if has_sidecar(model, doc_id, source_path):
+                    if has_sidecar(model, doc_id, source_path) and (
+                        self.embeddings_complete(model, doc_id)
+                    ):
                         continue
                     self._conn.execute(
                         "INSERT OR IGNORE INTO embedding_queue"
@@ -738,6 +745,32 @@ class SqliteStore:
         """Убрать векторы модели (``model remove`` — вместе с сайдкарами)."""
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM embeddings WHERE model = ?", (model,))
+
+    def count_embeddings(self, model: str) -> int:
+        """Сколько векторов чанков есть под моделью (сверка с ANN-индексом)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS total FROM embeddings WHERE model = ?",
+                (model,),
+            ).fetchone()
+        return int(row["total"])
+
+    def embeddings_complete(self, model: str, doc_id: str) -> bool:
+        """Все чанки документа имеют вектор под моделью.
+
+        Сайдкар — кэш, а векторы в таблице — то, чем реально ищет ANN: при
+        восстановлении профиля из синка (сайдкары есть, БД новая) или после
+        потери таблицы документ иначе остался бы невидимым для поиска.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT"
+                " (SELECT COUNT(*) FROM chunks WHERE doc_id = ?) AS chunks,"
+                " (SELECT COUNT(*) FROM embeddings"
+                "  WHERE model = ? AND doc_id = ?) AS vectors",
+                (doc_id, model, doc_id),
+            ).fetchone()
+        return int(row["chunks"]) <= int(row["vectors"])
 
     def embedding_models(self) -> list[str]:
         """Модели, у которых есть векторы (для ``persinder ann rebuild``)."""

@@ -141,6 +141,11 @@ class VectorSearch:
         index = UsannIndex(path, dim)
         if index.size == 0:
             return None
+        if index.size < self._store.count_embeddings(model):
+            # В файле индекса не все векторы модели (оборванный проход, сбой
+            # добавления, восстановленная БД): поиск по нему молча терял бы
+            # документы, поэтому идём точным сканом таблицы.
+            return None
         fetch = limit if allowed is None else min(max(limit * 4, 32), index.size)
         while True:
             matches = index.search(query_vector, fetch)
@@ -163,6 +168,11 @@ class VectorSearch:
                     )
                 )
             if allowed is None or len(hits) >= limit or fetch >= index.size:
+                if len(hits) < limit:
+                    # Индекс отдал меньше запрошенного: часть векторов в него
+                    # не попала (сбой добавления, оборванный проход, старые
+                    # ключи). Молча терять документы нельзя — точный скан.
+                    return None
                 return hits[:limit]
             fetch = min(fetch * 4, index.size)
 

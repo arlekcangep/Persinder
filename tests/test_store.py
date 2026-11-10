@@ -5,7 +5,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from persinder.domain import Chunk, Document, EmbeddingJob
+from persinder.embed import pack_f16_vectors
 from persinder.store import SqliteStore
+
+DIM = 4
+
+
+def _blob(vector: list[float]) -> bytes:
+    return pack_f16_vectors([vector], DIM)
 
 
 class SqliteStoreTest(unittest.TestCase):
@@ -112,6 +119,28 @@ class SqliteStoreTest(unittest.TestCase):
             models_for=lambda _area, _path: (),
         )
         self.assertEqual(self.store.pending_embeddings(limit=100), [])
+
+    def test_enqueue_missing_repairs_lost_vectors(self):
+        """Сайдкар есть, а векторов в таблице нет — документ должен вернуться
+        в очередь: иначе после восстановления БД он невидим для семантики."""
+        self._save("d1")
+        self.store.drop_queue_model("placeholder-v1")
+        self.store.put_embeddings("m1", [("d1", 0, _blob([1.0, 0.0, 0.0, 0.0]))])
+
+        def has_sidecar(_model: str, _doc: str, _path: str) -> bool:
+            return True
+
+        self.store.enqueue_missing(["m1"], has_sidecar)
+        self.assertEqual(
+            self.store.pending_embeddings(limit=100),
+            [],
+            "сайдкар и векторы на месте — задача не нужна",
+        )
+
+        self.store.drop_embeddings_model("m1")
+        self.store.enqueue_missing(["m1"], has_sidecar)
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual([item["model"] for item in pending], ["m1"])
 
     def test_doc_ids_in_paths(self):
         self._save("d1")  # виртуальный источник (source_path = "")

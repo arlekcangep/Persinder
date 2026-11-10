@@ -437,6 +437,21 @@ class SearchHttpTest(unittest.TestCase):
         local.assert_called_once()
         self.assertEqual(local.call_args.args[3], config)
 
+    def test_home_before_subcommand_is_honored(self):
+        """``persinder --home X search`` не должен молча искать в ~/.persinder."""
+        with mock.patch.object(cli, "run_search", return_value=0) as run:
+            rc = cli.main(["--home", "/tmp/other-home", "search", "кот"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(run.call_args.args[0], Path("/tmp/other-home"))
+
+    def test_home_after_subcommand_is_honored(self):
+        with mock.patch.object(cli, "run_search", return_value=0) as run:
+            rc = cli.main(["search", "--home", "/tmp/after-home", "кот"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(run.call_args.args[0], Path("/tmp/after-home"))
+
 
 if __name__ == "__main__":
     unittest.main()

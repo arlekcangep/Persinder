@@ -193,6 +193,10 @@ class MetaStore(Protocol):
         """Модели, у которых есть векторы (для ``persinder ann rebuild``)."""
         ...
 
+    def count_embeddings(self, model: str) -> int:
+        """Сколько векторов чанков есть под моделью (сверка с ANN-индексом)."""
+        ...
+
     def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]: ...
 
     def chunk_span(self, doc_id: str, chunk_index: int) -> tuple[int, int] | None:
