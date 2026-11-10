@@ -80,8 +80,28 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "invalid min_score"})
                 return
 
+        layer_limits: dict[str, int | None] = {
+            "morph_limit": None,
+            "semantic_limit": None,
+        }
+        for name in layer_limits:
+            values = params.get(name)
+            if values is None:
+                continue
+            try:
+                layer_limits[name] = int(values[0])
+            except ValueError:
+                self._send_json(400, {"error": f"invalid {name}"})
+                return
+
         result = self._services().search.search(
-            SearchQuery(text=text, limit=limit, min_score=min_score)
+            SearchQuery(
+                text=text,
+                limit=limit,
+                min_score=min_score,
+                morph_limit=layer_limits["morph_limit"],
+                semantic_limit=layer_limits["semantic_limit"],
+            )
         )
         self._send_json(200, SearchResponse.from_result(result).to_dict())
 

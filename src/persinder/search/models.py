@@ -9,14 +9,27 @@ from dataclasses import dataclass
 class SearchQuery:
     """Запрос поиска.
 
-    ``min_score`` — порог косинуса для семантического слоя (``None`` — без
-    порога, только ``limit``). Абсолютное значение зависит от модели: его
-    подбирают под конкретную модель/корпус, а не считают вероятностью.
+    ``limit`` — общий лимит по умолчанию для обоих слоёв. ``morph_limit`` и
+    ``semantic_limit`` задают лимит конкретного слоя (``None`` — взять
+    ``limit``); ``0`` выключает слой. ``min_score`` — порог косинуса для
+    семантического слоя (``None`` — без порога, только ``limit``). Абсолютное
+    значение порога зависит от модели: его подбирают под конкретную
+    модель/корпус, а не считают вероятностью.
     """
 
     text: str
     limit: int = 20
     min_score: float | None = None
+    morph_limit: int | None = None
+    semantic_limit: int | None = None
+
+    def limit_for_morph(self) -> int:
+        """Лимит морфологического слоя: свой или общий."""
+        return self.limit if self.morph_limit is None else self.morph_limit
+
+    def limit_for_semantic(self) -> int:
+        """Лимит семантического слоя: свой или общий."""
+        return self.limit if self.semantic_limit is None else self.semantic_limit
 
 
 @dataclass(frozen=True)

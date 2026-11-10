@@ -19,10 +19,12 @@ class _RecordingVectorSearch:
 
     def __init__(self) -> None:
         self.min_score: float | None = None
+        self.limit: int | None = None
 
     def search(
         self, text: str, limit: int = 20, min_score: float | None = None
     ) -> list[SearchHit]:
+        self.limit = limit
         self.min_score = min_score
         return [SearchHit("semantic-doc", 0, 0.9)]
 
@@ -96,6 +98,43 @@ class SearchSourceTest(unittest.TestCase):
 
         service.search(SearchQuery(text="кот", min_score=0.95))
         self.assertEqual(vector.min_score, 0.95, "явный порог запроса перекрывает")
+
+    def test_separate_layer_limits(self):
+        for i in range(3):
+            self._ingest(f"{i}.md", f"кот сидит на коврике {i}")
+        vector = _RecordingVectorSearch()
+        service = SearchService(
+            self.store, NoopStemmer(), vector_search=cast("VectorSearch", vector)
+        )
+
+        result = service.search(
+            SearchQuery(text="кот", limit=10, morph_limit=2, semantic_limit=7)
+        )
+
+        self.assertEqual(len(result.hits), 2, "морфология ограничена morph_limit")
+        self.assertEqual(len(result.semantic_hits), 1)
+        self.assertEqual(vector.limit, 7, "семантика ограничена semantic_limit")
+
+    def test_zero_layer_limit_disables_layer(self):
+        self._ingest("note.md", "кот сидит на коврике")
+        vector = _RecordingVectorSearch()
+        service = SearchService(
+            self.store, NoopStemmer(), vector_search=cast("VectorSearch", vector)
+        )
+
+        only_semantic = service.search(
+            SearchQuery(text="кот", morph_limit=0, semantic_limit=5)
+        )
+        self.assertEqual(only_semantic.hits, (), "morph_limit=0 выключает морфологию")
+        self.assertEqual(len(only_semantic.semantic_hits), 1)
+
+        vector.limit = None
+        only_morph = service.search(
+            SearchQuery(text="кот", morph_limit=5, semantic_limit=0)
+        )
+        self.assertEqual(len(only_morph.hits), 1)
+        self.assertEqual(only_morph.semantic_hits, ())
+        self.assertIsNone(vector.limit, "semantic_limit=0 не вызывает векторный слой")
 
 
 if __name__ == "__main__":

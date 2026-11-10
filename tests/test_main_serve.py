@@ -338,6 +338,17 @@ class SearchHttpTest(unittest.TestCase):
             SearchQuery(text="кот", limit=3, min_score=0.9),
         )
 
+    def test_search_over_http_passes_layer_limits(self):
+        result = cli.search_over_http(
+            self.settings, "кот", 3, morph_limit=2, semantic_limit=7
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            self.stub.queries[-1],
+            SearchQuery(text="кот", limit=3, morph_limit=2, semantic_limit=7),
+        )
+
     def test_search_over_http_unreachable_returns_none(self):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
@@ -381,12 +392,22 @@ class SearchHttpTest(unittest.TestCase):
             mock.patch.object(cli, "_local_search", return_value=result) as local,
             redirect_stdout(out),
         ):
-            rc = cli.run_search(None, "кот", 5, port=self.settings.port, min_score=0.9)
+            rc = cli.run_search(
+                None,
+                "кот",
+                5,
+                port=self.settings.port,
+                min_score=0.9,
+                morph_limit=2,
+                semantic_limit=7,
+            )
 
         self.assertEqual(rc, 0)
         local.assert_called_once()
         self.assertEqual(local.call_args.args[1:4], ("кот", 5, None))
         self.assertEqual(local.call_args.args[4], 0.9)
+        self.assertEqual(local.call_args.args[5], 2)
+        self.assertEqual(local.call_args.args[6], 7)
         self.assertIn("ВНИМАНИЕ", out.getvalue())
 
     def test_run_search_local_flag_skips_http(self):

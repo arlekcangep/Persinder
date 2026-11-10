@@ -55,11 +55,14 @@ class SearchService:
 
     def search(self, query: SearchQuery) -> SearchResult:
         text = query.text.strip()
-        if not text or query.limit <= 0:
+        if not text:
             return SearchResult(query=query.text)
 
+        semantic_limit = query.limit_for_semantic()
+        morph_limit = query.limit_for_morph()
+
         semantic: tuple[SearchHit, ...] = ()
-        if self._vector_search is not None:
+        if self._vector_search is not None and semantic_limit > 0:
             min_score = (
                 query.min_score
                 if query.min_score is not None
@@ -67,15 +70,20 @@ class SearchService:
             )
             semantic = self._enrich(
                 tuple(
-                    self._vector_search.search(text, query.limit, min_score=min_score)
+                    self._vector_search.search(
+                        text, semantic_limit, min_score=min_score
+                    )
                 )
             )
+
+        if morph_limit <= 0:
+            return SearchResult(query=query.text, semantic_hits=semantic)
 
         stemmed = analyze_to_string(text, self._stemmer)
         if not stemmed.strip():
             return SearchResult(query=query.text, semantic_hits=semantic)
 
-        rows = self._store.search_morph(stemmed, limit=query.limit)
+        rows = self._store.search_morph(stemmed, limit=morph_limit)
         hits = self._enrich(
             tuple(
                 SearchHit(

@@ -83,6 +83,30 @@ class ApiTest(unittest.TestCase):
             urllib.request.urlopen(self.base + "/search?q=x&min_score=abc")
         self.assertEqual(ctx.exception.code, 400)
 
+    def test_search_invalid_layer_limit(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(self.base + "/search?q=x&morph_limit=abc")
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_search_morph_limit(self):
+        for i in range(3):
+            with self._post(
+                "/ingest",
+                {
+                    "filename": f"n{i}.txt",
+                    "area": "personal",
+                    "text": f"котик номер {i}",
+                },
+            ) as resp:
+                self.assertEqual(json.load(resp)["status"], "indexed")
+
+        params = urlencode({"q": "котик", "limit": "10", "morph_limit": "2"})
+        url = f"{self.base}/search?{params}"
+        with urllib.request.urlopen(url) as resp:
+            body = json.load(resp)
+
+        self.assertEqual(len(body["hits"]), 2, "морфология ограничена morph_limit")
+
     def test_search_hit_has_context_three_sentences_around(self):
         text = (
             "line one\nline two\nline three\nline four\nline five\n"

@@ -750,6 +750,8 @@ def search_over_http(
     text: str,
     limit: int,
     min_score: float | None = None,
+    morph_limit: int | None = None,
+    semantic_limit: int | None = None,
 ) -> SearchResult | None:
     """Поиск через запущенный ``serve``; ``None`` — сервер недоступен.
 
@@ -759,6 +761,10 @@ def search_over_http(
     params = {"q": text, "limit": str(limit)}
     if min_score is not None:
         params["min_score"] = str(min_score)
+    if morph_limit is not None:
+        params["morph_limit"] = str(morph_limit)
+    if semantic_limit is not None:
+        params["semantic_limit"] = str(semantic_limit)
     query = urllib.parse.urlencode(params)
     url = f"http://{settings.host}:{settings.port}/search?{query}"
     try:
@@ -783,6 +789,8 @@ def _local_search(
     limit: int,
     config_path: Path | None = None,
     min_score: float | None = None,
+    morph_limit: int | None = None,
+    semantic_limit: int | None = None,
 ) -> SearchResult:
     """Локальный поиск в БД профиля (сервера нет или запрошен ``--local``).
 
@@ -811,7 +819,15 @@ def _local_search(
         min_score=config_min_score,
     )
     try:
-        return search.search(SearchQuery(text=text, limit=limit, min_score=min_score))
+        return search.search(
+            SearchQuery(
+                text=text,
+                limit=limit,
+                min_score=min_score,
+                morph_limit=morph_limit,
+                semantic_limit=semantic_limit,
+            )
+        )
     finally:
         store.close()
 
@@ -845,6 +861,8 @@ def run_search(
     port: int | None = None,
     local: bool = False,
     min_score: float | None = None,
+    morph_limit: int | None = None,
+    semantic_limit: int | None = None,
 ) -> int:
     """Поиск из консоли: сначала через запущенный сервер, затем локально.
 
@@ -852,7 +870,8 @@ def run_search(
     видит те же результаты, что ``GET /search``. Локальный поиск — fallback,
     когда сервер не отвечает, или принудительно (``--local``). Явный
     ``--config`` тоже включает локальный режим: он задаёт конфиг CLI, а не
-    сервера. ``min_score`` — порог косинуса семантического слоя.
+    сервера. ``min_score`` — порог косинуса семантического слоя;
+    ``morph_limit``/``semantic_limit`` — отдельные лимиты слоёв.
     """
     settings = Settings.default()
     if home:
@@ -863,7 +882,14 @@ def run_search(
         settings = replace(settings, port=port)
 
     if not (local or config_path is not None):
-        result = search_over_http(settings, text, limit, min_score)
+        result = search_over_http(
+            settings,
+            text,
+            limit,
+            min_score,
+            morph_limit,
+            semantic_limit,
+        )
         if result is not None:
             _print_search_result(result)
             return 0
@@ -873,7 +899,15 @@ def run_search(
             flush=True,
         )
 
-    result = _local_search(settings, text, limit, config_path, min_score)
+    result = _local_search(
+        settings,
+        text,
+        limit,
+        config_path,
+        min_score,
+        morph_limit,
+        semantic_limit,
+    )
     _print_search_result(result)
     return 0
 
@@ -1006,6 +1040,18 @@ def main(argv: list[str] | None = None) -> int:
         help="порог косинуса семантического слоя (например 0.85); "
         "абсолютное значение зависит от модели",
     )
+    search_p.add_argument(
+        "--morph-limit",
+        type=int,
+        default=None,
+        help="лимит морфологического слоя (0 — выключить; по умолчанию --limit)",
+    )
+    search_p.add_argument(
+        "--semantic-limit",
+        type=int,
+        default=None,
+        help="лимит семантического слоя (0 — выключить; по умолчанию --limit)",
+    )
     search_p.add_argument("--limit", type=int, default=20)
     search_p.add_argument("text")
 
@@ -1044,6 +1090,8 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             local=args.local,
             min_score=args.min_score,
+            morph_limit=args.morph_limit,
+            semantic_limit=args.semantic_limit,
         )
     if args.command == "ann":
         return run_ann_rebuild(args.home, args.model)
