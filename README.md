@@ -64,10 +64,11 @@ PYTHONPATH=src python3 -m persinder model use e5-small-int8-v1       # пере�
 # --local — искать в БД профиля без сервера.
 PYTHONPATH=src python3 -m persinder search "коты сидят" --limit 10
 
-# только семантические хиты с косинусом не ниже порога (порог зависит от модели)
+# только семантические хиты с косинусом не ниже порога (порог подбирается
+# под свои данные: короткие тексты дают заметно ниже, чем длинные чанки)
 # и отдельные лимиты слоёв: морфология 5, семантика 50
 PYTHONPATH=src python3 -m persinder search "кузя" \
-  --morph-limit 5 --semantic-limit 50 --min-score 0.87
+  --morph-limit 5 --semantic-limit 50 --min-score 0.85
 
 # ANN-индекс USearch: пересобрать из таблицы (холодный старт/рассинхрон)
 PYTHONPATH=src python3 -m persinder ann rebuild
