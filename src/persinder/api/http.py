@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -66,7 +67,42 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid limit"})
             return
 
-        result = self._services().search.search(SearchQuery(text=text, limit=limit))
+        min_values = params.get("min_score")
+        raw_min_score = min_values[0] if min_values else None
+        min_score: float | None = None
+        if raw_min_score is not None:
+            try:
+                min_score = float(raw_min_score)
+            except ValueError:
+                self._send_json(400, {"error": "invalid min_score"})
+                return
+            if not math.isfinite(min_score):
+                self._send_json(400, {"error": "invalid min_score"})
+                return
+
+        layer_limits: dict[str, int | None] = {
+            "morph_limit": None,
+            "semantic_limit": None,
+        }
+        for name in layer_limits:
+            values = params.get(name)
+            if values is None:
+                continue
+            try:
+                layer_limits[name] = int(values[0])
+            except ValueError:
+                self._send_json(400, {"error": f"invalid {name}"})
+                return
+
+        result = self._services().search.search(
+            SearchQuery(
+                text=text,
+                limit=limit,
+                min_score=min_score,
+                morph_limit=layer_limits["morph_limit"],
+                semantic_limit=layer_limits["semantic_limit"],
+            )
+        )
         self._send_json(200, SearchResponse.from_result(result).to_dict())
 
     def do_POST(self) -> None:  # noqa: N802

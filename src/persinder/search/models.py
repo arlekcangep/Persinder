@@ -7,19 +7,48 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SearchQuery:
-    """Запрос поиска."""
+    """Запрос поиска.
+
+    ``limit`` — общий лимит по умолчанию для обоих слоёв. ``morph_limit`` и
+    ``semantic_limit`` задают лимит конкретного слоя (``None`` — взять
+    ``limit``); ``0`` выключает слой. ``min_score`` — порог косинуса для
+    семантического слоя (``None`` — без порога, только ``limit``). Абсолютное
+    значение порога зависит от модели: его подбирают под конкретную
+    модель/корпус, а не считают вероятностью.
+    """
 
     text: str
     limit: int = 20
+    min_score: float | None = None
+    morph_limit: int | None = None
+    semantic_limit: int | None = None
+
+    def limit_for_morph(self) -> int:
+        """Лимит морфологического слоя: свой или общий."""
+        return self.limit if self.morph_limit is None else self.morph_limit
+
+    def limit_for_semantic(self) -> int:
+        """Лимит семантического слоя: свой или общий."""
+        return self.limit if self.semantic_limit is None else self.semantic_limit
 
 
 @dataclass(frozen=True)
 class SearchHit:
-    """Одно попадание поиска."""
+    """Одно попадание поиска.
+
+    ``context`` — текст вокруг чанка (строки хита плюс несколько строк до и
+    после, ``None`` — если сырой текст недоступен). ``area``, ``source_path``
+    и ``filename`` — источник документа: область, полный путь на диске и имя
+    файла (``source_path`` пуст у виртуального документа — web/вставка).
+    """
 
     document_id: str
     chunk_index: int
     score: float
+    context: str | None = None
+    area: str = ""
+    source_path: str = ""
+    filename: str = ""
 
 
 @dataclass(frozen=True)

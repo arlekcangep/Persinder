@@ -14,7 +14,12 @@ import hashlib
 from pathlib import Path
 
 from ..domain import Area, Chunk, Document, EmbeddingJob, chunk_text, utcnow
-from ..embed.sidecar import delete_file_sidecars, delete_virtual_sidecars
+from ..embed.sidecar import (
+    delete_file_sidecars,
+    delete_virtual_sidecars,
+    file_sidecar_path,
+    virtual_sidecar_path,
+)
 from ..interfaces import MetaStore, Stemmer, TextStore
 from ..morphology import analyze_to_string
 from .journal import IngestEntry, IngestEvent, IngestJournal
@@ -93,12 +98,51 @@ class IngestService:
             for old_id in evicted:
                 delete_virtual_sidecars(self._virtual_dir, old_id)
 
+    def _models_without_sidecar(
+        self,
+        doc_id: str,
+        source_path: str,
+        models: tuple[str, ...] | None = None,
+    ) -> list[str]:
+        """Модели, под которыми у источника ещё нет сайдкара.
+
+        Сайдкар — признак того, что документ уже отработан под моделью для
+        этого источника: воркер пишет его только после записи векторов в
+        таблицу. Уже посчитанное заново в очередь не ставим — иначе каждый
+        скан watcher'а (он снова видит те же файлы) пересчитывал бы эмбеддинги
+        всех документов, постоянно нагружая процессор. Полный пересчёт — это
+        именно ``--reindex`` (он ставит в очередь все источники разом).
+
+        ``models`` — модели именно этой записи (область задала свою или
+        выключила семантику); ``None`` — глобальные модели сервиса.
+        """
+        missing: list[str] = []
+        for model in self._embedding_models if models is None else models:
+            if source_path:
+                path = file_sidecar_path(source_path, model)
+            elif self._virtual_dir is not None:
+                path = virtual_sidecar_path(self._virtual_dir, doc_id, model)
+            else:
+                # Некуда положить сайдкар — считаем, что его нет.
+                missing.append(model)
+                continue
+            if not path.exists():
+                missing.append(model)
+        return missing
+
     # --- приём ---
 
     def ingest(self, request: IngestRequest) -> IngestResult:
         text = request.text or ""
         area = request.area.value
         source_path = request.source_path or ""
+        # Модели этой записи: область могла выбрать свою или выключить семантику;
+        # None — глобальные модели профиля (старое поведение).
+        models = (
+            request.embedding_models
+            if request.embedding_models is not None
+            else self._embedding_models
+        )
         if not text.strip():
             self._log(
                 IngestEvent.REJECTED,
@@ -131,9 +175,13 @@ class IngestService:
             self._drop_sidecars(evicted, previous, source_path, existing)
             # У нового источника свои сайдкары — ставим его задачи под каждой
             # активной моделью (D24: пока embedding ≠ search, файл считается обеими).
-            self._store.enqueue_document(
-                existing, area, source_path, models=list(self._embedding_models)
-            )
+            # Но только если сайдкара ещё нет: повторный скан watcher'а не
+            # должен заново считать уже посчитанные эмбеддинги.
+            pending_models = self._models_without_sidecar(existing, source_path, models)
+            if pending_models:
+                self._store.enqueue_document(
+                    existing, area, source_path, models=pending_models
+                )
             self._log(
                 IngestEvent.DUPLICATED,
                 doc_id=existing,
@@ -175,6 +223,7 @@ class IngestService:
             char_count=len(text),
             text_key=doc_id,
             created_at=now,
+            extractor=request.extractor or "",
         )
         jobs = [
             EmbeddingJob(
@@ -186,7 +235,7 @@ class IngestService:
                 model=model,
             )
             for chunk in chunks
-            for model in self._embedding_models
+            for model in models
         ]
 
         evicted = self._store.save_document(
@@ -227,6 +276,27 @@ class IngestService:
             delete_virtual_sidecars(self._virtual_dir, purged)
         self._log(IngestEvent.REMOVED, doc_id=doc_id, area=area_name, filename=filename)
         return RemoveResult(found=True, document_id=purged)
+
+    def remove_source_tree(self, area: Area, filename: str) -> RemoveResult:
+        """Убрать источник и все его части (файлы контейнера: ``filename/...``).
+
+        Файл-контейнер (ZIP) даёт по источнику на каждую запись
+        (``bundle.zip/inner.md``). При исчезновении самого файла нужно убрать
+        и его, и части. Для обычного файла частей нет — поведение как у
+        ``remove_source``.
+        """
+        area_name = area.value
+        names = [filename]
+        names.extend(self._store.source_filenames_under(area_name, filename + "/"))
+        found = False
+        purged_doc: str | None = None
+        for name in names:
+            result = self.remove_source(area, name)
+            if result.found:
+                found = True
+                if purged_doc is None and result.document_id is not None:
+                    purged_doc = result.document_id
+        return RemoveResult(found=found, document_id=purged_doc)
 
     # --- восстановление ---
 

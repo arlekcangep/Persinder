@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from ..domain import Chunk, Document, EmbeddingJob, utcnow
@@ -20,7 +21,8 @@ CREATE TABLE IF NOT EXISTS documents (
     title        TEXT,
     char_count   INTEGER NOT NULL,
     text_key     TEXT NOT NULL,
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    extractor    TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS document_sources (
@@ -101,6 +103,7 @@ class SqliteStore:
         for table, column in (
             ("document_sources", "source_path"),
             ("embedding_queue", "source_path"),
+            ("documents", "extractor"),
         ):
             cols = [
                 str(row["name"])
@@ -204,12 +207,35 @@ class SqliteStore:
             for row in rows
         ]
 
+    def chunk_span(self, doc_id: str, chunk_index: int) -> tuple[int, int] | None:
+        """Границы чанка в сыром тексте: ``(char_start, char_end)``."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT char_start, char_end FROM chunks "
+                "WHERE doc_id = ? AND chunk_index = ?",
+                (doc_id, chunk_index),
+            ).fetchone()
+        if row is None:
+            return None
+        return (int(row["char_start"]), int(row["char_end"]))
+
     def pending_embeddings(self, limit: int = 100) -> list[EmbeddingQueueItem]:
+        """Задачи на эмбеддинги, малые документы первыми.
+
+        ``ORDER BY`` — по числу невыполненных задач документа, затем по id:
+        один гигантский документ (большой PDF — десятки тысяч чанков) не
+        замораживает очередь, пока считаются мелкие — сайдкары продолжают
+        появляться, а крупный молотится между ними.
+        """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, doc_id, chunk_index, area, source_path, model "
-                "FROM embedding_queue WHERE status = 'pending' "
-                "ORDER BY id LIMIT ?",
+                "FROM embedding_queue "
+                "WHERE status = 'pending' "
+                "ORDER BY (SELECT COUNT(*) FROM embedding_queue q2"
+                "          WHERE q2.status = 'pending'"
+                "          AND q2.doc_id = embedding_queue.doc_id),"
+                "         id LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._queue_item(row) for row in rows]
@@ -303,8 +329,11 @@ class SqliteStore:
                 self._purge_document(old_id)
                 evicted.append(old_id)
         self._conn.execute(
-            "INSERT OR IGNORE INTO document_sources"
-            "(doc_id, area, filename, source_path, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO document_sources"
+            "(doc_id, area, filename, source_path, created_at) VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(doc_id, area, filename) DO UPDATE SET source_path ="
+            " CASE WHEN excluded.source_path != '' THEN excluded.source_path"
+            " ELSE document_sources.source_path END",
             (doc_id, area, filename, source_path, utcnow()),
         )
         return evicted
@@ -345,6 +374,17 @@ class SqliteStore:
                 (area, filename),
             ).fetchone()
         return str(row["source_path"]) if row else ""
+
+    def source_filenames_under(self, area: str, prefix: str) -> list[str]:
+        """Имена источников области, начинающихся с ``prefix`` (части контейнера)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT filename FROM document_sources"
+                " WHERE area = ? AND substr(filename, 1, ?) = ?"
+                " ORDER BY filename",
+                (area, len(prefix), prefix),
+            ).fetchall()
+        return [str(row["filename"]) for row in rows]
 
     def _purge_document(self, doc_id: str) -> None:
         """Удалить документ и все производные строки (нужен открытый `with`)."""
@@ -404,8 +444,9 @@ class SqliteStore:
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO documents"
-                "(id, content_hash, title, char_count, text_key, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(id, content_hash, title, char_count, text_key, created_at, "
+                " extractor) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     doc.id,
                     doc.content_hash,
@@ -413,6 +454,7 @@ class SqliteStore:
                     doc.char_count,
                     doc.text_key,
                     doc.created_at,
+                    doc.extractor,
                 ),
             )
             evicted = self._bind_source(doc.id, area, filename, source_path)
@@ -496,21 +538,121 @@ class SqliteStore:
                         ),
                     )
 
+    def enqueue_missing(
+        self,
+        models: list[str],
+        has_sidecar: Callable[[str, str, str], bool],
+        models_for: Callable[[str, str], tuple[str, ...]] | None = None,
+    ) -> None:
+        """Поставить задачи только для источников без сайдкара под моделью.
+
+        То же, что ``enqueue_all``, но уже отработанные источники (сайдкар на
+        месте **и** векторы в таблице есть) в очередь не возвращает. Нужно
+        ``--reindex``: рестарт не должен перезаполнять очередь всем подряд —
+        только тем, чего реально нет.
+
+        Сайдкар без векторов в таблице «отработанным» не считается: так
+        восстанавливается профиль, где БД новая/потерянная, а сайдкары
+        приехали из синка — иначе документ был бы невидим для семантики.
+
+        ``models_for(area, source_path)`` — модели конкретного источника по
+        конфигу (своя модель папки, выключенная семантика); ``None`` — брать
+        общий список ``models``. Пустой результат — источник не индексируется
+        семантически.
+        """
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT DISTINCT doc_id, area, source_path FROM document_sources"
+            ).fetchall()
+            for row in rows:
+                doc_id, area, source_path = (
+                    str(row["doc_id"]),
+                    str(row["area"]),
+                    str(row["source_path"]),
+                )
+                chosen = (
+                    models_for(area, source_path)
+                    if models_for is not None
+                    else tuple(models)
+                )
+                for model in chosen:
+                    if has_sidecar(model, doc_id, source_path) and (
+                        self.embeddings_complete(model, doc_id)
+                    ):
+                        continue
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO embedding_queue"
+                        "(doc_id, chunk_index, area, source_path, model, "
+                        "status, created_at) "
+                        "SELECT doc_id, chunk_index, ?, ?, ?, 'pending', ?"
+                        " FROM chunks WHERE doc_id = ?",
+                        (area, source_path, model, utcnow(), doc_id),
+                    )
+
+    def doc_ids_in_paths(
+        self, prefixes: list[str], *, include_virtual: bool = False
+    ) -> set[str]:
+        """id документов, у которых есть источник под одним из префиксов путей.
+
+        Нужно для скоупа векторного поиска: модель ищет только там, где ею
+        индексировали, — старые векторы из других папок не дают мусор.
+        ``prefixes`` — каталоги областей (как хранится ``source_path``);
+        ``include_virtual`` — добавить источники без файла на диске
+        (``source_path = ''``, web/вставленный текст).
+        """
+        conditions: list[str] = []
+        params: list[object] = []
+        for prefix in prefixes:
+            if not prefix:
+                continue
+            conditions.append("substr(source_path, 1, ?) = ?")
+            params.extend([len(prefix), prefix])
+        if include_virtual:
+            conditions.append("source_path = ''")
+        if not conditions:
+            return set()
+        sql = "SELECT DISTINCT doc_id FROM document_sources WHERE " + " OR ".join(
+            conditions
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return {str(row["doc_id"]) for row in rows}
+
     def all_sources(self) -> list[SourceRow]:
         """Все источники (для удаления сайдкаров модели)."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT doc_id, area, filename, source_path FROM document_sources"
             ).fetchall()
-        return [
-            SourceRow(
-                doc_id=str(row["doc_id"]),
-                area=str(row["area"]),
-                filename=str(row["filename"]),
-                source_path=str(row["source_path"]),
-            )
-            for row in rows
-        ]
+        return [self._source_row(row) for row in rows]
+
+    def sources_for_docs(self, doc_ids: list[str]) -> list[SourceRow]:
+        """Источники документов (для выдачи пути в результатах поиска).
+
+        У документа может быть несколько источников (одинаковый текст в разных
+        местах). Порядок — реальные файлы раньше виртуальных, затем по ``id``:
+        потребитель берёт первый и получает стабильный «главный» источник.
+        """
+        if not doc_ids:
+            return []
+        placeholders = ",".join("?" for _ in doc_ids)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT doc_id, area, filename, source_path FROM document_sources"
+                f" WHERE doc_id IN ({placeholders})"
+                " ORDER BY CASE WHEN source_path = '' THEN 1 ELSE 0 END, id",
+                doc_ids,
+            ).fetchall()
+        return [self._source_row(row) for row in rows]
+
+    @staticmethod
+    def _source_row(row: sqlite3.Row) -> SourceRow:
+        return SourceRow(
+            doc_id=str(row["doc_id"]),
+            area=str(row["area"]),
+            filename=str(row["filename"]),
+            source_path=str(row["source_path"]),
+        )
 
     # --- эмбеддинги (локальное производное для векторного поиска, модуль 3) ---
 
@@ -552,6 +694,21 @@ class SqliteStore:
             ).fetchall()
         return [self._embedding_row(row) for row in rows]
 
+    def embeddings_for_doc(self, model: str, doc_id: str) -> list[EmbeddingRow]:
+        """Векторы чанков одного документа под моделью.
+
+        Нужно воркеру, чтобы не пересчитывать чанки, которые уже в БД
+        (упавший прогон оставил векторы, но не сайдкар): повторный проход
+        берёт их из таблицы и считает только недостающие.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, doc_id, chunk_index, vector FROM embeddings "
+                "WHERE model = ? AND doc_id = ? ORDER BY chunk_index",
+                (model, doc_id),
+            ).fetchall()
+        return [self._embedding_row(row) for row in rows]
+
     def embeddings_ids_for_model(self, model: str) -> list[EmbeddingRow]:
         """Все строки модели (для реконсиляции ANN-индекса с таблицей)."""
         with self._lock:
@@ -588,6 +745,32 @@ class SqliteStore:
         """Убрать векторы модели (``model remove`` — вместе с сайдкарами)."""
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM embeddings WHERE model = ?", (model,))
+
+    def count_embeddings(self, model: str) -> int:
+        """Сколько векторов чанков есть под моделью (сверка с ANN-индексом)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS total FROM embeddings WHERE model = ?",
+                (model,),
+            ).fetchone()
+        return int(row["total"])
+
+    def embeddings_complete(self, model: str, doc_id: str) -> bool:
+        """Все чанки документа имеют вектор под моделью.
+
+        Сайдкар — кэш, а векторы в таблице — то, чем реально ищет ANN: при
+        восстановлении профиля из синка (сайдкары есть, БД новая) или после
+        потери таблицы документ иначе остался бы невидимым для поиска.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT"
+                " (SELECT COUNT(*) FROM chunks WHERE doc_id = ?) AS chunks,"
+                " (SELECT COUNT(*) FROM embeddings"
+                "  WHERE model = ? AND doc_id = ?) AS vectors",
+                (doc_id, model, doc_id),
+            ).fetchone()
+        return int(row["chunks"]) <= int(row["vectors"])
 
     def embedding_models(self) -> list[str]:
         """Модели, у которых есть векторы (для ``persinder ann rebuild``)."""

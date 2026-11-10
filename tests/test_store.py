@@ -5,7 +5,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from persinder.domain import Chunk, Document, EmbeddingJob
+from persinder.embed import pack_f16_vectors
 from persinder.store import SqliteStore
+
+DIM = 4
+
+
+def _blob(vector: list[float]) -> bytes:
+    return pack_f16_vectors([vector], DIM)
 
 
 class SqliteStoreTest(unittest.TestCase):
@@ -17,7 +24,9 @@ class SqliteStoreTest(unittest.TestCase):
         self.store.close()
         self._tmp.cleanup()
 
-    def _save(self, doc_id: str = "d1", stemmed: str = "привет мир") -> None:
+    def _save(
+        self, doc_id: str = "d1", stemmed: str = "привет мир", filename: str = "a.txt"
+    ) -> None:
         doc = Document(
             id=doc_id,
             content_hash=doc_id,
@@ -35,7 +44,7 @@ class SqliteStoreTest(unittest.TestCase):
                 created_at="2026-01-01T00:00:00+00:00",
             )
         ]
-        self.store.save_document(doc, "personal", "a.txt", chunks, jobs)
+        self.store.save_document(doc, "personal", filename, chunks, jobs)
 
     def test_save_and_find_by_hash(self):
         self._save()
@@ -47,6 +56,12 @@ class SqliteStoreTest(unittest.TestCase):
         found = self.store.search_morph("нейросети")
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["doc_id"], "d1")
+
+    def test_chunk_span(self):
+        self._save()
+        self.assertEqual(self.store.chunk_span("d1", 0), (0, 10))
+        self.assertIsNone(self.store.chunk_span("d1", 99))
+        self.assertIsNone(self.store.chunk_span("nope", 0))
 
     def test_pending_embeddings(self):
         self._save()
@@ -76,12 +91,126 @@ class SqliteStoreTest(unittest.TestCase):
         pending = self.store.pending_embeddings(limit=100)
         self.assertEqual(len(pending), 3)  # placeholder-v1 + m1 + m2
 
+    def test_enqueue_missing_uses_resolver(self):
+        self._save("d1")
+        self.store.drop_queue_model("placeholder-v1")
+        self.store.add_source("d1", "personal", "b.txt", source_path="/vault/a/b.md")
+        self.store.add_source("d1", "personal", "c.txt", source_path="/vault/b/c.md")
+
+        def models_for(_area: str, source_path: str) -> tuple[str, ...]:
+            return ("m-virtual",) if not source_path else ("m-a",)
+
+        self.store.enqueue_missing(
+            ["global"], lambda _model, _doc, _path: False, models_for=models_for
+        )
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual(
+            sorted(item["model"] for item in pending),
+            ["m-a", "m-a", "m-virtual"],
+            "резолвер выбирает модель по источнику, а не общий список",
+        )
+
+    def test_enqueue_missing_resolver_empty_skips(self):
+        self._save()
+        self.store.drop_queue_model("placeholder-v1")
+        self.store.enqueue_missing(
+            ["global"],
+            lambda _model, _doc, _path: False,
+            models_for=lambda _area, _path: (),
+        )
+        self.assertEqual(self.store.pending_embeddings(limit=100), [])
+
+    def test_enqueue_missing_repairs_lost_vectors(self):
+        """Сайдкар есть, а векторов в таблице нет — документ должен вернуться
+        в очередь: иначе после восстановления БД он невидим для семантики."""
+        self._save("d1")
+        self.store.drop_queue_model("placeholder-v1")
+        self.store.put_embeddings("m1", [("d1", 0, _blob([1.0, 0.0, 0.0, 0.0]))])
+
+        def has_sidecar(_model: str, _doc: str, _path: str) -> bool:
+            return True
+
+        self.store.enqueue_missing(["m1"], has_sidecar)
+        self.assertEqual(
+            self.store.pending_embeddings(limit=100),
+            [],
+            "сайдкар и векторы на месте — задача не нужна",
+        )
+
+        self.store.drop_embeddings_model("m1")
+        self.store.enqueue_missing(["m1"], has_sidecar)
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual([item["model"] for item in pending], ["m1"])
+
+    def test_doc_ids_in_paths(self):
+        self._save("d1")  # виртуальный источник (source_path = "")
+        self.store.add_source("d1", "personal", "b.txt", source_path="/vault/a/b.md")
+        self._save("d2", filename="d2.txt")
+        self.store.add_source("d2", "personal", "d.txt", source_path="/vault/b/d.md")
+        self.assertEqual(self.store.doc_ids_in_paths(["/vault/a/"]), {"d1"})
+        self.assertEqual(self.store.doc_ids_in_paths(["/vault/"]), {"d1", "d2"})
+        self.assertEqual(self.store.doc_ids_in_paths(["/other/"]), set())
+        # виртуальные источники — только по явному разрешению
+        self.assertEqual(
+            self.store.doc_ids_in_paths([], include_virtual=True), {"d1", "d2"}
+        )
+        self.assertEqual(self.store.doc_ids_in_paths([]), set())
+
+    def test_pending_embeddings_small_docs_first(self):
+        """Очередь отдаёт малые документы раньше гигантских: большой PDF не
+        замораживает появление сайдкаров для мелких файлов (порция 100 задач
+        не захватывается целиком одним огромным документом)."""
+
+        def save_doc(doc_id: str, n: int) -> None:
+            doc = Document(
+                id=doc_id,
+                content_hash=doc_id,
+                title=None,
+                char_count=n * 10,
+                text_key=doc_id,
+                created_at="2026-01-01T00:00:00+00:00",
+            )
+            chunks = [
+                Chunk(index=i, char_start=i * 10, char_end=i * 10 + 10, stemmed="слово")
+                for i in range(n)
+            ]
+            jobs = [
+                EmbeddingJob(
+                    doc_id=doc_id,
+                    chunk_index=i,
+                    area="personal",
+                    created_at="2026-01-01T00:00:00+00:00",
+                )
+                for i in range(n)
+            ]
+            self.store.save_document(doc, "personal", f"{doc_id}.txt", chunks, jobs)
+
+        save_doc("big", 50)  # гигантский — в БД первый, задач больше всех
+        save_doc("small", 1)  # мелкий — после
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual(pending[0]["doc_id"], "small", "мелкий документ первым")
+        self.assertEqual(len(pending), 51)
+
     def test_all_sources(self):
         self._save()
         self.store.add_source("d1", "personal", "b.txt", source_path="/x/b.txt")
         sources = self.store.all_sources()
         self.assertTrue(any(row["source_path"] == "/x/b.txt" for row in sources))
         self.assertTrue(any(row["source_path"] == "" for row in sources))
+
+    def test_sources_for_docs_prefers_real_file(self):
+        self._save()
+        self.store.add_source("d1", "web", "web-note", source_path="")
+        self.store.add_source("d1", "personal", "a.txt", source_path="/notes/a.txt")
+
+        rows = self.store.sources_for_docs(["d1", "nope"])
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["area"], "personal")
+        self.assertEqual(rows[0]["filename"], "a.txt")
+        self.assertEqual(rows[0]["source_path"], "/notes/a.txt")
+        self.assertIn("", [row["source_path"] for row in rows])
+        self.assertEqual(self.store.sources_for_docs([]), [])
 
     def test_embeddings_roundtrip(self):
         self._save()

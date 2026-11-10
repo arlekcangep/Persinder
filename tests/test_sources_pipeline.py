@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -21,6 +22,7 @@ from persinder.sources import (
     ScanResult,
     TextExtractor,
     WatchConfig,
+    default_registry,
 )
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
@@ -42,6 +44,7 @@ class PipelineTest(unittest.TestCase):
         self.texts = self.data / "texts"
         ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
         registry = ExtractorRegistry((MarkdownExtractor(), TextExtractor()))
+        self.registry = registry
         self.journal = Journal(self.data / "journal.jsonl")
         self.pipeline = IndexingPipeline(ingest, registry, journal=self.journal)
         self.scanner = AreaScanner(WatchConfig(debounce=0.0))
@@ -71,6 +74,50 @@ class PipelineTest(unittest.TestCase):
         stats = self.pipeline.process(self._scan())
         self.assertEqual(stats.indexed, 1)
         self.assertEqual(self.store.counts()["documents"], 1)
+
+    def test_area_model_overrides_global_queue(self):
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("markdown",),
+            embedding_model="m-area",
+        )
+        self._write("note.md", "заметка только для модели папки")
+        stats = self.pipeline.process(self._scan(area))
+        self.assertEqual(stats.indexed, 1)
+        self.assertEqual(
+            [item["model"] for item in self.store.pending_embeddings(limit=100)],
+            ["m-area"],
+            "глобальная placeholder-v1 в этой папке не должна ставиться",
+        )
+
+    def test_area_semantic_false_skips_embeddings(self):
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("markdown",),
+            semantic=False,
+        )
+        self._write("note.md", "морфология без семантики")
+        stats = self.pipeline.process(self._scan(area))
+        self.assertEqual(stats.indexed, 1)
+        self.assertEqual(self.store.pending_embeddings(limit=100), [])
+
+    def test_global_semantic_false_skips_embeddings(self):
+        ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
+        pipeline = IndexingPipeline(
+            ingest, self.registry, journal=self.journal, semantic=False
+        )
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("markdown",),
+            embedding_model="m-area",
+        )
+        self._write("note.md", "семантика выключена глобально")
+        stats = pipeline.process(self._scan(area))
+        self.assertEqual(stats.indexed, 1)
+        self.assertEqual(self.store.pending_embeddings(limit=100), [])
 
     def test_modified_same_text_is_duplicate(self):
         self._write("note.md", "первая версия")
@@ -156,6 +203,43 @@ class PipelineTest(unittest.TestCase):
         counts = self.store.counts()
         self.assertEqual(counts["documents"], 1)
         self.assertEqual(counts["chunks"], 1)
+
+    def test_zip_archive_indexed_as_part_per_entry(self):
+        # Область допускает zip; каждая запись архива — отдельный документ.
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("archive", "markdown", "text"),
+        )
+        ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
+        pipeline = IndexingPipeline(ingest, default_registry(), journal=self.journal)
+
+        archive_path = self.area.path / "bundle.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("inside.md", "#tag содержимое архива")
+            archive.writestr("sub/two.txt", "второй файл внутри")
+
+        stats = pipeline.process(self._scan(area))
+        self.assertEqual(stats.indexed, 2)
+        self.assertEqual(self.store.counts()["documents"], 2)
+        # источники — части архива, каждая со своим именем
+        parts = self.store.source_filenames_under(Area.PERSONAL.value, "bundle.zip/")
+        self.assertEqual(parts, ["bundle.zip/inside.md", "bundle.zip/sub/two.txt"])
+        stored = "".join(
+            p.read_text(encoding="utf-8") for p in self.texts.glob("*.txt")
+        )
+        self.assertIn("содержимое архива", stored)
+        self.assertIn("второй файл внутри", stored)
+
+        # Удаление архива убирает и сам файл, и все его части.
+        archive_path.unlink()
+        deleted = pipeline.process(self._scan(area))
+        self.assertEqual(deleted.deleted, 1)
+        self.assertEqual(self.store.counts()["documents"], 0)
+        self.assertEqual(self.store.counts()["chunks"], 0)
+        self.assertEqual(
+            self.store.source_filenames_under(Area.PERSONAL.value, "bundle.zip/"), []
+        )
 
 
 if __name__ == "__main__":

@@ -1,22 +1,43 @@
 # Пример конфига Persinder: области + watcher.
 # Положите как, например, ~/.persinder/config.yaml и правьте под себя.
+#
+# Каталог приложения (БД, тексты, модели, ANN) задаётся запуском: --home,
+# по умолчанию ~/.persinder. Модели живут в <home>/models. Его класть в
+# конфиг не нужно — БД не должна быть внутри синхронизируемых папок.
 
-# Каталог данных (БД, временные тексты) — НЕ внутри синхронизируемых папок.
-data_dir: ~/.persinder
+# Семантика (эмбеддинги) глобально: false — полностью выключить индексирование
+# векторов; morph-поиск и обычная индексация продолжают работать.
+semantic: true
+
+# Поиск: абсолютный порог косинуса для семантического слоя. Абсолютное
+# значение зависит от модели, корпуса и длины текста — подбирается под свои
+# данные. У e5 «фон» может быть 0.8+, а короткий релевантный текст давать
+# ~0.86, поэтому порог 0.87 легко отсекает нужное. null — без порога.
+search:
+  min_score: null   # например 0.85, но проверьте на своих запросах
 
 areas:
   # Заметки Obsidian: markdown + текст
   - path: ~/Obsidian/Personal
     role: personal            # personal | foreign | web
-    formats: [markdown, text] # какие экстракторы применять к файлам
+    formats: [markdown, text] # markdown — только md; [structure-text] — весь класс
+    # embedding_model: e5-small-int8-v1  # модель только для этой папки
+    # semantic: false                    # папка без эмбеддингов
   # Сохранённые веб-страницы: html и mhtml
   - path: ~/WebArchive
     role: web
     formats: [html, mhtml, markdown, text]  # pdf — если стоит extra 'pdf'
+    # embedding_model: e5-small-int8-v1
+  # Архивы (zip/7z/tar/gz/rar): каждая запись — отдельный документ
+  # (имя: архив/запись; вложенные архивы — на один уровень)
+  - path: ~/Downloads/Archives
+    role: foreign
+    formats: [archive, markdown, text, html]
   # Копии чужого (книги, статьи): пока не индексируем
   - path: ~/Library/Books
     role: foreign
     formats: []               # пусто — область пропускается
+    semantic: false           # даже если появится formats — без эмбеддингов
 
 watch:
   poll_interval: 30   # сек между полными сканами (источник правды)

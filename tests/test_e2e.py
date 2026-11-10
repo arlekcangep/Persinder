@@ -34,7 +34,7 @@ class EndToEndTest(unittest.TestCase):
         self._tmp = TemporaryDirectory()
         root = Path(self._tmp.name)
         self.data_dir = root / "data"
-        settings = Settings(data_dir=self.data_dir)
+        settings = Settings(home=self.data_dir)
         self.settings = settings
         self.ingest, self.search, self.store = build_service(settings)
         self.server = make_server(self.ingest, self.search, host="127.0.0.1", port=0)
@@ -85,6 +85,10 @@ class EndToEndTest(unittest.TestCase):
         self.assertTrue(hits)
         self.assertIn(hits[0]["document_id"], {doc_id})
         self.assertEqual(hits[0]["chunk_index"], 0)
+        # источник: area и имя файла; путь пуст — это HTTP-вставка (виртуальный)
+        self.assertEqual(hits[0]["area"], "personal")
+        self.assertEqual(hits[0]["filename"], "note.md")
+        self.assertEqual(hits[0]["source_path"], "")
         # модуль 3: семантический слой — отдельное поле; до эмбеддингов пуст
         self.assertIn("semantic_hits", result)
         self.assertEqual(result["semantic_hits"], [])
@@ -109,6 +113,13 @@ class EndToEndTest(unittest.TestCase):
         self.assertTrue(semantic, "векторные хиты должны появиться после embed")
         self.assertIn(semantic[0]["document_id"], {doc_id})
         self.assertEqual(semantic[0]["chunk_index"], 0)
+
+        # Порог косинуса отсекает всё: выше 1.0 семантических хитов быть не может.
+        filtered = self._get(
+            "/search?q=" + urllib.parse.quote("коты сидят") + "&min_score=2.0"
+        )
+        self.assertEqual(filtered["semantic_hits"], [])
+        self.assertTrue(filtered["hits"], "порог не влияет на морфологический слой")
 
     def test_semantic_hits_via_ann_index(self):
         """Модуль 3: воркер с ann_dir строит USearch-индекс, поиск идёт по нему."""

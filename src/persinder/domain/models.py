@@ -39,6 +39,8 @@ class Document:
     char_count: int
     text_key: str
     created_at: str
+    extractor: str = ""
+    """Каким экстрактором извлечён текст (пусто — приём напрямую, без файла)."""
 
 
 @dataclass(frozen=True)

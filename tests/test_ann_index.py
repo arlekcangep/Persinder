@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import numpy as np
+
 from persinder.vectorindex import UsannIndex
 
 
@@ -56,6 +58,48 @@ class UsannIndexTest(unittest.TestCase):
         self.index.add([7], [[1.0, 0.0, 0.0, 0.0]])
         self.index.drop()
         self.assertFalse(self.path.exists())
+
+    def test_corrupt_file_recovers_fresh(self):
+        """Битый файл (обрыв сохранения упавшим прогоном) не валит индекс:
+        он удаляется и индекс строится с нуля — документы не застревают."""
+        self.path.write_bytes(b"not a usearch file" * 16)
+        index = UsannIndex(self.path, dim=4)  # открытие падает — не разваливается
+        self.assertFalse(self.path.exists(), "битый файл удалён")
+        index.add([1], [[1.0, 0.0, 0.0, 0.0]])
+        self.assertTrue(self.path.exists())
+        self.assertEqual(index.size, 1)
+        self.assertAlmostEqual(index.search([1.0, 0, 0, 0], 1)[0][1], 1.0, places=5)
+
+    def test_search_matches_exact_scan_on_dense_cone(self):
+        """Выдача совпадает с точным сканом на «конусе», как у e5.
+
+        Векторы пассажей e5 лежат плотным конусом (попарный косинус ~0.8), а
+        запрос приходит из другой области пространства. Граф HNSW на такой
+        геометрии не доходит до краевых векторов и теряет истинных соседей:
+        на реальном корпусе запрос «волчок» не отдавал единственный нужный
+        чанк (косинус 0.849 — лучший), хотя при точном переборе он первый.
+        Поэтому ответ индекса обязан совпадать с точным сканом: до
+        ``EXACT_SEARCH_MAX`` он и есть точный перебор.
+        """
+        path = Path(self._tmp.name) / "cone.usearch"
+        dim, count = 384, 4000
+        rng = np.random.default_rng(0)
+        axis = np.zeros(dim, dtype=np.float32)
+        axis[0] = 1.0
+        vectors = axis + 0.038 * rng.standard_normal((count, dim)).astype(np.float32)
+        vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+        index = UsannIndex(path, dim=dim)
+        index.add(list(range(1, count + 1)), vectors.tolist())
+
+        # На этом наборе чистый ANN (граф, даже с запасом обхода 128) теряет
+        # соседей у 4 запросов из 50 — тест падал бы на приблизительном поиске.
+        for query in vectors[:50]:
+            expected = [
+                int(position) + 1
+                for position in np.argsort(-(vectors @ query), kind="stable")[:5]
+            ]
+            got = [key for key, _ in index.search(query.tolist(), 5)]
+            self.assertEqual(got, expected, "ANN потерял соседей, которые видит скан")
 
 
 if __name__ == "__main__":

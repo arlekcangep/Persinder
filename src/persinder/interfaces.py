@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -86,6 +86,10 @@ class MetaStore(Protocol):
 
     def source_path(self, area: str, filename: str) -> str: ...
 
+    def source_filenames_under(self, area: str, prefix: str) -> list[str]:
+        """Имена источников области, начинающихся с ``prefix`` (части контейнера)."""
+        ...
+
     def remove_source(self, area: str, filename: str) -> str | None: ...
 
     def delete_document(self, doc_id: str) -> None: ...
@@ -118,12 +122,40 @@ class MetaStore(Protocol):
         (установка новой модели — миграция, D24)."""
         ...
 
+    def enqueue_missing(
+        self,
+        models: list[str],
+        has_sidecar: Callable[[str, str, str], bool],
+        models_for: Callable[[str, str], tuple[str, ...]] | None = None,
+    ) -> None:
+        """Поставить задачи только для источников без сайдкара под моделью
+        (``--reindex``: уже отработанное заново в очередь не возвращается).
+
+        ``models_for(area, source_path)`` — модели конкретного источника по
+        конфигу; ``None`` — общий список ``models``.
+        """
+        ...
+
+    def doc_ids_in_paths(
+        self, prefixes: list[str], *, include_virtual: bool = False
+    ) -> set[str]:
+        """id документов с источником под одним из префиксов путей (скоуп поиска)."""
+        ...
+
     def drop_queue_model(self, model: str) -> None:
         """Убрать задачи модели из очереди (модель удалена)."""
         ...
 
     def all_sources(self) -> list[SourceRow]:
         """Все источники (для удаления сайдкаров модели)."""
+        ...
+
+    def sources_for_docs(self, doc_ids: list[str]) -> list[SourceRow]:
+        """Источники документов (area, filename, source_path) для результатов поиска.
+
+        У документа может быть несколько источников; порядок — реальные файлы
+        раньше виртуальных (``source_path = ''``), затем по порядку добавления.
+        """
         ...
 
     def put_embeddings(
@@ -138,6 +170,11 @@ class MetaStore(Protocol):
 
     def embeddings_for_model(self, model: str) -> list[EmbeddingRow]:
         """Все векторы чанков под моделью (для точного скана-фолбэка)."""
+        ...
+
+    def embeddings_for_doc(self, model: str, doc_id: str) -> list[EmbeddingRow]:
+        """Векторы чанков одного документа под моделью (воркеру — чтобы
+        не пересчитывать чанки, уже лежащие в таблице)."""
         ...
 
     def embeddings_ids_for_model(self, model: str) -> list[EmbeddingRow]:
@@ -156,7 +193,15 @@ class MetaStore(Protocol):
         """Модели, у которых есть векторы (для ``persinder ann rebuild``)."""
         ...
 
+    def count_embeddings(self, model: str) -> int:
+        """Сколько векторов чанков есть под моделью (сверка с ANN-индексом)."""
+        ...
+
     def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]: ...
+
+    def chunk_span(self, doc_id: str, chunk_index: int) -> tuple[int, int] | None:
+        """Границы чанка в сыром тексте: ``(char_start, char_end)``."""
+        ...
 
     def pending_embeddings(self, limit: int = 100) -> list[EmbeddingQueueItem]: ...
 
@@ -177,6 +222,10 @@ class Ingest(Protocol):
 
     def remove_source(self, area: Area, filename: str) -> RemoveResult:
         """Убрать источник и его сырой текст, если документ вычищен целиком."""
+        ...
+
+    def remove_source_tree(self, area: Area, filename: str) -> RemoveResult:
+        """Убрать источник и все его части (файлы контейнера: ``filename/...``)."""
         ...
 
 
