@@ -85,6 +85,18 @@ class SqliteStoreTest(unittest.TestCase):
         pending = self.store.pending_embeddings(limit=100)
         self.assertEqual([item["model"] for item in pending], ["placeholder-v1"])
 
+    def test_clear_queue(self):
+        """Полная переиндексация начинает с чистой очереди (D25)."""
+        self._save()
+        self.store.enqueue_document("d1", "personal", "b.txt", models=["m1", "m2"])
+        self.assertEqual(self.store.counts()["pending_embeddings"], 3)
+
+        cleared = self.store.clear_queue()
+
+        self.assertEqual(cleared, 3)
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+        self.assertEqual(self.store.counts()["pending_documents"], 0)
+
     def test_enqueue_all_for_models(self):
         self._save()
         self.store.enqueue_all(["m1", "m2"])

@@ -368,6 +368,77 @@ class ServeTest(unittest.TestCase):
         self.assertIn("только HTTP", out.getvalue())
         self.assertIn("Останавливаюсь", out.getvalue())
 
+    # --- полная переиндексация (D25) ---
+
+    def _run_serve(self, *, reindex: bool, delay: float) -> str:
+        def fake_serve(
+            ingest: Ingest,
+            search: Search,
+            host: str,
+            port: int,
+            log=None,
+            stats=None,
+        ) -> None:
+            time.sleep(delay)
+
+        out = io.StringIO()
+        with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
+            rc = cli.run_serve(self.config, self.settings, reindex=reindex)
+        self.assertEqual(rc, 0)
+        return out.getvalue()
+
+    def test_startup_reads_catalog_before_journal(self):
+        """Старт идёт от файлов: каталог печатается, новый файл индексируется."""
+        out = self._run_serve(reindex=False, delay=1.0)
+
+        self.assertIn("Каталог: 1 файлов в 1 областях; новых: 1, удалённых: 0", out)
+
+    def test_reindex_clears_queue_but_keeps_journal(self):
+        """``--reindex``: очередь очищается, журнал не сбрасывается."""
+        self._run_serve(reindex=False, delay=2.0)
+        journal = self.settings.home / "journal.jsonl"
+        before = journal.read_text(encoding="utf-8")
+        self.assertIn("indexed", before)
+
+        out = self._run_serve(reindex=True, delay=3.0)
+
+        self.assertIn("Полная переиндексация: очередь эмбеддингов очищена", out)
+        self.assertIn("Сверка хэшей:", out)
+        self.assertIn("без изменений 1", out, "неизменённый файл не перечитывается")
+        self.assertIn("изменено 0", out)
+        # журнал не тронут: его строки на месте
+        after = journal.read_text(encoding="utf-8")
+        for line in before.splitlines():
+            self.assertIn(line, after)
+
+    def test_reindex_catches_changed_file_with_same_mtime(self):
+        """Правку с сохранённым mtime видит только сверка хэшей, а не watcher."""
+        text = (self.area / "note.md").read_text(encoding="utf-8")
+        stat = (self.area / "note.md").stat()
+        self._run_serve(reindex=False, delay=2.0)
+        # тот же размер, тот же mtime — по (size, mtime) файл «не менялся»
+        edited = text.replace("Кот", "Кит", 1)
+        self.assertEqual(len(edited), len(text))
+        (self.area / "note.md").write_text(edited, encoding="utf-8")
+        os.utime(self.area / "note.md", ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+        out = self._run_serve(reindex=True, delay=4.0)
+
+        self.assertIn("изменено 1", out, "сверка хэшей заметила правку")
+        store = SqliteStore(self.settings.db_path)
+        try:
+            import hashlib
+
+            new_id = hashlib.sha256(edited.encode("utf-8")).hexdigest()
+            old_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            self.assertEqual(store.find_document_by_hash(new_id), new_id)
+            self.assertIsNone(
+                store.find_document_by_hash(old_id), "старый текст вытеснен"
+            )
+            self.assertEqual(store.counts()["pending_embeddings"], 0)
+        finally:
+            store.close()
+
 
 class SearchScopesTest(unittest.TestCase):
     """Скоупы поиска: глобальная модель + модели папок, без пересечений."""

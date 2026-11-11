@@ -41,6 +41,7 @@ from .search import SearchHit, SearchQuery, SearchResult, SearchService
 from .sources import (
     JOURNAL_RETENTION_DAYS,
     AreaConfig,
+    AreaScanner,
     ConfigError,
     IndexingPipeline,
     Journal,
@@ -51,7 +52,9 @@ from .sources import (
     load_config,
     queue_models_for,
     reconcile,
+    sync_catalog,
 )
+from .sources.hashsweep import format_sweep, share_from_percent, sweep_hashes
 from .store import SqliteStore
 from .textstore import FsTextStore
 from .vectorindex import ModelScope, VectorSearch, rebuild_index
@@ -251,16 +254,22 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     Это единая точка запуска всех фоновых активностей:
 
     * журнал ``compact`` — убрать старую историю, сохранив последние состояния;
+    * каталог областей → сверка с журналом **по именам** (D25): новые файлы
+      индексируются, исчезнувшие — убираются;
+    * ``reconcile`` — журнал с базой (потерянный текст, пропущенный формат);
     * ``ingest.recover`` — убрать брошенные тексты прерванных вызовов;
-    * watcher — первый проход сразу доиндексирует всё новое и недоделанное
-      (журнал считает «устроенными» только завершённые цепочки);
+    * watcher — дальше следит за ``(size, mtime)``;
     * поток эмбеддингов — разбирает очередь в векторы/сайдкары, пока сервис жив;
     * HTTP-сервер блокирует главный поток до Ctrl+C.
 
-    При ``reindex=True`` журнал сбрасывается полностью (все файлы считаются
-    новыми): сервис пересканирует все области, ingest сверяет хэши содержимого
-    с базой (файл мог измениться, пока сервис был выключен) и под активную
-    модель ставится пересчёт всех источников — полная переиндексация.
+    При ``reindex=True`` (по умолчанию в ``run.sh``):
+
+    * очередь эмбеддингов очищается — задачи прошлого прогона не нужны;
+    * журнал **не сбрасывается**: в фоне сверяются хэши всех файлов — текст
+      против уже хранящегося в базе ``documents.content_hash``. Совпало — файл
+      не трогаем, изменился — индексируем заново. Сверка держится в пределах
+      5% CPU (``PERSINDER_REINDEX_CPU_LIMIT``) и не мешает ни сервису, ни
+      обычному скану.
     """
     settings.ensure()
     print(f"Home: {settings.home}", flush=True)
@@ -298,16 +307,6 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
         )
 
     journal = Journal(settings.home / "journal.jsonl")
-    if reindex:
-        journal_path = settings.home / "journal.jsonl"
-        if journal_path.exists():
-            journal_path.unlink()
-        print(
-            "Полная переиндексация: журнал сброшен, пересканируются все области. "
-            "Пересчёт эмбеддингов поставлен в очередь.",
-            flush=True,
-        )
-        journal = Journal(settings.home / "journal.jsonl")  # пустой, заново
     # Под активную модель в очередь идут только источники без сайдкара:
     # уже посчитанное заново не ставится — рестарт не перезаполняет очередь
     # и не трогает файлы с сайдкарами. Проверка на каждом старте: после
@@ -320,10 +319,62 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
             return file_sidecar_path(source_path, model).exists()
         return virtual_sidecar_path(settings.virtual_dir, doc_id, model).exists()
 
-    # Сверка журнала с реальностью ДО очереди и скана: файл, который журнал
-    # считает устроенным, а база/текст — нет (пропущенный fb2, потерянный
-    # текст, документ из чужого профиля), иначе не будет прочитан никогда.
+    # Один журнал на весь сервис: события файлов, эмбеддингов и служебные
+    # попадают и в консоль, и в /logs (фильтры — по виду события).
+    pipeline = IndexingPipeline(
+        ingest, registry, journal=journal, semantic=watch.semantic, log=log
+    )
+    stop = threading.Event()
+    kick = threading.Event()
+    # Конвейер зовут два потока (watcher и фоновая сверка хэшей) — пускаем
+    # по одному событию за раз: журнал пишется построчно, индексация не любит
+    # гонок, а порядок событий важнее скорости.
+    pipeline_lock = threading.Lock()
+
+    def on_events(result: ScanResult) -> None:
+        with pipeline_lock:
+            stats = pipeline.process(result)
+        if (
+            stats.indexed
+            or stats.deleted
+            or stats.duplicates
+            or stats.rejected
+            or stats.skipped
+            or stats.errors
+        ):
+            print_stats(stats)
+        # Новые документы и восстановленные тексты (дубликаты по хэшу) ставят
+        # задачи в очередь — будим эмбеддинги сразу, не ждём тика.
+        if stats.indexed or stats.duplicates:
+            kick.set()
+
+    #: Доля CPU на фоновую сверку хэшей при ``--reindex`` (по умолчанию 5%).
+    share = share_from_percent(os.environ.get("PERSINDER_REINDEX_CPU_LIMIT"))
+    if reindex:
+        # Очередь прошлого прогона/профиля не нужна: переиндексация начинается
+        # с чистого листа, а задачи появятся из сайдкаров и изменённых файлов.
+        cleared = store.clear_queue()
+        print(
+            "Полная переиндексация: очередь эмбеддингов очищена "
+            f"({cleared} задач снято); хэши файлов сверяются в фоне "
+            f"(не более {share:.0%} CPU)",
+            flush=True,
+        )
+
+    # 1. Файлы — источник правды, а не журнал (D25): полные каталоги всех
+    #    областей сравниваются с журналом **по именам** (хэши на этом этапе не
+    #    считаются — это долго). Новые файлы индексируются, исчезнувшие
+    #    убираются из индекса — в первую очередь, до очереди и до сверки базы.
     texts = FsTextStore(settings.text_dir)
+    scanner = AreaScanner(watch)
+    catalog = sync_catalog(areas, scanner, journal)
+    print(catalog.line(), flush=True)
+    for result in catalog.results:
+        on_events(result)
+
+    # 2. Сверка журнала с реальностью: файл, который журнал считает
+    #    устроенным, а база/текст — нет (пропущенный fb2, потерянный текст,
+    #    документ из чужого профиля), иначе не будет прочитан никогда.
     checked = reconcile(areas, registry, journal, store, texts)
     for rel, reason in checked.retried:
         log.warning(
@@ -369,31 +420,7 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     if recovery.removed:
         print(format_recovery(recovery), flush=True)
 
-    # Один журнал на весь сервис: события файлов, эмбеддингов и служебные
-    # попадают и в консоль, и в /logs (фильтры — по виду события).
-    pipeline = IndexingPipeline(
-        ingest, registry, journal=journal, semantic=watch.semantic, log=log
-    )
-    stop = threading.Event()
-    kick = threading.Event()
-
-    def on_events(result: ScanResult) -> None:
-        stats = pipeline.process(result)
-        if (
-            stats.indexed
-            or stats.deleted
-            or stats.duplicates
-            or stats.rejected
-            or stats.skipped
-            or stats.errors
-        ):
-            print_stats(stats)
-        # Новые документы и восстановленные тексты (дубликаты по хэшу) ставят
-        # задачи в очередь — будим эмбеддинги сразу, не ждём тика.
-        if stats.indexed or stats.duplicates:
-            kick.set()
-
-    watcher = Watcher(areas, watch, on_events, journal=journal)
+    watcher = Watcher(areas, watch, on_events, journal=journal, scanner=scanner)
     embed_thread: threading.Thread | None = None
     if embed_worker is not None:
         embed_thread = threading.Thread(
@@ -407,6 +434,37 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
             ),
             daemon=True,
             name="embed",
+        )
+
+    sweep_thread: threading.Thread | None = None
+    if reindex:
+
+        def hash_sweep() -> None:
+            """Фоновая сверка хэшей: не дольше, чем позволяет ``share`` CPU."""
+            try:
+                stats = sweep_hashes(
+                    areas,
+                    scanner,
+                    registry,
+                    store,
+                    journal,
+                    on_events,
+                    share=share,
+                    stop=stop,
+                )
+            except Exception as exc:  # noqa: BLE001 — фон не должен ронять сервис
+                print(f"Сверка хэшей: прервана ошибкой — {exc}", flush=True)
+                log.warning(f"сверка хэшей: ошибка — {exc}", kind=KIND_SYSTEM)
+                return
+            print(format_sweep(stats), flush=True)
+            log.info(format_sweep(stats), kind=KIND_SYSTEM)
+            for message in stats.messages[:10]:
+                log.warning(f"сверка хэшей: {message}", kind=KIND_SYSTEM)
+            if stats.changed:
+                kick.set()  # изменённые файлы в очереди — будим эмбеддинги
+
+        sweep_thread = threading.Thread(
+            target=hash_sweep, daemon=True, name="hashsweep"
         )
 
     print(
@@ -433,6 +491,8 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     watcher.start()
     if embed_thread is not None:
         embed_thread.start()
+    if sweep_thread is not None:
+        sweep_thread.start()
     print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)
 
     def health_stats() -> dict[str, object]:
@@ -464,6 +524,11 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
         stop.set()
         kick.set()
         watcher.stop()
+        if sweep_thread is not None:
+            # Сверка спит между файлами и проверяет stop перед каждым: обычно
+            # выходит за доли секунды. Не дождались — процесс всё равно уходит
+            # (поток daemon), а ждать минутами из-за одного большого файла незачем.
+            sweep_thread.join(5.0)
         if embed_thread is not None:
             embed_thread.join(10.0)
             if not embed_thread.is_alive() and embed_store is not None:
@@ -1090,8 +1155,9 @@ def main(argv: list[str] | None = None) -> int:
     serve_p.add_argument(
         "--reindex",
         action="store_true",
-        help="полная переиндексация: сбросить журнал, пересканировать все области "
-        "и пересчитать все эмбеддинги при старте",
+        help="полная переиндексация: очистить очередь эмбеддингов и в фоне "
+        "(не более 5% CPU) сверить хэши всех файлов с базой — изменённые "
+        "переиндексируются (по умолчанию включено в run.sh)",
     )
 
     watch_p = sub.add_parser("watch", help="следить за областями и индексировать")

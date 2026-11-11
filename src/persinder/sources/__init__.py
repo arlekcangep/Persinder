@@ -1,5 +1,6 @@
 """Модуль `sources`: watcher областей, классификаторы, экстракторы, конфиг, конвейер."""
 
+from .catalog import CatalogStats, sync_catalog
 from .classify import (
     ARCHIVE,
     CODE,
@@ -57,6 +58,7 @@ __all__ = [
     "BUILTIN_IGNORES",
     "CLASS_ALIASES",
     "CODE",
+    "CatalogStats",
     "ChangeEvent",
     "ChangeKind",
     "ChmExtractor",
@@ -96,4 +98,5 @@ __all__ = [
     "load_config",
     "queue_models_for",
     "reconcile",
+    "sync_catalog",
 ]

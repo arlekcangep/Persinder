@@ -10,11 +10,12 @@
   пишет сайдкар;
 * идемпотентность повторного скана: устроенные файлы не ставят задачи в
   очередь заново (нет цикла пересчёта);
-* новый файл, добавленный при выключенном сервисе, подхватывается при старте;
+* новый файл, добавленный при выключенном сервисе, подхватывается при старте
+  (каталог читается по именам, журнал не сбрасывается);
 * изменение файла → переиндексация и пересчёт эмбеддингов;
 * удаление файла → документ, сырой текст и сайдкар убираются;
-* ``--reindex``: сброс журнала, повторный пересчёт всех источников, затем
-  сканы снова идемпотентны;
+* ``--reindex``: очередь очищается, хэши сверяются в фоне, неизменённые
+  файлы не трогаются, изменённые переиндексируются;
 * часть архива: сайдкар в ``.persinder/<модель>/<архив>/`` папке.
 """
 
@@ -39,13 +40,16 @@ from persinder.ingest import IngestService
 from persinder.morphology import NoopStemmer
 from persinder.sources import (
     AreaConfig,
+    AreaScanner,
     IndexingPipeline,
     Journal,
     ScanResult,
     WatchConfig,
     Watcher,
     default_registry,
+    sync_catalog,
 )
+from persinder.sources.hashsweep import sweep_hashes
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
 from persinder.vectorindex import UsannIndex
@@ -140,6 +144,49 @@ class WatcherEmbedE2ETest(unittest.TestCase):
         watcher.stop()
         return prints
 
+    def _startup(self, journal: Journal, *, reindex: bool = False) -> list[str]:
+        """Как ``run_serve`` на старте: каталог по именам, затем сверка хэшей.
+
+        При ``reindex`` очередь эмбеддингов очищается, а неизменённые файлы
+        (совпал хэш текста с базой) не перечитываются вовсе.
+        """
+        prints: list[str] = []
+        pipeline = IndexingPipeline(self.ingest, self.registry, journal=journal)
+
+        def process(result: ScanResult) -> None:
+            stats = pipeline.process(result)
+            if (
+                stats.indexed
+                or stats.deleted
+                or stats.duplicates
+                or stats.rejected
+                or stats.skipped
+                or stats.errors
+            ):
+                prints.append(
+                    f"indexed={stats.indexed} duplicates={stats.duplicates} "
+                    f"deleted={stats.deleted}"
+                )
+
+        if reindex:
+            self.store.clear_queue()
+        scanner = AreaScanner(self.watch)
+        catalog = sync_catalog((self.area,), scanner, journal)
+        for result in catalog.results:
+            process(result)
+        if reindex:
+            sweep = sweep_hashes(
+                (self.area,),
+                scanner,
+                self.registry,
+                self.store,
+                journal,
+                process,
+                share=1.0,
+            )
+            prints.append(f"changed={sweep.changed} same={sweep.same}")
+        return prints
+
     def _drain_embeddings(self) -> None:
         """Разобрать очередь до пустой (как фоновый embed-поток)."""
         while self._pending():
@@ -183,8 +230,8 @@ class WatcherEmbedE2ETest(unittest.TestCase):
     def test_new_file_after_service_stop_is_picked_up(self):
         """Файл, добавленный при выключенном сервисе, индексируется при старте.
 
-        Ключевой сценарий для ``--reindex``: журнал сброшен, поэтому watcher
-        при старте видит файлы (и старые, и новый) и обрабатывает их.
+        Каталог областей читается по именам и сверяется с журналом: новый файл
+        виден сразу, хотя журнал никто не сбрасывал.
         """
         old = self._write("old.md", "старый файл про котиков")
         journal = Journal(self.data / "journal.jsonl")
@@ -194,13 +241,10 @@ class WatcherEmbedE2ETest(unittest.TestCase):
         # Сервис «выключен»: watcher остановлен. Появляется новый файл.
         new = self._write("new.md", "новый файл про нейросети, добавленный в offline")
 
-        # Запуск с --reindex: журнал сбрасывается, сканируется всё заново.
-        journal_path = self.data / "journal.jsonl"
-        journal_path.unlink()
-        reindexed = Journal(journal_path)
-        prints = self._run_watcher(reindexed)
-        self.assertIn(
-            "indexed=1", prints[0], "новый файл проиндексирован при переиндексации"
+        prints = self._startup(journal, reindex=True)
+        self.assertTrue(
+            any("indexed=1" in line for line in prints),
+            f"новый файл проиндексирован при старте: {prints}",
         )
 
         self._drain_embeddings()
@@ -285,8 +329,8 @@ class WatcherEmbedE2ETest(unittest.TestCase):
             "сайдкар удалён вместе с источником",
         )
 
-    def test_reindex_requeues_every_source(self):
-        """--reindex: журнал сброшен и в очередь поставлены ВСЕ источники."""
+    def test_reindex_keeps_unchanged_files_alone(self):
+        """``--reindex``: очередь очищена, неизменённые файлы не пересчитаны."""
         self._write("a.md", "документ а про векторный поиск")
         self._write("b.md", "документ б про морфологию и стемминг")
         journal = Journal(self.data / "journal.jsonl")
@@ -295,33 +339,29 @@ class WatcherEmbedE2ETest(unittest.TestCase):
         self.assertEqual(self.store.counts()["documents"], 2)
         self.assertEqual(self._pending(), 0)
 
-        # Как run_serve с --reindex: журнал сброшен и всё поставлено в очередь.
-        journal_path = self.data / "journal.jsonl"
-        journal_path.unlink()
-        self.store.enqueue_all(["placeholder-v1"])
-        self.assertEqual(
-            self._pending(), 2, "пересчёт всех источников, а не только утраченных"
-        )
+        prints = self._startup(journal, reindex=True)
 
-        reindexed = Journal(journal_path)
-        self._run_watcher(reindexed)
+        self.assertTrue(
+            any("changed=0 same=2" in line for line in prints),
+            f"оба файла совпали с базой: {prints}",
+        )
+        self.assertEqual(self._pending(), 0, "очередь очищена и заново не заполнена")
         self.assertEqual(
             self.store.counts()["documents"], 2, "документы целы после reindex"
         )
-        self._drain_embeddings()
-        self.assertEqual(self._pending(), 0)
         for name in ("a.md", "b.md"):
             self.assertTrue(
-                (self.vault / ".persinder" / "placeholder-v1" / f"{name}.pdr").exists()
+                (self.vault / ".persinder" / "placeholder-v1" / f"{name}.pdr").exists(),
+                "сайдкар неизменённого файла на месте",
             )
 
         # Повторные сканы после переиндексации снова идемпотентны.
-        more = self._run_watcher(reindexed)
+        more = self._run_watcher(journal)
         self.assertEqual(more, [], "после reindex повторные сканы пусты")
         self.assertEqual(self._pending(), 0)
 
     def test_reindex_picks_up_file_changed_while_service_off(self):
-        """Файл, изменённый при выключенном сервисе, переиндексируется по хэшу."""
+        """Файл, изменённый при выключенном сервисе, ловится сверкой хэшей."""
         src = self._write("note.md", "старая версия про котиков")
         journal = Journal(self.data / "journal.jsonl")
         self._run_watcher(journal)
@@ -329,16 +369,13 @@ class WatcherEmbedE2ETest(unittest.TestCase):
         self.assertEqual(len(self.store.search_morph("котиков")), 1)
 
         # Сервис «выключен»: содержимое файла изменилось.
-        time.sleep(0.05)
         src.write_text("новая версия про квантовый флакс", encoding="utf-8")
 
-        # --reindex: журнал сброшен, все источники снова в очереди.
-        journal_path = self.data / "journal.jsonl"
-        journal_path.unlink()
-        self.store.enqueue_all(["placeholder-v1"])
-        reindexed = Journal(journal_path)
-        prints = self._run_watcher(reindexed)
-        self.assertIn("indexed=1", prints[0], "изменённый файл переиндексирован")
+        prints = self._startup(journal, reindex=True)
+        self.assertTrue(
+            any("changed=1" in line for line in prints),
+            f"изменённый файл найден по хэшу: {prints}",
+        )
 
         self._drain_embeddings()
         self.assertEqual(self._pending(), 0)

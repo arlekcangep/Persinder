@@ -282,6 +282,17 @@ class SqliteStore:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM embedding_queue WHERE model = ?", (model,))
 
+    def clear_queue(self) -> int:
+        """Очистить очередь эмбеддингов целиком; вернуть число снятых задач.
+
+        Нужно полной переиндексации (``--reindex``, D25): задачи прошлого
+        профиля/прогона не должны разбираться вместе с новыми — очередь
+        начинается с чистого листа, а досчёт идёт из сайдкаров и файлов.
+        """
+        with self._lock, self._conn:
+            cursor = self._conn.execute("DELETE FROM embedding_queue")
+        return max(cursor.rowcount, 0)
+
     @staticmethod
     def _queue_item(row: sqlite3.Row) -> EmbeddingQueueItem:
         return EmbeddingQueueItem(
