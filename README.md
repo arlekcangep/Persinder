@@ -103,15 +103,26 @@ USearch-индексу (mmap-файл на модель, `persinder ann rebuild`
 
 ## Веб-интерфейс
 
-Клиент поиска — Vue 3 + TypeScript + Vite, живёт в [`web/`](web/README.md).
-В разработке Vite проксирует `/search` и `/health` на запущенный
-`persinder serve` (127.0.0.1:8756):
+Собранный клиент лежит в `src/persinder/api/static/` и раздаётся тем же
+`persinder serve`; Node.js на машине пользователя не нужен:
+
+```bash
+./run.sh        # или: persinder serve --config persinder.yaml
+# открыть http://127.0.0.1:8756/
+```
+
+Сервер отдаёт `/`, `/assets/…` и маршруты приложения (`/settings`), а API
+(`/search`, `/health`, `/ingest`) работает как раньше.
+
+Пересборка интерфейса — только для разработчиков, в `web/`:
 
 ```bash
 cd web
 npm install --no-bin-links
-npm run dev
+npm run build:static   # соберёт и заменит src/persinder/api/static/
 ```
+
+Подробности — в [`web/README.md`](web/README.md).
 
 ## Статус
 

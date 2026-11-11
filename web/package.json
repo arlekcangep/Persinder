@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node node_modules/vite/bin/vite.js",
     "build": "node node_modules/vue-tsc/bin/vue-tsc.js --noEmit && node node_modules/vite/bin/vite.js build",
+    "build:static": "node node_modules/vue-tsc/bin/vue-tsc.js --noEmit && node node_modules/vite/bin/vite.js build && node scripts/copy-static.mjs",
     "preview": "node node_modules/vite/bin/vite.js preview",
     "typecheck": "node node_modules/vue-tsc/bin/vue-tsc.js --noEmit",
     "test": "node node_modules/vitest/vitest.mjs run"

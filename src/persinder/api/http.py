@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import math
+import mimetypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
@@ -17,6 +19,24 @@ from ..search import SearchQuery
 from .models import IngestPayload, IngestResponse, PayloadError, SearchResponse
 
 MAX_BODY_BYTES = 32 * 1024 * 1024  # 32 МБ
+
+# Собранный веб-клиент кладётся рядом с пакетом (см. web/README.md): человеку,
+# который просто запускает `persinder serve`, Node.js и сборка не нужны.
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+INDEX_FILE = STATIC_DIR / "index.html"
+ASSETS_DIR = STATIC_DIR / "assets"
+
+INDEX_CACHE = "no-cache"
+ASSET_CACHE = "public, max-age=31536000, immutable"
+
+_CONTENT_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
+}
 
 
 class PersinderHTTPServer(ThreadingHTTPServer):
@@ -55,7 +75,48 @@ class _Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/search":
             self._handle_search(parsed.query)
         else:
+            self._handle_static(parsed.path)
+
+    def _handle_static(self, path: str) -> None:
+        """Отдать собранный веб-клиент; неизвестные маршруты — на index.html (SPA)."""
+        if path in ("", "/", "/index.html"):
+            self._send_file(INDEX_FILE, INDEX_CACHE)
+            return
+
+        if path == "/assets" or path.startswith("/assets/"):
+            candidate = (STATIC_DIR / path.lstrip("/")).resolve()
+            if candidate.is_relative_to(ASSETS_DIR) and candidate.is_file():
+                self._send_file(candidate, ASSET_CACHE)
+            else:
+                self._send_json(404, {"error": "not found"})
+            return
+
+        # Файлы с расширением (favicon.ico, robots.txt) не подменяем приложением.
+        if Path(path).suffix:
             self._send_json(404, {"error": "not found"})
+            return
+
+        self._send_file(INDEX_FILE, INDEX_CACHE)
+
+    def _send_file(self, path: Path, cache: str) -> None:
+        try:
+            body = path.read_bytes()
+        except OSError:
+            self._send_json(404, {"error": "not found"})
+            return
+
+        content_type = (
+            _CONTENT_TYPES.get(path.suffix.lower())
+            or mimetypes.guess_type(path.name)[0]
+            or "application/octet-stream"
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", cache)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _handle_search(self, raw_query: str) -> None:
         params = parse_qs(raw_query)
