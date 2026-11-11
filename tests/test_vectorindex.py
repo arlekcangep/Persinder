@@ -275,6 +275,38 @@ class VectorSearchAnnTest(unittest.TestCase):
         search.search("запрос", 10)
         self.assertEqual(calls, ["m1"])
 
+    def test_embedder_created_once_under_concurrent_cold_start(self):
+        """При одновременных запросах с холодного старта эмбеддер строится
+        один раз: конкурентные первый запросы не плодят лишние сессии."""
+        import threading
+
+        calls: list[str] = []
+
+        def factory(key: str) -> Embedder:
+            calls.append(key)
+            return FixedEmbedder(self.query_vector)
+
+        search = VectorSearch(self.store, factory, search_model="m1")
+        self._seed()
+        barrier = threading.Barrier(8)
+        errors: list[BaseException] = []
+
+        def hit() -> None:
+            try:
+                barrier.wait()
+                search.search("запрос", 10)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=hit) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(calls, ["m1"], "эмбеддер должен создаться один раз")
+
     def test_ann_matches_exact_scan(self):
         self._seed()
         rebuild_index(self.store, self.factory, self.ann_dir, "m1")

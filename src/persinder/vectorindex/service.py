@@ -26,6 +26,7 @@ rebuild`` (полная пересборка из таблицы). Если фа
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,15 +80,22 @@ class VectorSearch:
         self._scopes = dict(scopes) if scopes is not None else None
         # Кэш эмбеддеров по модели: build_embedder грузит токенизатор, создаёт
         # ONNX-сессию и гоняет warmup — на каждый запрос это секунды (каждый
-        # символ в строке поиска платил бы заново).
+        # символ в строке поиска платил бы заново). Под локом: несколько
+        # одновременных запросов при холодном старте не должны каждый строить
+        # свою сессию (это и лишняя работа, и всплеск памяти).
         self._embedders: dict[str, Embedder] = {}
+        self._embedders_lock = threading.Lock()
 
     def _embedder(self, model: str) -> Embedder:
         """Эмбеддер модели с кэшем: один экземпляр на весь процесс."""
         cached = self._embedders.get(model)
-        if cached is None:
-            cached = self._embedder_factory(model)
-            self._embedders[model] = cached
+        if cached is not None:
+            return cached
+        with self._embedders_lock:
+            cached = self._embedders.get(model)
+            if cached is None:
+                cached = self._embedder_factory(model)
+                self._embedders[model] = cached
         return cached
 
     def search(
