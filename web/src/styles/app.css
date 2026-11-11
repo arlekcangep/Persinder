@@ -12,6 +12,7 @@
   --blue-hover: #1558d6;
   --green: #006621;
   --green-soft: #1e8e3e;
+  --warn: #b45309;
   --danger: #c5221f;
   --button: #f8f9fa;
   --button-hover: #f1f3f4;
@@ -42,6 +43,7 @@
   --blue-hover: #aecbfa;
   --green: #81c995;
   --green-soft: #81c995;
+  --warn: #fbbf24;
   --danger: #f28b82;
   --button: #292a2d;
   --button-hover: #3c4043;
@@ -786,6 +788,78 @@ code {
 
 .placeholder p {
   margin: 6px 0;
+}
+
+/* ---------- журнал индексации ---------- */
+
+.settings-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-head-row .section-label {
+  margin: 22px 0 0;
+}
+
+.log-list {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+  max-height: 55vh;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.log-row {
+  display: flex;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--line);
+}
+
+.log-time {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.log-level {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.log-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.level-info .log-level {
+  color: var(--green);
+}
+
+.level-warning .log-level {
+  color: var(--warn);
+}
+
+.level-error .log-level {
+  color: var(--danger);
+}
+
+.log-error {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--button);
+  color: var(--danger);
+  font-size: 13px;
 }
 
 .switch {

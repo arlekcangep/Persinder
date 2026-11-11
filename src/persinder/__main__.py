@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
-from .api import serve
+from .api import IndexLog, serve
 from .config import Settings
 from .embed import (
     CATALOG,
@@ -41,6 +41,7 @@ from .sources import (
     ConfigError,
     IndexingPipeline,
     Journal,
+    PipelineStats,
     ScanResult,
     Watcher,
     default_registry,
@@ -215,8 +216,9 @@ def run_watch(config_path: Path, home: Path | None) -> int:
     recovery = ingest.recover()
     if recovery.removed:
         print(format_recovery(recovery))
+    log = IndexLog()
     pipeline = IndexingPipeline(
-        ingest, registry, journal=journal, semantic=watch.semantic
+        ingest, registry, journal=journal, semantic=watch.semantic, log=log
     )
 
     print(f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с")
@@ -331,8 +333,9 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     if recovery.removed:
         print(format_recovery(recovery), flush=True)
 
+    log = IndexLog()
     pipeline = IndexingPipeline(
-        ingest, registry, journal=journal, semantic=watch.semantic
+        ingest, registry, journal=journal, semantic=watch.semantic, log=log
     )
     stop = threading.Event()
     kick = threading.Event()
@@ -391,7 +394,7 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
         embed_thread.start()
     print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)
     try:
-        serve(ingest, search, settings.host, settings.port)
+        serve(ingest, search, settings.host, settings.port, log)
     except KeyboardInterrupt:
         pass
     finally:
@@ -408,9 +411,22 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     return 0
 
 
-def print_stats(stats: object) -> None:
-    """Печать итогов обработки."""
-    print(stats, flush=True)
+def print_stats(stats: PipelineStats) -> None:
+    """Однострочная сводка прохода скана (пофайловые строки пишет IndexLog)."""
+    parts: list[str] = []
+    for count, label in (
+        (stats.indexed, "проиндексировано"),
+        (stats.duplicates, "дубликатов"),
+        (stats.skipped, "пропущено"),
+        (stats.rejected, "отклонено"),
+        (stats.deleted, "удалено"),
+        (stats.errors, "ошибок"),
+    ):
+        if count:
+            parts.append(f"{label}: {count}")
+    if not parts:
+        return
+    print(f"Скан: {', '.join(parts)}", flush=True)
 
 
 def format_recovery(stats: RecoveryStats) -> str:
@@ -1175,7 +1191,7 @@ def _serve_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
         print(format_recovery(recovery))
     print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)
     try:
-        serve(ingest, search, settings.host, settings.port)
+        serve(ingest, search, settings.host, settings.port, IndexLog())
     except KeyboardInterrupt:
         pass
     finally:
