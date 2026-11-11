@@ -141,6 +141,7 @@ class EmbedWorker:
         stats = EmbedStats()
         self._indices.clear()
         try:
+            stats.queue_before = self._store.counts()["pending_embeddings"]
             rows = self._store.pending_embeddings(limit)
             paths: dict[str, str] = {
                 str(row["doc_id"]): str(row["source_path"])
@@ -188,7 +189,13 @@ class EmbedWorker:
             f"документ {doc_id[:8]}",
         )
         if self._log is not None:
-            self._log.info(f"эмбеддинг: {label}", kind=KIND_EMBED)
+            # Сколько задач у документа и под какими моделями — чтобы по
+            # журналу было видно, за что взялся воркер и чем это кончилось.
+            models = ", ".join(sorted({str(row["model"]) for row in rows}))
+            self._log.info(
+                f"эмбеддинг: {label} — задач: {len(rows)} ({models})",
+                kind=KIND_EMBED,
+            )
 
         try:
             text = self._textstore.read(doc_id)
@@ -197,8 +204,11 @@ class EmbedWorker:
             self._store.drop_queue_rows([int(row["id"]) for row in rows])
             stats.skipped += 1
             if self._log is not None:
+                left = self._store.counts()["pending_embeddings"]
                 self._log.warning(
-                    f"пропущен: {label} (нет текста, задачи сняты)", kind=KIND_EMBED
+                    f"пропущен: {label} (нет текста, снято задач: {len(rows)},"
+                    f" в очереди: {left})",
+                    kind=KIND_EMBED,
                 )
             return
 
@@ -279,9 +289,10 @@ class EmbedWorker:
                 done = [queue_ids.pop(index, None) for index, _, _ in part]
                 self._store.drop_queue_rows([i for i in done if i is not None])
                 if len(spans) > _CHUNK_BATCH and self._log is not None:
+                    left = self._store.counts()["pending_embeddings"]
                     self._log.info(
                         f"эмбеддинг: {label} ({model}) — {len(packed)}"
-                        f" из {len(spans)} чанков",
+                        f" из {len(spans)} чанков, в очереди: {left}",
                         kind=KIND_EMBED,
                     )
 
@@ -310,8 +321,10 @@ class EmbedWorker:
             self._store.drop_queue_rows(list(queue_ids.values()))
             counted = True
             if self._log is not None:
+                left = self._store.counts()["pending_embeddings"]
                 self._log.info(
-                    f"сайдкар: {label} ({model}, чанков: {len(packed)})",
+                    f"сайдкар: {label} ({model}, чанков: {len(packed)},"
+                    f" в очереди: {left})",
                     kind=KIND_EMBED,
                 )
 

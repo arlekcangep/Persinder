@@ -161,6 +161,11 @@ class IngestService:
 
         existing = self._store.find_document_by_hash(content_hash)
         if existing:
+            # Повторный скан того же содержимого: текст пишем всегда. Он мог
+            # быть потерян (удалён руками, чужой профиль, сбой) — без него
+            # эмбеддинг не посчитать, а документ уже есть в базе. Запись
+            # идемпотентна: содержимое то же самое (хэш совпал).
+            self._textstore.put(existing, text)
             self._log(
                 IngestEvent.DUPLICATE,
                 doc_id=existing,

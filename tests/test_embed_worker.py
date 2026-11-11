@@ -717,8 +717,136 @@ class EmbedBatchProgressTest(unittest.TestCase):
                 store.close()
 
 
+class QueueVisibilityTest(unittest.TestCase):
+    """Очередь видна в логе: сколько было, сколько стало, сколько осталось."""
+
+    def test_pass_reports_queue_before_and_after(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SqliteStore(root / "db.sqlite")
+            texts = FsTextStore(root / "pending_texts")
+            try:
+                ingest = IngestService(store, texts, NoopStemmer())
+                for name in ("a.md", "b.md"):
+                    ingest.ingest(
+                        IngestRequest(
+                            filename=name,
+                            area=Area.PERSONAL,
+                            text=f"текст документа {name}",
+                            source_path=str(root / name),
+                        )
+                    )
+                before = store.counts()["pending_embeddings"]
+                self.assertGreater(before, 0)
+                worker = EmbedWorker(store, texts, lambda model: PlaceholderEmbedder())
+                stats = worker.run_once(limit=100)
+                self.assertEqual(stats.queue_before, before)
+                self.assertEqual(stats.pending, 0)
+            finally:
+                store.close()
+
+    def test_log_shows_remaining_queue(self):
+        """В журнале (консоль + /logs + вкладка Журнал) есть остаток очереди."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SqliteStore(root / "db.sqlite")
+            texts = FsTextStore(root / "pending_texts")
+            log = IndexLog()
+            log.enable_console(False)
+            try:
+                ingest = IngestService(store, texts, NoopStemmer())
+                ingest.ingest(
+                    IngestRequest(
+                        filename="a.md",
+                        area=Area.PERSONAL,
+                        text="кот сидит на окне",
+                        source_path=str(root / "a.md"),
+                    )
+                )
+                worker = EmbedWorker(
+                    store,
+                    texts,
+                    lambda model: PlaceholderEmbedder(),
+                    log=log,
+                )
+                worker.run_once(limit=100)
+                messages = [event.message for event in log.entries()]
+                self.assertTrue(any("задач:" in m for m in messages), messages)
+                self.assertTrue(any("в очереди:" in m for m in messages), messages)
+                self.assertTrue(
+                    any(m.startswith("сайдкар:") for m in messages), messages
+                )
+            finally:
+                store.close()
+
+    def test_skip_without_text_logs_dropped_tasks(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SqliteStore(root / "db.sqlite")
+            texts = FsTextStore(root / "pending_texts")
+            log = IndexLog()
+            log.enable_console(False)
+            try:
+                ingest = IngestService(store, texts, NoopStemmer())
+                outcome = ingest.ingest(
+                    IngestRequest(
+                        filename="lost.md",
+                        area=Area.PERSONAL,
+                        text="текст, который потеряют",
+                        source_path=str(root / "lost.md"),
+                    )
+                )
+                assert outcome.document_id is not None
+                texts.delete(outcome.document_id)
+                worker = EmbedWorker(
+                    store,
+                    texts,
+                    lambda model: PlaceholderEmbedder(),
+                    log=log,
+                )
+                stats = worker.run_once(limit=100)
+                self.assertEqual(stats.skipped, 1)
+                warnings = [
+                    event.message for event in log.entries() if event.level == "warning"
+                ]
+                self.assertTrue(any("снято задач:" in m for m in warnings), warnings)
+            finally:
+                store.close()
+
+
 class EmbedLoopTest(unittest.TestCase):
     """Цикл эмбеддингов не умирает молча из-за ошибок печати и лога."""
+
+    def test_report_includes_queue_delta(self):
+        from persinder import __main__ as cli
+        from persinder.embed import EmbedStats
+
+        text = cli.format_embed(
+            EmbedStats(docs=1, chunks=3, sidecars=1, queue_before=7926, pending=6900)
+        )
+        self.assertIn("7926 → 6900", text)
+
+    def test_loop_warns_when_queue_does_not_move(self):
+        """Очередь не уменьшается — сказать это, а не молчать минутами."""
+        from persinder import __main__ as cli
+        from persinder.embed import EmbedStats
+
+        stop = threading.Event()
+        kick = threading.Event()
+        calls: list[int] = []
+
+        def run_once(limit: int) -> EmbedStats:
+            calls.append(limit)
+            if len(calls) >= 12:
+                stop.set()
+            return EmbedStats(pending=5, queue_before=5)
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli._embed_loop(
+                mock.Mock(run_once=run_once), stop, kick, interval=0.01, log_path=None
+            )
+        self.assertIn("ничего не обработал", out.getvalue())
 
     def test_loop_announces_empty_queue_once(self):
         """Пустая очередь озвучивается один раз, а не молчанием и не спамом."""

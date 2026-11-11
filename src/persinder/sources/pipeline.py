@@ -131,10 +131,9 @@ class IndexingPipeline:
         self._outcome("info", f"открыт: {rel_path}")
         parts = self._registry.extract(area.path / rel_path, area)
         if parts is None:
-            self._record(
-                area, rel_path, JournalEvent.SKIPPED, detail="формат не обслуживается"
-            )
-            self._outcome("warning", f"пропущен: {rel_path} (формат не обслуживается)")
+            reason = self._registry.explain_miss(area.path / rel_path, area)
+            self._record(area, rel_path, JournalEvent.SKIPPED, detail=reason)
+            self._outcome("warning", f"пропущен: {rel_path} ({reason})")
             stats.skipped += 1
             return
 

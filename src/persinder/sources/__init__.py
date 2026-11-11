@@ -44,6 +44,7 @@ from .models import (
     queue_models_for,
 )
 from .pipeline import IndexingPipeline, PipelineStats
+from .reconcile import ReconcileStats, reconcile
 from .scanner import BUILTIN_IGNORES, AreaScanner
 from .watcher import Watcher
 
@@ -80,6 +81,7 @@ __all__ = [
     "PUB_FORMATS",
     "PdfExtractor",
     "PipelineStats",
+    "ReconcileStats",
     "RtfExtractor",
     "STRUCTURE_TEXT",
     "SCIENCE",
@@ -93,4 +95,5 @@ __all__ = [
     "extract_html",
     "load_config",
     "queue_models_for",
+    "reconcile",
 ]

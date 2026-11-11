@@ -6,8 +6,8 @@
 #
 # Что делает:
 #   1. Проверяет Python 3.10+ и создаёт venv в корне репозитория (.venv).
-#   2. Ставит persinder со всеми extra (pdf, archive7z, archiverar, config,
-#      watch, http, stemming).
+#   2. Ставит persinder со всеми extra (pdf, rtf, archive7z, archiverar,
+#      config, watch, http, stemming).
 #   3. Скачивает модель эмбеддингов e5-small-int8-v1 (~120 МБ) в каталог
 #      приложения ~/.persinder/models (модели всегда в <home>/models).
 #   4. Показывает, как запустить индексацию test-content.
@@ -83,7 +83,7 @@ echo "Venv python: $PY"
 # --- установка пакета со всеми extra ---
 echo "Ставлю persinder + все extra..."
 "$PY" -m pip install --upgrade pip
-"$PY" -m pip install -e ".[config,watch,http,pdf,archive7z,archiverar,stemming]"
+"$PY" -m pip install -e ".[config,watch,http,pdf,rtf,archive7z,archiverar,stemming]"
 echo "OK: persinder установлен."
 
 # --- модель эмбеддингов ---

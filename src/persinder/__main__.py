@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import cast
 
 from .api import IndexLog, serve
+from .api.index_log import KIND_SYSTEM
 from .config import Settings
 from .embed import (
     CATALOG,
@@ -49,6 +50,7 @@ from .sources import (
     default_registry,
     load_config,
     queue_models_for,
+    reconcile,
 )
 from .store import SqliteStore
 from .textstore import FsTextStore
@@ -318,7 +320,36 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
             return file_sidecar_path(source_path, model).exists()
         return virtual_sidecar_path(settings.virtual_dir, doc_id, model).exists()
 
-    store.enqueue_missing(
+    # Сверка журнала с реальностью ДО очереди и скана: файл, который журнал
+    # считает устроенным, а база/текст — нет (пропущенный fb2, потерянный
+    # текст, документ из чужого профиля), иначе не будет прочитан никогда.
+    texts = FsTextStore(settings.text_dir)
+    checked = reconcile(areas, registry, journal, store, texts)
+    for rel, reason in checked.retried:
+        log.warning(
+            f"сверка: {rel} — {reason}; файл будет прочитан заново",
+            kind=KIND_SYSTEM,
+        )
+    for reason, files in checked.unsupported.items():
+        shown = ", ".join(files[:3])
+        tail = f" и ещё {len(files) - 3}" if len(files) > 3 else ""
+        log.warning(
+            f"не индексируется ({len(files)}): {reason} — {shown}{tail}",
+            kind=KIND_SYSTEM,
+        )
+    if checked.empty:
+        log.info(
+            f"сверка: журнал и база согласованы ({checked.checked} файлов)",
+            kind=KIND_SYSTEM,
+        )
+    dropped = journal.compact()
+    if dropped:
+        print(
+            f"Журнал: обрезано старых записей: {dropped} "
+            f"(старше {JOURNAL_RETENTION_DAYS} дней)",
+            flush=True,
+        )
+    added = store.enqueue_missing(
         list(models.queue_models()) if watch.semantic else [],
         _has_sidecar,
         models_for=lambda _area, source_path: models_for_source(
@@ -327,13 +358,11 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
         # Без сырого текста эмбеддинг не посчитать: иначе каждый старт ставит
         # тысячи задач документа, чей текст удалён, и воркер тут же снимает их
         # как сиротские («очередь при старте» пугает, прогресса нет).
-        has_text=FsTextStore(settings.text_dir).exists,
+        has_text=texts.exists,
     )
-    dropped = journal.compact()
-    if dropped:
+    if added:
         print(
-            f"Журнал: обрезано старых записей: {dropped} "
-            f"(старше {JOURNAL_RETENTION_DAYS} дней)",
+            f"Очередь эмбеддингов: добавлено {added} задач (досчёт без сайдкара)",
             flush=True,
         )
     recovery = ingest.recover()
@@ -359,8 +388,10 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
             or stats.errors
         ):
             print_stats(stats)
-        if stats.indexed:
-            kick.set()  # новые документы в очереди — будим эмбеддинги сразу
+        # Новые документы и восстановленные тексты (дубликаты по хэшу) ставят
+        # задачи в очередь — будим эмбеддинги сразу, не ждём тика.
+        if stats.indexed or stats.duplicates:
+            kick.set()
 
     watcher = Watcher(areas, watch, on_events, journal=journal)
     embed_thread: threading.Thread | None = None
@@ -382,8 +413,10 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
         f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с", flush=True
     )
     print(embed_label, flush=True)
+    startup = store.counts()
     print(
-        f"Очередь эмбеддингов при старте: {store.counts()['pending_embeddings']} задач",
+        f"Очередь эмбеддингов при старте: {startup['pending_embeddings']} задач"
+        f" у {startup['pending_documents']} документов",
         flush=True,
     )
     print(
@@ -473,7 +506,7 @@ def format_embed(stats: EmbedStats) -> str:
     return (
         f"Embed: документов {stats.docs}, чанков {stats.chunks}, "
         f"сайдкаров {stats.sidecars}, пропущено {stats.skipped}, "
-        f"ошибок {stats.errors}"
+        f"ошибок {stats.errors}; очередь {stats.queue_before} → {stats.pending}"
     )
 
 
@@ -589,6 +622,7 @@ def _embed_loop(
     не двигалась. Теперь поток живёт, а причина попадает в лог.
     """
     last_pending: int | None = None
+    idle_passes = 0
     while not stop.is_set():
         try:
             stats = worker.run_once(100)
@@ -603,6 +637,18 @@ def _embed_loop(
             # непустой или только что закончили работу.
             if stats.pending == 0 and (did or last_pending):
                 _say("Embed: очередь пуста")
+            # Очередь есть, а проход ничего не сделал — это не норма: сказать
+            # об этом явно, а не молчать (иначе «очередь не движется» видно
+            # только сторонним скриптом).
+            if stats.pending > 0 and not did:
+                idle_passes += 1
+                if idle_passes % 12 == 0:  # раз в минуту при interval=5 с
+                    _say(
+                        f"Embed: в очереди {stats.pending} задач, но проход "
+                        "ничего не обработал — смотри embed_errors.log"
+                    )
+            else:
+                idle_passes = 0
             last_pending = stats.pending
             if stats.docs == 0:
                 kick.wait(interval)

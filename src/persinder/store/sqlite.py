@@ -308,6 +308,10 @@ class SqliteStore:
                 pending_embeddings=one(
                     "SELECT COUNT(*) FROM embedding_queue WHERE status = 'pending'"
                 ),
+                pending_documents=one(
+                    "SELECT COUNT(DISTINCT doc_id) FROM embedding_queue"
+                    " WHERE status = 'pending'"
+                ),
             )
 
     # --- запись ---
@@ -558,7 +562,7 @@ class SqliteStore:
         has_sidecar: Callable[[str, str, str], bool],
         models_for: Callable[[str, str], tuple[str, ...]] | None = None,
         has_text: Callable[[str], bool] | None = None,
-    ) -> None:
+    ) -> int:
         """Поставить задачи только для источников без сайдкара под моделью.
 
         Нужно на старте сервиса: рестарт не должен заново ставить в очередь всё
@@ -576,7 +580,10 @@ class SqliteStore:
         считать нечего: такие задачи не ставим (иначе каждый старт заново
         кладёт тысячи задач документа, который воркер тут же снимет как
         сироту, и «очередь при старте» выглядит огромной без причины).
+
+        Возвращает число **добавленных** задач (уже стоявшие не в счёт).
         """
+        added = 0
         with self._lock, self._conn:
             rows = self._conn.execute(
                 "SELECT DISTINCT doc_id, area, source_path FROM document_sources"
@@ -599,7 +606,7 @@ class SqliteStore:
                         self.embeddings_complete(model, doc_id)
                     ):
                         continue
-                    self._conn.execute(
+                    cursor = self._conn.execute(
                         "INSERT OR IGNORE INTO embedding_queue"
                         "(doc_id, chunk_index, area, source_path, model, "
                         "status, created_at) "
@@ -607,6 +614,8 @@ class SqliteStore:
                         " FROM chunks WHERE doc_id = ?",
                         (area, source_path, model, utcnow(), doc_id),
                     )
+                    added += max(cursor.rowcount, 0)
+        return added
 
     def doc_ids_in_paths(
         self, prefixes: list[str], *, include_virtual: bool = False

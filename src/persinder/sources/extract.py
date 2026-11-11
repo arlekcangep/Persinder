@@ -24,7 +24,6 @@ xml/zipfile) и CHM (stdlib: ITSF/ITSP + LZX), а также архивы (zip/7
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import gzip
 import re
@@ -344,7 +343,8 @@ class RtfExtractor(BaseExtractor):
             del striprtf  # доступность extra 'rtf' проверена
         except ImportError as exc:
             raise RuntimeError(
-                "RtfExtractor требует extra 'rtf': pip install 'persinder[rtf]'"
+                "RTF: не установлен пакет striprtf (extra 'rtf') — "
+                'pip install -e ".[rtf]"'
             ) from exc
 
     def suffixes(self) -> frozenset[str]:
@@ -379,7 +379,8 @@ class PdfExtractor(BaseExtractor):
             del pypdf  # доступность extra 'pdf' проверена
         except ImportError as exc:
             raise RuntimeError(
-                "PdfExtractor требует extra 'pdf': pip install 'persinder[pdf]'"
+                "PDF: не установлен пакет pypdf (extra 'pdf') — "
+                'pip install -e ".[pdf]"'
             ) from exc
 
     def suffixes(self) -> frozenset[str]:
@@ -906,11 +907,17 @@ class ExtractorRegistry:
         extractors: tuple[Extractor, ...],
         containers: tuple[ContainerExtractor, ...] = (),
         classifiers: ClassifierSet | None = None,
+        unavailable: dict[str, str] | None = None,
     ) -> None:
         if not extractors and not containers:
             raise ValueError("реестр экстракторов пуст")
         self._extractors: tuple[Extractor, ...] = extractors
         self._containers: tuple[ContainerExtractor, ...] = containers
+        # Суффиксы, которые **могли бы** обслуживаться, но экстрактор не создан
+        # (не установлен пакет): ``.rtf`` → «не установлен striprtf…». Без этой
+        # карты пропуск файла выглядел как «формат не обслуживается» — без
+        # причины и без подсказки, что доставить.
+        self._unavailable: dict[str, str] = dict(unavailable or {})
         self._names: set[str] = set()
         self._classes: set[str] = set()
         all_extractors: tuple[Extractor | ContainerExtractor, ...] = (
@@ -937,6 +944,55 @@ class ExtractorRegistry:
     def known_classes(self) -> frozenset[str]:
         """Классы этого реестра (без легаси-алиасов)."""
         return frozenset(self._classes | RESERVED)
+
+    # --- проверка поддержки (без чтения файла) ---
+
+    def enabled_suffixes(self, area: AreaConfig) -> frozenset[str]:
+        """Суффиксы, которые область реально обслуживает этим реестром."""
+        suffixes: set[str] = set()
+        all_extractors: tuple[Extractor | ContainerExtractor, ...] = (
+            *self._extractors,
+            *self._containers,
+        )
+        for extractor in all_extractors:
+            if self._is_enabled(extractor, area):
+                suffixes.update(extractor.suffixes())
+        return frozenset(suffixes)
+
+    def supports(self, path: Path, area: AreaConfig) -> bool:
+        """Обслуживается ли файл сейчас — по расширению и ``formats`` области."""
+        return path.suffix.lower() in self.enabled_suffixes(area)
+
+    def explain_miss(self, path: Path, area: AreaConfig) -> str:
+        """Почему файл не обслуживается: причина + что сделать.
+
+        Порядок проверок:
+        * экстрактор есть, но не создан (нет пакета) — сказать, какой пакет;
+        * формат поддержан, но не разрешён в ``formats`` области — назвать имя;
+        * иначе — просто «формат не обслуживается».
+        """
+        suffix = path.suffix.lower()
+        if suffix in self._unavailable:
+            return self._unavailable[suffix]
+        all_extractors: tuple[Extractor | ContainerExtractor, ...] = (
+            *self._extractors,
+            *self._containers,
+        )
+        for extractor in all_extractors:
+            if suffix in extractor.suffixes():
+                names = sorted(
+                    {
+                        extractor.name,
+                        extractor.format_class,
+                        *(CLASS_ALIASES.get(extractor.name, ""),),
+                    }
+                    - {""}
+                )
+                return (
+                    f"{suffix} не разрешён в formats области {area.path}"
+                    f" — добавь {names[0]!r} (или класс {extractor.format_class!r})"
+                )
+        return "формат не обслуживается"
 
     # --- опрос ---
 
@@ -1049,12 +1105,17 @@ def default_registry() -> ExtractorRegistry:
         EpubExtractor(),
         ChmExtractor(),
     ]
-    with contextlib.suppress(RuntimeError):
-        extractors.append(PdfExtractor())
-    with contextlib.suppress(RuntimeError):
-        extractors.append(RtfExtractor())
+    unavailable: dict[str, str] = {}
+    for factory, suffixes in ((PdfExtractor, (".pdf",)), (RtfExtractor, (".rtf",))):
+        try:
+            extractors.append(factory())
+        except RuntimeError as exc:
+            # Экстрактор не создан: формат есть в природе, но пакета нет.
+            # Запоминаем причину, чтобы пропуск файла объяснял, что доставить.
+            for suffix in suffixes:
+                unavailable[suffix] = str(exc)
     containers: tuple[ContainerExtractor, ...] = (ArchiveExtractor(),)
-    return ExtractorRegistry(tuple(extractors), containers)
+    return ExtractorRegistry(tuple(extractors), containers, unavailable=unavailable)
 
 
 def dedup_tags(tags: Iterable[str]) -> tuple[str, ...]:
