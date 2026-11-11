@@ -103,7 +103,8 @@ class RtfExtractorTest(unittest.TestCase):
         matcher = default_classifiers()
         matches = matcher.classify(SAMPLE.encode("cp1251"), extension="")
         self.assertIn(
-            ClassMatch(PUB_FORMATS, "rtf", "magic"), matches,
+            ClassMatch(PUB_FORMATS, "rtf", "magic"),
+            matches,
         )
 
 

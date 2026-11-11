@@ -142,6 +142,28 @@ class SqliteStoreTest(unittest.TestCase):
         pending = self.store.pending_embeddings(limit=100)
         self.assertEqual([item["model"] for item in pending], ["m1"])
 
+    def test_enqueue_missing_skips_docs_without_text(self):
+        """Нет сырого текста — считать нечего: задачи не ставим.
+
+        Иначе каждый старт сервиса заново кладёт тысячи задач документа,
+        чей текст удалён, а воркер тут же снимает их как сиротские.
+        """
+        self._save("d1")
+        self._save("d2", filename="d2.txt")
+        self.store.drop_queue_model("placeholder-v1")
+
+        self.store.enqueue_missing(
+            ["placeholder-v1"],
+            lambda _model, _doc, _path: False,
+            has_text=lambda doc_id: doc_id != "d1",
+        )
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual(
+            {item["doc_id"] for item in pending},
+            {"d2"},
+            "документ без текста в очередь не попадает",
+        )
+
     def test_doc_ids_in_paths(self):
         self._save("d1")  # виртуальный источник (source_path = "")
         self.store.add_source("d1", "personal", "b.txt", source_path="/vault/a/b.md")

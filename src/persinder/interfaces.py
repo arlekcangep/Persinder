@@ -127,12 +127,15 @@ class MetaStore(Protocol):
         models: list[str],
         has_sidecar: Callable[[str, str, str], bool],
         models_for: Callable[[str, str], tuple[str, ...]] | None = None,
+        has_text: Callable[[str], bool] | None = None,
     ) -> None:
         """Поставить задачи только для источников без сайдкара под моделью
         (``--reindex``: уже отработанное заново в очередь не возвращается).
 
         ``models_for(area, source_path)`` — модели конкретного источника по
         конфигу; ``None`` — общий список ``models``.
+        ``has_text(doc_id)`` — есть ли у документа сырой текст; без текста
+        задачи не ставятся (их нечем считать).
         """
         ...
 

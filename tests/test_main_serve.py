@@ -102,6 +102,70 @@ class ServeTest(unittest.TestCase):
         # поток эмбеддингов успел разобрать очередь
         self.assertEqual(counts["pending_embeddings"], 0)
 
+    def test_serve_does_not_requeue_document_without_text(self):
+        """Удалённый текст не должен каждый старт снова попадать в очередь.
+
+        Иначе сервис на каждом запуске печатает «Очередь: тысячи задач»,
+        ставит их и тут же снимает как сиротские — со стороны это выглядит
+        как «очередь есть, а ничего не обрабатывается».
+        """
+
+        def fake_serve(
+            ingest: Ingest,
+            search: Search,
+            host: str,
+            port: int,
+            log=None,
+            stats=None,
+        ) -> None:
+            time.sleep(1.0)
+
+        with (
+            mock.patch.object(cli, "serve", fake_serve),
+            redirect_stdout(io.StringIO()),
+        ):
+            cli.run_serve(self.config, self.settings)
+
+        store = SqliteStore(self.settings.db_path)
+        try:
+            texts = list(self.settings.text_dir.glob("*.txt"))
+            self.assertEqual(len(texts), 1, "текст проиндексированного документа")
+            doc_id = texts[0].stem
+            # пользователь удалил текст, сайдкара нет — считать нечего
+            for sidecar in self.area.rglob("*.pdr"):
+                sidecar.unlink()
+            texts[0].unlink()
+            store.drop_queue_model("placeholder-v1")
+        finally:
+            store.close()
+
+        served: list[int] = []
+
+        def fake_serve2(
+            ingest: Ingest,
+            search: Search,
+            host: str,
+            port: int,
+            log=None,
+            stats=None,
+        ) -> None:
+            time.sleep(0.5)
+            served.append(1)
+
+        out = io.StringIO()
+        with mock.patch.object(cli, "serve", fake_serve2), redirect_stdout(out):
+            rc = cli.run_serve(self.config, self.settings)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(served, [1])
+        self.assertIn("Очередь эмбеддингов при старте: 0 задач", out.getvalue())
+        store = SqliteStore(self.settings.db_path)
+        try:
+            self.assertEqual(store.counts()["pending_embeddings"], 0)
+            self.assertEqual(store.find_document_by_hash(doc_id), doc_id)
+        finally:
+            store.close()
+
     def test_serve_shares_one_log_between_files_and_embeddings(self):
         """События файлов и эмбеддингов — в одном журнале (оба видны в /logs)."""
         captured: dict[str, Any] = {}

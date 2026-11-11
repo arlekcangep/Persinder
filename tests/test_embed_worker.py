@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import threading
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -717,6 +719,29 @@ class EmbedBatchProgressTest(unittest.TestCase):
 
 class EmbedLoopTest(unittest.TestCase):
     """Цикл эмбеддингов не умирает молча из-за ошибок печати и лога."""
+
+    def test_loop_announces_empty_queue_once(self):
+        """Пустая очередь озвучивается один раз, а не молчанием и не спамом."""
+        from persinder import __main__ as cli
+        from persinder.embed import EmbedStats
+
+        stop = threading.Event()
+        kick = threading.Event()
+        calls: list[int] = []
+
+        def run_once(limit: int) -> EmbedStats:
+            calls.append(limit)
+            if len(calls) == 1:
+                return EmbedStats(docs=1, chunks=1, sidecars=1, pending=1)
+            stop.set()
+            return EmbedStats(pending=0)
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli._embed_loop(
+                mock.Mock(run_once=run_once), stop, kick, interval=0.01, log_path=None
+            )
+        self.assertEqual(out.getvalue().count("Embed: очередь пуста"), 1)
 
     def test_loop_survives_console_encoding_error(self):
         """UnicodeEncodeError в print не должен убивать поток эмбеддингов.

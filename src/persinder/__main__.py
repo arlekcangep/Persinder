@@ -324,6 +324,10 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
         models_for=lambda _area, source_path: models_for_source(
             areas, source_path, models, semantic=watch.semantic
         ),
+        # Без сырого текста эмбеддинг не посчитать: иначе каждый старт ставит
+        # тысячи задач документа, чей текст удалён, и воркер тут же снимает их
+        # как сиротские («очередь при старте» пугает, прогресса нет).
+        has_text=FsTextStore(settings.text_dir).exists,
     )
     dropped = journal.compact()
     if dropped:
@@ -584,14 +588,22 @@ def _embed_loop(
     или из записи лога убивало поток молча — сервис отвечал по HTTP, а очередь
     не двигалась. Теперь поток живёт, а причина попадает в лог.
     """
+    last_pending: int | None = None
     while not stop.is_set():
         try:
             stats = worker.run_once(100)
-            if stats.docs or stats.skipped or stats.errors:
+            did = bool(stats.docs or stats.skipped or stats.errors)
+            if did:
                 _say(format_embed(stats))
                 for message in stats.messages[:10]:
                     _say(f"Embed: {message}")
                     _append_embed_error(log_path, message)
+            # Молчание на пустой очереди читается как «воркер встал»: говорим
+            # об опустевшей очереди один раз — когда она только что была
+            # непустой или только что закончили работу.
+            if stats.pending == 0 and (did or last_pending):
+                _say("Embed: очередь пуста")
+            last_pending = stats.pending
             if stats.docs == 0:
                 kick.wait(interval)
                 kick.clear()

@@ -74,7 +74,7 @@ def _cyrillic_share(text: str) -> float:
     letters = sum(1 for ch in text if ch.isalpha())
     if letters == 0:
         return 0.0
-    cyrillic = sum(1 for ch in text if "\u0400" <= ch <= "\u04FF")
+    cyrillic = sum(1 for ch in text if "\u0400" <= ch <= "\u04ff")
     return cyrillic / letters
 
 

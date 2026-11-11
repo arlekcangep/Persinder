@@ -35,4 +35,7 @@ class EmbedStats:
     sidecars: int = 0
     skipped: int = 0  # документ без текста — очередь отброшена
     errors: int = 0
+    # Сколько задач осталось после прохода: по этому признаку цикл понимает,
+    # что очередь опустела, и говорит об этом (молчание выглядит как «встало»).
+    pending: int = 0
     messages: list[str] = field(default_factory=list[str])

@@ -173,6 +173,7 @@ class EmbedWorker:
                     row["id"] for row in self._store.embeddings_ids_for_model(model)
                 ]
                 index.sync(live)
+            stats.pending = self._store.counts()["pending_embeddings"]
         finally:
             self._indices.clear()
         return stats
