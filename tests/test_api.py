@@ -124,6 +124,87 @@ class ApiTest(unittest.TestCase):
 
         self.assertEqual([ev["id"] for ev in body["events"]], [2, 3])
 
+    def _server_with_log(self, log: Any) -> tuple[Any, str]:
+        """Поднять сервер с данным ``IndexLog``; вернуть (server, base_url)."""
+        server = make_server(
+            self.server.ingest, self.server.search, host="127.0.0.1", port=0, log=log
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        addr = server.server_address
+        return server, f"http://{addr[0]}:{addr[1]}"
+
+    def test_logs_filter_by_kind(self):
+        from persinder.api import KIND_EMBED, KIND_INDEX, IndexLog
+
+        log = IndexLog()
+        log.enable_console(False)
+        log.info("проиндексирован: a.txt", kind=KIND_INDEX)
+        log.info("сайдкар: a.txt (model, чанков: 2)", kind=KIND_EMBED)
+        log.info("проиндексирован: b.txt", kind=KIND_INDEX)
+
+        server, base = self._server_with_log(log)
+        try:
+            with urllib.request.urlopen(base + "/logs?kind=embed") as resp:
+                body = json.load(resp)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        self.assertEqual(len(body["events"]), 1)
+        self.assertEqual(body["events"][0]["kind"], "embed")
+        self.assertIn("сайдкар", body["events"][0]["message"])
+
+    def test_logs_invalid_kind_is_400(self):
+        from persinder.api import IndexLog
+
+        log = IndexLog()
+        log.enable_console(False)
+        server, base = self._server_with_log(log)
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(base + "/logs?kind=bad")
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_logs_filter_by_dates(self):
+        from persinder.api import IndexLog
+
+        log = IndexLog()
+        log.enable_console(False)
+        log.info("вчера")
+        log.info("сегодня")
+        log._events[0].ts = "2026-11-10T23:59:59+00:00"
+        log._events[1].ts = "2026-11-11T00:00:00+00:00"
+
+        server, base = self._server_with_log(log)
+        try:
+            with urllib.request.urlopen(
+                base + "/logs?from=2026-11-11&to=2026-11-11"
+            ) as resp:
+                body = json.load(resp)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        self.assertEqual([ev["message"] for ev in body["events"]], ["сегодня"])
+
+    def test_logs_invalid_date_is_400(self):
+        from persinder.api import IndexLog
+
+        log = IndexLog()
+        log.enable_console(False)
+        server, base = self._server_with_log(log)
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(base + "/logs?from=not-a-date")
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(ctx.exception.code, 400)
+
     def test_logs_invalid_limit_is_400(self):
         from persinder.api import IndexLog
 

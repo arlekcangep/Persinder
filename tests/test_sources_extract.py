@@ -10,6 +10,8 @@ from persinder.domain import Area
 from persinder.sources import (
     AreaConfig,
     ExtractorRegistry,
+    Fb2Extractor,
+    HtmlExtractor,
     MarkdownExtractor,
     TextExtractor,
     default_registry,
@@ -191,6 +193,75 @@ class ExtractTest(unittest.TestCase):
         result = MarkdownExtractor().extract(self._write("n.md", "# Заголовок\n#tag"))
         self.assertEqual(result.tags, ("tag",))
         self.assertTrue(result.text.startswith("# Заголовок"))
+
+
+class EncodingTest(unittest.TestCase):
+    """Детектор кодировок: BOM → UTF-8 → cp1251 → cp1252 → latin-1."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_bytes(self, name: str, data: bytes) -> Path:
+        path = self.root / name
+        path.write_bytes(data)
+        return path
+
+    def test_utf8_bytes_kept(self):
+        path = self._write_bytes("u.txt", "Привет, мир".encode())
+        self.assertEqual(TextExtractor().extract(path).text, "Привет, мир")
+
+    def test_utf8_bom_stripped(self):
+        path = self._write_bytes("u.txt", b"\xef\xbb\xbf" + "Привет".encode())
+        self.assertEqual(TextExtractor().extract(path).text, "Привет")
+
+    def test_cp1251_text(self):
+        path = self._write_bytes("c.txt", "Привет, мир!".encode("cp1251"))
+        self.assertEqual(TextExtractor().extract(path).text, "Привет, мир!")
+
+    def test_markdown_cp1251(self):
+        path = self._write_bytes("c.md", "# Заголовок\n#тэг тело".encode("cp1251"))
+        result = MarkdownExtractor().extract(path)
+        self.assertEqual(result.text, "# Заголовок\n#тэг тело")
+        self.assertEqual(result.tags, ("тэг",))
+
+    def test_html_cp1251(self):
+        html = "<html><head><title>Титул</title></head><body>тело</body></html>"
+        path = self._write_bytes("c.html", html.encode("cp1251"))
+        result = HtmlExtractor().extract(path)
+        self.assertEqual(result.text, "тело")
+        self.assertIn("Титул", result.tags)
+
+    def test_cp1252_text(self):
+        # À/é — типичные байты западной кодовой таблицы (0xC0/0xE9)
+        path = self._write_bytes("w.txt", b"caf\xe9 \xc0 propos")
+        self.assertEqual(TextExtractor().extract(path).text, "café À propos")
+
+    def test_fb2_cp1251(self):
+        """fb2 с декларацией windows-1251 читается (ElementTree её не знает)."""
+        xml = (
+            "<?xml version='1.0' encoding='windows-1251'?>"
+            "<FictionBook xmlns='http://example.com/fb2'>"
+            "<body><p>Книга в кодировке cp1251</p><p>вторая строка</p></body>"
+            "</FictionBook>"
+        )
+        path = self._write_bytes("book.fb2", xml.encode("cp1251"))
+        result = Fb2Extractor().extract(path)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.text, "Книга в кодировке cp1251\n\nвторая строка")
+
+    def test_fb2_utf8_no_declaration(self):
+        xml = (
+            "<FictionBook xmlns='http://example.com/fb2'>"
+            "<body><p>Просто текст</p></body></FictionBook>"
+        )
+        path = self._write_bytes("book2.fb2", xml.encode())
+        result = Fb2Extractor().extract(path)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.text, "Просто текст")
 
 
 if __name__ == "__main__":

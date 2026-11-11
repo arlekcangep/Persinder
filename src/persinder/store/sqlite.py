@@ -229,13 +229,13 @@ class SqliteStore:
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, doc_id, chunk_index, area, source_path, model "
-                "FROM embedding_queue "
-                "WHERE status = 'pending' "
-                "ORDER BY (SELECT COUNT(*) FROM embedding_queue q2"
-                "          WHERE q2.status = 'pending'"
-                "          AND q2.doc_id = embedding_queue.doc_id),"
-                "         id LIMIT ?",
+                "SELECT q.id, q.doc_id, q.chunk_index, q.area, q.source_path, q.model "
+                "FROM embedding_queue q "
+                "JOIN (SELECT doc_id, COUNT(*) AS n FROM embedding_queue"
+                "      WHERE status = 'pending' GROUP BY doc_id) c"
+                "  ON c.doc_id = q.doc_id "
+                "WHERE q.status = 'pending' "
+                "ORDER BY c.n, q.id LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._queue_item(row) for row in rows]
@@ -262,6 +262,19 @@ class SqliteStore:
         with self._lock, self._conn:
             self._conn.execute(
                 f"DELETE FROM embedding_queue WHERE id IN ({placeholders})", ids
+            )
+
+    def drop_queue_doc(self, doc_id: str) -> None:
+        """Снять все задачи документа (ошибка эмбеддинга).
+
+        Падающий документ иначе молотится каждым проходом: задачи остаются в
+        очереди, воркер пересчитывает его вечно (30% CPU, очередь не убывает).
+        Снятые задачи возвращаются на следующем старте через ``enqueue_missing``
+        (сайдкара нет) — после починки причины ошибки документ досчитается.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM embedding_queue WHERE doc_id = ?", (doc_id,)
             )
 
     def drop_queue_model(self, model: str) -> None:

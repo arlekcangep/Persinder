@@ -1,5 +1,6 @@
 import type {
   ApiHealthResponse,
+  ApiLogKind,
   ApiLogResponse,
   ApiSearchResponse,
 } from "./types";
@@ -76,6 +77,12 @@ export interface LogsParams {
   limit?: number;
   /** Только события с id больше указанного. */
   after?: number;
+  /** Только события этого вида. */
+  kind?: ApiLogKind;
+  /** Нижняя граница времени (ISO-дата-время, включительно). */
+  from?: string;
+  /** Верхняя граница времени (ISO-дата-время, исключительно). */
+  to?: string;
 }
 
 export async function fetchLogs(
@@ -85,6 +92,9 @@ export async function fetchLogs(
   const query = new URLSearchParams();
   if (params.limit !== undefined) query.set("limit", String(params.limit));
   if (params.after !== undefined) query.set("after", String(params.after));
+  if (params.kind) query.set("kind", params.kind);
+  if (params.from) query.set("from", params.from);
+  if (params.to) query.set("to", params.to);
   const qs = query.toString();
   const response = await fetch(apiUrl(`/logs${qs ? `?${qs}` : ""}`), {
     signal,

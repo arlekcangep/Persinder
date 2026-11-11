@@ -19,7 +19,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 
-from ..api.index_log import IndexLog
+from ..api.index_log import KIND_INDEX, IndexLog
 from ..ingest import IngestRequest, IngestResult
 from ..interfaces import Ingest
 from .extract import Extracted, ExtractorRegistry
@@ -62,7 +62,7 @@ class IndexingPipeline:
     def _outcome(self, level: str, message: str) -> None:
         """Дописать событие в ``IndexLog`` (консоль + веб-журнал)."""
         if self._log is not None:
-            self._log.add(level, message)
+            self._log.add(level, message, kind=KIND_INDEX)
 
     def _record(
         self,

@@ -270,10 +270,11 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     ingest, search, store = build_service(
         settings, areas=areas, semantic=watch.semantic, min_score=watch.min_score
     )
+    log = IndexLog()
     embed_worker: EmbedWorker | None = None
     embed_store: SqliteStore | None = None
     if watch.semantic:
-        embed_worker, embed_store, embed_label = build_embed_worker(settings)
+        embed_worker, embed_store, embed_label = build_embed_worker(settings, log)
     else:
         embed_label = (
             "Semantic: выключено конфигом (semantic: false) — эмбеддинги не считаются"
@@ -333,7 +334,8 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     if recovery.removed:
         print(format_recovery(recovery), flush=True)
 
-    log = IndexLog()
+    # Один журнал на весь сервис: события файлов, эмбеддингов и служебные
+    # попадают и в консоль, и в /logs (фильтры — по виду события).
     pipeline = IndexingPipeline(
         ingest, registry, journal=journal, semantic=watch.semantic, log=log
     )
@@ -464,6 +466,7 @@ def describe_models(settings: Settings) -> str:
 
 def build_embed_worker(
     settings: Settings,
+    log: IndexLog | None = None,
 ) -> tuple[EmbedWorker, SqliteStore, str]:
     """Собрать воркер эмбеддингов; вернуть (воркер, сторе, подпись моделей).
 
@@ -483,6 +486,7 @@ def build_embed_worker(
         chunk_overlap=settings.chunk_overlap,
         virtual_dir=settings.virtual_dir,
         ann_dir=settings.ann_dir,
+        log=log,
     )
     return worker, store, label
 
@@ -570,7 +574,7 @@ def run_embed(
         finally:
             store.close()
         print(f"поставлен пересчёт всех источников под {key}")
-    worker, store, label = build_embed_worker(settings)
+    worker, store, label = build_embed_worker(settings, IndexLog())
     try:
         stats = _drain(worker, limit) if background else worker.run_once(limit)
     finally:

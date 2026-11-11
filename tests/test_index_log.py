@@ -1,8 +1,15 @@
 """Тесты ``IndexLog``: колесо событий индексации для консоли и web UI."""
 
 import unittest
+from datetime import datetime, timezone
 
-from persinder.api import IndexLog
+from persinder.api import (
+    KIND_EMBED,
+    KIND_INDEX,
+    KIND_SYSTEM,
+    IndexLog,
+    parse_time_bound,
+)
 
 
 class IndexLogTest(unittest.TestCase):
@@ -60,9 +67,65 @@ class IndexLogTest(unittest.TestCase):
     def test_to_dict_shape(self):
         self.log.info("событие")
         payload = self.log.entries()[0].to_dict()
-        self.assertEqual(set(payload), {"id", "ts", "level", "message"})
+        self.assertEqual(set(payload), {"id", "ts", "level", "kind", "message"})
         self.assertIsInstance(payload["ts"], str)
         self.assertIsInstance(payload["message"], str)
+        self.assertEqual(payload["kind"], "system")
+
+    def test_kind_defaults_to_system(self):
+        self.log.info("служебное")
+        self.log.info("файл", kind=KIND_INDEX)
+        self.log.error("сайдкар", kind=KIND_EMBED)
+        self.assertEqual(
+            [ev.kind for ev in self.log.entries()], ["system", "index", "embed"]
+        )
+
+    def test_entries_filter_by_kind(self):
+        self.log.info("файл 1", kind=KIND_INDEX)
+        self.log.info("сайдкар 1", kind=KIND_EMBED)
+        self.log.info("файл 2", kind=KIND_INDEX)
+        self.log.info("служебное")
+        self.assertEqual(
+            [ev.message for ev in self.log.entries(kind=KIND_INDEX)],
+            ["файл 1", "файл 2"],
+        )
+        self.assertEqual(
+            [ev.message for ev in self.log.entries(kind=KIND_EMBED)], ["сайдкар 1"]
+        )
+        self.assertEqual(
+            [ev.message for ev in self.log.entries(kind=KIND_SYSTEM)], ["служебное"]
+        )
+
+    def test_entries_filter_by_time_range(self):
+        self.log.info("вчера")
+        self.log.info("сегодня")
+        self.log.info("завтра")
+        self.log._events[0].ts = "2026-11-10T23:59:59+00:00"
+        self.log._events[1].ts = "2026-11-11T00:00:00+00:00"
+        self.log._events[2].ts = "2026-11-12T08:00:00+00:00"
+
+        since = parse_time_bound("2026-11-11")
+        until = parse_time_bound("2026-11-11", end_of_day=True)
+        assert since is not None and until is not None
+        events = self.log.entries(since=since, until=until)
+        self.assertEqual([ev.message for ev in events], ["сегодня"])
+
+    def test_parse_time_bound(self):
+        self.assertIsNone(parse_time_bound(""))
+        self.assertEqual(
+            parse_time_bound("2026-11-10"),
+            datetime(2026, 11, 10, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            parse_time_bound("2026-11-10", end_of_day=True),
+            datetime(2026, 11, 11, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            parse_time_bound("2026-11-10T12:30:00Z"),
+            datetime(2026, 11, 10, 12, 30, tzinfo=timezone.utc),
+        )
+        with self.assertRaises(ValueError):
+            parse_time_bound("позавчера")
 
     def test_console_on_by_default(self):
         log = IndexLog()

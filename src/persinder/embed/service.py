@@ -25,6 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..api.index_log import KIND_EMBED, IndexLog
 from ..domain import chunk_text
 from ..interfaces import Embedder, MetaStore, TextStore
 from ..morphology import tokenize
@@ -93,6 +94,7 @@ class EmbedWorker:
         chunk_overlap: int = 200,
         virtual_dir: Path | None = None,
         ann_dir: Path | None = None,
+        log: IndexLog | None = None,
     ) -> None:
         self._store = store
         self._textstore = textstore
@@ -101,6 +103,7 @@ class EmbedWorker:
         self._chunk_overlap = chunk_overlap
         self._virtual_dir = Path(virtual_dir) if virtual_dir else None
         self._ann_dir = Path(ann_dir) if ann_dir else None
+        self._log = log
         self._indices: dict[str, UsannIndex] = {}
         # Эмбеддеры кэшируются по модели: ONNX-сессия (веса ~100 МБ) создаётся
         # один раз, а не на каждый документ/проход. Иначе пересчёт сотен файлов
@@ -130,23 +133,41 @@ class EmbedWorker:
 
         Документ обрабатывается целиком: если среди порции есть его задачи,
         берутся все его незавершённые задачи (их может быть больше ``limit``).
-        Ошибки не валят проход: задачи остаются в очереди и уйдут в следующий.
-        В конце прохода ANN-индексы реконсилируются с таблицей ``embeddings``.
+        Ошибки не валят проход: задачи падающего документа снимаются, чтобы
+        воркер не молотил его каждым проходом (вечный re-embed), а прочие
+        документы посчитаются. В конце прохода ANN-индексы реконсилируются с
+        таблицей ``embeddings``.
         """
         stats = EmbedStats()
         self._indices.clear()
         try:
             rows = self._store.pending_embeddings(limit)
+            paths: dict[str, str] = {
+                str(row["doc_id"]): str(row["source_path"])
+                for row in rows
+                if row["source_path"]
+            }
             doc_ids = list(dict.fromkeys(str(row["doc_id"]) for row in rows))
             for doc_id in doc_ids:
                 try:
                     self._process_doc(doc_id, stats)
                 except Exception as exc:  # noqa: BLE001 — одна задача не валит проход
                     # Ошибка одного документа (OOM, битый файл, нет модели) не
-                    # должна блокировать остальные: задачи остаются в очереди и
-                    # уйдут следующим проходом, а прочие документы посчитаются.
+                    # должна блокировать остальные: задачи снимаются (иначе
+                    # падающий документ молотится каждым проходом вечно — CPU
+                    # горит, очередь не убывает), а без сайдкара они вернутся
+                    # на следующем старте через enqueue_missing. Прочие документы
+                    # посчитаются в этом же проходе.
                     stats.errors += 1
                     stats.messages.append(f"{doc_id}: {exc}")
+                    if self._log is not None:
+                        name = paths.get(doc_id) or f"документ {doc_id[:8]}"
+                        self._log.error(
+                            f"эмбеддинг: {name} — {exc} (задачи сняты, "
+                            "вернутся при переиндексации)",
+                            kind=KIND_EMBED,
+                        )
+                    self._store.drop_queue_doc(doc_id)
             for model, index in self._indices.items():
                 live = [
                     row["id"] for row in self._store.embeddings_ids_for_model(model)
@@ -160,6 +181,13 @@ class EmbedWorker:
         rows = self._store.pending_for_docs([doc_id])
         if not rows:
             return
+        # Человекочитаемое имя для журнала: путь источника, иначе короткий id.
+        label = next(
+            (str(row["source_path"]) for row in rows if row["source_path"]),
+            f"документ {doc_id[:8]}",
+        )
+        if self._log is not None:
+            self._log.info(f"эмбеддинг: {label}", kind=KIND_EMBED)
 
         try:
             text = self._textstore.read(doc_id)
@@ -167,6 +195,10 @@ class EmbedWorker:
             # Документа нет (удалён/вытеснен), а задачи остались — это сироты.
             self._store.drop_queue_rows([int(row["id"]) for row in rows])
             stats.skipped += 1
+            if self._log is not None:
+                self._log.warning(
+                    f"пропущен: {label} (нет текста, задачи сняты)", kind=KIND_EMBED
+                )
             return
 
         spans = chunk_text(text, self._chunk_size, self._chunk_overlap)
@@ -260,6 +292,11 @@ class EmbedWorker:
             stats.chunks += len(packed)
             self._store.drop_queue_rows([int(row["id"]) for row in model_rows])
             counted = True
+            if self._log is not None:
+                self._log.info(
+                    f"сайдкар: {label} ({model}, чанков: {len(packed)})",
+                    kind=KIND_EMBED,
+                )
 
         if counted:
             stats.docs += 1

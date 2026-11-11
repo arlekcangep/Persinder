@@ -16,9 +16,10 @@
   классификацию по байтам (``_AreaEntryResolver``).
 
 Минимальный набор: Markdown/текстовые заметки Obsidian (тэги не дублируются),
-HTML/MHTML, PDF (extra ``pdf``), FB2 и EPUB (stdlib: xml/zipfile), а также
-архивы (zip/7z/tar/gz/rar) — контейнер, каждая запись — отдельная часть,
-вложенные архивы раскрываются на один уровень. OCR/код — будущие классы.
+HTML/MHTML, PDF (extra ``pdf``), RTF (extra ``rtf``), FB2, EPUB (stdlib:
+xml/zipfile) и CHM (stdlib: ITSF/ITSP + LZX), а также архивы (zip/7z/tar/gz/rar) —
+контейнер, каждая запись — отдельная часть, вложенные архивы раскрываются на один
+уровень. OCR/код — будущие классы.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from .chm import ChmArchive
 from .classify import (
     ARCHIVE,
     PUB_FORMATS,
@@ -45,6 +47,7 @@ from .classify import (
     ClassMatch,
     default_classifiers,
 )
+from .encodings import decode_text
 from .models import AreaConfig
 
 # Тэг: #слово (буквы/цифры/подчёркивание/дефис), не внутри inline-кода и
@@ -171,7 +174,7 @@ class MarkdownExtractor(BaseExtractor):
         return frozenset({".md", ".markdown"})
 
     def extract(self, path: Path) -> Extracted:
-        raw = path.read_text(encoding="utf-8", errors="replace")
+        raw = decode_text(path.read_bytes())
         fm_match = FRONTMATTER_RE.match(raw)
         frontmatter: str | None = None
         body = raw
@@ -197,7 +200,7 @@ class TextExtractor(BaseExtractor):
 
     def extract(self, path: Path) -> Extracted:
         return Extracted(
-            text=path.read_text(encoding="utf-8", errors="replace"),
+            text=decode_text(path.read_bytes()),
             extractor=self.name,
         )
 
@@ -213,7 +216,7 @@ class HtmlExtractor(BaseExtractor):
         return frozenset({".html", ".htm"})
 
     def extract(self, path: Path) -> Extracted:
-        raw = path.read_text(encoding="utf-8", errors="replace")
+        raw = decode_text(path.read_bytes())
         return dataclasses.replace(extract_html(raw), extractor=self.name)
 
 
@@ -243,7 +246,7 @@ class MhtmlExtractor(BaseExtractor):
             return Extracted(text="", error=f"mhtml: {exc}", extractor=self.name)
         if html is None:
             # Не multipart: иногда это просто HTML с MIME-заголовками.
-            raw = path.read_text(encoding="utf-8", errors="replace")
+            raw = decode_text(path.read_bytes())
             html = raw
         return dataclasses.replace(extract_html(html), extractor=self.name)
 
@@ -325,6 +328,43 @@ def extract_html(raw: str) -> Extracted:
     return Extracted(text=text, tags=tags)
 
 
+class RtfExtractor(BaseExtractor):
+    """RTF — структурированный текст; берём только текст без управляющих
+    последовательностей (через ``striprtf``, extra ``rtf``), класс ``pub-formats``.
+    """
+
+    name = "rtf"
+    format_class = PUB_FORMATS
+    subtypes = frozenset({"rtf"})
+
+    def __init__(self) -> None:
+        try:
+            import striprtf  # noqa: F401
+
+            del striprtf  # доступность extra 'rtf' проверена
+        except ImportError as exc:
+            raise RuntimeError(
+                "RtfExtractor требует extra 'rtf': pip install 'persinder[rtf]'"
+            ) from exc
+
+    def suffixes(self) -> frozenset[str]:
+        return frozenset({".rtf"})
+
+    def extract(self, path: Path) -> Extracted:
+        # striprtf — чистый Python, но без аннотаций типов (strict pyright).
+        from striprtf.striprtf import rtf_to_text  # pyright: ignore[reportUnknownVariableType]
+
+        try:
+            raw = decode_text(path.read_bytes())
+            text: str = rtf_to_text(raw)  # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
+        except Exception as exc:  # noqa: BLE001 — повреждённый RTF
+            return Extracted(text="", error=f"rtf: {exc}", extractor=self.name)
+        return Extracted(
+            text=text.strip(),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            extractor=self.name,
+        )
+
+
 class PdfExtractor(BaseExtractor):
     """PDF через pypdf (extra ``pdf``), класс ``pub-formats``."""
 
@@ -385,8 +425,12 @@ class Fb2Extractor(BaseExtractor):
     def _extract_xml(self, data: bytes) -> Extracted:
         import xml.etree.ElementTree as ET
 
+        # Декларация может называть windows-1251/koi8-r, которые ElementTree
+        # декодировать не умеет (бросает ValueError). Декодируем сами по
+        # детектору (BOM → UTF-8 → cp1251 → cp1252 → latin-1) и парсим строку:
+        # для str декларация encoding игнорируется, а текст уже в юникоде.
         try:
-            root = ET.fromstring(data)
+            root = ET.fromstring(decode_text(data))
         except Exception as exc:  # noqa: BLE001 — повреждённый XML
             return Extracted(text="", error=f"fb2: {exc}", extractor=self.name)
         paragraphs: list[str] = []
@@ -424,6 +468,60 @@ def text_tag_iter(elem: Any) -> Iterable[str]:
     for node in elem.iter():
         if node.tag.endswith("}tag") and node.text:
             yield node.text
+
+
+class ChmExtractor(BaseExtractor):
+    """CHM (Compiled HTML Help) — stdlib-распаковщик ITSF/ITSP + LZX.
+
+    Страницы (``.htm``/``.html``/``.xhtml``) прогоняются через общий
+    ``extract_html`` и склеиваются в порядке оглавления. Если страниц нет,
+    берутся индексные файлы ``.hhc``/``.hhk`` (в них — оглавление и указатель).
+    Сбой одной страницы не валит документ: он пропускается, ошибка видна,
+    только если текста не набралось совсем.
+    """
+
+    name = "chm"
+    format_class = PUB_FORMATS
+    subtypes = frozenset({"chm"})
+
+    _PAGE_SUFFIXES = (".htm", ".html", ".xhtml")
+    _INDEX_SUFFIXES = (".hhc", ".hhk")
+
+    def suffixes(self) -> frozenset[str]:
+        return frozenset({".chm"})
+
+    def extract(self, path: Path) -> Extracted:
+        try:
+            archive = ChmArchive(path)
+        except Exception as exc:  # noqa: BLE001 — битый или не-CHM файл
+            return Extracted(text="", error=f"chm: {exc}", extractor=self.name)
+        names = archive.names()
+        pages = [n for n in names if n.lower().endswith(self._PAGE_SUFFIXES)]
+        if not pages:
+            pages = [n for n in names if n.lower().endswith(self._INDEX_SUFFIXES)]
+
+        parts: list[str] = []
+        tags: list[str] = []
+        errors: list[str] = []
+        for name in pages:
+            try:
+                raw = archive.read(name)
+            except Exception as exc:  # noqa: BLE001 — повреждённая запись
+                errors.append(f"{name}: {exc}")
+                continue
+            result = extract_html(decode_text(raw))
+            if result.text:
+                parts.append(result.text)
+                tags.extend(result.tags)
+        if not parts:
+            detail = "; ".join(errors[:3]) or "нет текстовых страниц"
+            return Extracted(text="", error=f"chm: {detail}", extractor=self.name)
+        return Extracted(
+            text="\n\n".join(parts),
+            tags=dedup_tags(tags),
+            pages=len(parts),
+            extractor=self.name,
+        )
 
 
 class EpubExtractor(BaseExtractor):
@@ -465,7 +563,7 @@ class EpubExtractor(BaseExtractor):
             if target not in names:
                 continue
             raw_html = archive.read(target)
-            text = raw_html.decode("utf-8", errors="replace")
+            text = decode_text(raw_html)
             result = extract_html(text)
             if result.text:
                 parts.append(result.text)
@@ -936,10 +1034,11 @@ CLASS_ALIASES: dict[str, str] = {
 def default_registry() -> ExtractorRegistry:
     """Стандартный набор: text + structure-text + pub-formats + archive.
 
-    PDF добавляется, только если установлен extra ``pdf`` (pypdf). FB2/EPUB —
-    стандартная библиотека. Классы ``ocr``/``code``/``science`` зарезервированы
-    в ``known_names``, но экстракторов у них нет — файлы таких классов просто
-    не индексируются, пока не будут реализованы.
+    PDF добавляется, только если установлен extra ``pdf`` (pypdf), RTF — extra
+    ``rtf`` (striprtf). FB2/EPUB/CHM — стандартная библиотека. Классы
+    ``ocr``/``code``/``science`` зарезервированы в ``known_names``, но
+    экстракторов у них нет — файлы таких классов просто не индексируются,
+    пока не будут реализованы.
     """
     extractors: list[Extractor] = [
         MarkdownExtractor(),
@@ -948,9 +1047,12 @@ def default_registry() -> ExtractorRegistry:
         MhtmlExtractor(),
         Fb2Extractor(),
         EpubExtractor(),
+        ChmExtractor(),
     ]
     with contextlib.suppress(RuntimeError):
         extractors.append(PdfExtractor())
+    with contextlib.suppress(RuntimeError):
+        extractors.append(RtfExtractor())
     containers: tuple[ContainerExtractor, ...] = (ArchiveExtractor(),)
     return ExtractorRegistry(tuple(extractors), containers)
 

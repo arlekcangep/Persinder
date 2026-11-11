@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 from ..ingest import IngestResult
 from ..interfaces import Ingest, Search
 from ..search import SearchQuery
-from .index_log import IndexLog
+from .index_log import LOG_KINDS, IndexLog, parse_time_bound
 from .models import IngestPayload, IngestResponse, PayloadError, SearchResponse
 
 MAX_BODY_BYTES = 32 * 1024 * 1024  # 32 МБ
@@ -194,7 +194,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(200, SearchResponse.from_result(result).to_dict())
 
     def _handle_logs(self, raw_query: str) -> None:
-        """Последние события индексации: ``GET /logs?limit=200&after=N``."""
+        """Последние события индексации.
+
+        ``GET /logs?limit=200&after=N&kind=embed&from=2026-11-10&to=2026-11-10``
+        — фильтры необязательны: ``kind`` (вид события), ``from``/``to`` (даты
+        или ISO-дата-время; ``to`` включает весь указанный день).
+        """
         params = parse_qs(raw_query)
         try:
             limit = int((params.get("limit") or ["200"])[0])
@@ -212,12 +217,32 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "invalid after"})
                 return
 
+        kind = (params.get("kind") or [""])[0].strip()
+        if kind and kind not in LOG_KINDS:
+            self._send_json(400, {"error": "invalid kind"})
+            return
+        try:
+            since = parse_time_bound((params.get("from") or [""])[0])
+            until = parse_time_bound((params.get("to") or [""])[0], end_of_day=True)
+        except ValueError:
+            self._send_json(400, {"error": "invalid date"})
+            return
+
         log = self._services().log
         if log is None:
             self._send_json(200, {"events": [], "last_id": 0})
             return
 
-        events = [ev.to_dict() for ev in log.entries(limit=limit, after_id=after)]
+        events = [
+            ev.to_dict()
+            for ev in log.entries(
+                limit=limit,
+                after_id=after,
+                kind=kind or None,
+                since=since,
+                until=until,
+            )
+        ]
         self._send_json(200, {"events": events, "last_id": log.last_id})
 
     def do_POST(self) -> None:  # noqa: N802

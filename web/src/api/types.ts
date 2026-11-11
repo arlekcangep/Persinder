@@ -30,11 +30,15 @@ export interface ApiHealthResponse {
 
 export type ApiLogLevel = "info" | "warning" | "error";
 
+/** Вид события: индексация файлов, эмбеддинги/сайдкары, служебные сообщения. */
+export type ApiLogKind = "index" | "embed" | "system";
+
 export interface ApiLogEvent {
   id: number;
   /** ISO-метка времени (UTC). */
   ts: string;
   level: ApiLogLevel;
+  kind: ApiLogKind;
   message: string;
 }
 

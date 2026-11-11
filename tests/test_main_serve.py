@@ -16,7 +16,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 from unittest import mock
 
 from persinder import __main__ as cli
@@ -88,6 +88,36 @@ class ServeTest(unittest.TestCase):
         self.assertGreater(counts["chunks"], 0)
         # поток эмбеддингов успел разобрать очередь
         self.assertEqual(counts["pending_embeddings"], 0)
+
+    def test_serve_shares_one_log_between_files_and_embeddings(self):
+        """События файлов и эмбеддингов — в одном журнале (оба видны в /logs)."""
+        captured: dict[str, Any] = {}
+        real_build = cli.build_embed_worker
+
+        def spy_build(settings: Settings, log: Any = None) -> Any:
+            captured["embed_log"] = log
+            return real_build(settings, log)
+
+        def fake_serve(
+            ingest: Ingest, search: Search, host: str, port: int, log: Any = None
+        ) -> None:
+            captured["http_log"] = log
+            time.sleep(1.0)
+
+        out = io.StringIO()
+        with (
+            mock.patch.object(cli, "build_embed_worker", spy_build),
+            mock.patch.object(cli, "serve", fake_serve),
+            redirect_stdout(out),
+        ):
+            rc = cli.run_serve(self.config, self.settings)
+
+        self.assertEqual(rc, 0)
+        http_log = captured.get("http_log")
+        assert http_log is not None, "журнал передан HTTP-серверу"
+        self.assertIs(http_log, captured.get("embed_log"))
+        kinds = {ev.kind for ev in http_log.entries()}
+        self.assertIn("index", kinds, "события файлов видны в журнале сервиса")
 
     def test_serve_semantic_false_disables_embeddings(self):
         self.config.write_text(

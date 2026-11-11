@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
+from persinder.api import IndexLog
 from persinder.domain import Area
 from persinder.embed import (
     EmbedWorker,
@@ -52,6 +53,7 @@ class EmbedWorkerTest(unittest.TestCase):
         chunk_overlap: int = 200,
         embedder: Embedder | None = None,
         ann_dir: Path | None = None,
+        log: IndexLog | None = None,
     ) -> EmbedWorker:
         embedder = embedder if embedder is not None else self.embedder
 
@@ -67,6 +69,7 @@ class EmbedWorkerTest(unittest.TestCase):
             chunk_overlap=chunk_overlap,
             virtual_dir=self.virtual,
             ann_dir=ann_dir,
+            log=log,
         )
 
     def tearDown(self):
@@ -312,6 +315,75 @@ class EmbedWorkerTest(unittest.TestCase):
         self.worker.run_once()
         stats = self.worker.run_once()
         self.assertEqual((stats.docs, stats.skipped), (0, 0))
+
+    def test_sidecar_creation_logged_to_index_log(self):
+        log = IndexLog()
+        log.enable_console(False)
+        worker = self._worker(log=log)
+        src = self._file("books/one.md", "текст для сайдкара в журнале")
+        worker.run_once()
+        messages = [ev.message for ev in log.entries()]
+        self.assertTrue(
+            any(f"сайдкар: {src}" in message for message in messages),
+            f"нет строки сайдкара в журнале: {messages}",
+        )
+        # старт обработки документа тоже виден
+        self.assertTrue(
+            any(f"эмбеддинг: {src}" in message for message in messages),
+            f"нет строки начала обработки: {messages}",
+        )
+
+    def test_embed_error_logged_to_index_log(self):
+        class BoomEmbedder(PlaceholderEmbedder):
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                raise RuntimeError("модель сломалась")
+
+        log = IndexLog()
+        log.enable_console(False)
+        worker = self._worker(embedder=BoomEmbedder(), log=log)
+        self._file("books/bad.md", "текст который не посчитается")
+        worker.run_once()
+        errors = [ev for ev in log.entries() if ev.level == "error"]
+        self.assertTrue(errors, "нет error-событий в журнале")
+        self.assertIn("модель сломалась", errors[0].message)
+
+    def test_embed_error_drops_queue_rows(self):
+        """Падающий документ не молотится вечно: задачи снимаются (CPU/очередь).
+
+        Иначе воркер пересчитывает его каждым проходом без снятия — очередь
+        не убывает, процесс жрёт CPU. Снятые задачи вернутся через
+        ``enqueue_missing`` на следующем старте (сайдкара нет).
+        """
+        class BoomEmbedder(PlaceholderEmbedder):
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                raise RuntimeError("модель сломалась")
+
+        worker = self._worker(embedder=BoomEmbedder())
+        self._file("books/bad.md", "текст который не посчитается")
+        self.assertEqual(self.store.counts()["pending_embeddings"], 1)
+        stats = worker.run_once()
+        self.assertEqual(stats.errors, 1)
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+        # повторный проход ничего не молотит — задача уже снята
+        idle = worker.run_once()
+        self.assertEqual((idle.docs, idle.errors, idle.skipped), (0, 0, 0))
+
+    def test_missing_text_skip_logged_to_index_log(self):
+        log = IndexLog()
+        log.enable_console(False)
+        worker = self._worker(log=log)
+        outcome = self.ingest.ingest(
+            IngestRequest(filename="gone.md", area=Area.PERSONAL, text="потом исчезнет")
+        )
+        doc_id = outcome.document_id
+        assert doc_id is not None
+        self.textstore.delete(doc_id)  # имитация сироты: задач нет, текста нет
+        worker.run_once()
+        warnings = [ev for ev in log.entries() if ev.level == "warning"]
+        self.assertTrue(
+            warnings, f"нет warning-событий: {[ev.message for ev in log.entries()]}"
+        )
+        self.assertIn("нет текста", warnings[0].message)
 
     def test_modify_replaces_sidecar(self):
         src = self.root / "note.md"
