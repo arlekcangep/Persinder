@@ -22,6 +22,10 @@ models/
 *.onnx
 *.litertlm
 
+# --- Сборка (deploy.py build) ---
+build/
+dist/
+
 # --- Редакторы / ОС ---
 .idea/
 .vscode/

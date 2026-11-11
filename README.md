@@ -101,6 +101,19 @@ USearch-индексу (mmap-файл на модель, `persinder ann rebuild`
 единое ранжирование (D16) — следующий шаг. Карта и интерфейсы — в
 `docs/modules.md`.
 
+## Сценарии deploy
+
+Проверка и сборка одной командой — `./deploy.sh` (обёртка над
+`deploy/deploy.py`, подробности в `--list`):
+
+```bash
+./deploy.sh test    # все тесты: pytest (tests/) + vitest (web/)
+./deploy.sh build   # веб-клиент (npm run build:static) + wheel в dist/
+```
+
+Python для тестов/сборки скрипт выбирает сам: venv проекта (`.venv`), иначе
+системный `python3` (можно переопределить: `PERSINDER_DEPLOY_PYTHON=...`).
+
 ## Веб-интерфейс
 
 Собранный клиент лежит в `src/persinder/api/static/` и раздаётся тем же
