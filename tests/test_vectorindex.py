@@ -36,6 +36,49 @@ def _blob(vector: list[float]) -> bytes:
     return pack_f16_vectors([vector], DIM)
 
 
+class ScanSpeedTest(unittest.TestCase):
+    """Замер точного фолбэк-скана: на объёме персонального корпуса он должен
+    оставаться быстрым и не регрессировать в Python-цикл по векторам."""
+
+    def test_exact_scan_is_fast_on_personal_corpus_size(self):
+        import time
+
+        import numpy as np
+
+        rng = np.random.default_rng(7)
+        dim = 384
+        n = 20_000  # ~5-8 тыс. документов по 3-4 чанка
+        rows: list[dict[str, object]] = []
+        for i in range(n):
+            vector = rng.standard_normal(dim).astype(np.float32)
+            vector /= np.linalg.norm(vector)
+            rows.append(
+                {
+                    "doc_id": f"d{i // 4}",
+                    "chunk_index": i % 4,
+                    "vector": pack_f16_vectors([vector.tolist()], dim),
+                }
+            )
+
+        class FakeStore:
+            def embeddings_for_model(self, model: str) -> list[dict[str, object]]:
+                return rows
+
+        search = VectorSearch.__new__(VectorSearch)  # без __init__: только скан
+        search._store = FakeStore()  # type: ignore[attr-defined]
+        search._scopes = None
+
+        query = [0.1] * dim
+        t0 = time.perf_counter()
+        hits = search._search_scan("m1", query, dim, 20, None)  # type: ignore[attr-defined]
+        elapsed = time.perf_counter() - t0
+
+        self.assertEqual(len(hits), 20)
+        # Старый Python-цикл на 20k чанков — ~2.7 с, numpy — ~0.1 с.
+        # Запас 1 с ловит регрессию и не флакает на медленном CI.
+        self.assertLess(elapsed, 1.0, f"точный скан {n} чанков занял {elapsed:.2f} с")
+
+
 class VectorSearchTest(unittest.TestCase):
     def setUp(self):
         self._tmp = TemporaryDirectory()
