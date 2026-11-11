@@ -4,23 +4,15 @@
 #   ./deploy.sh test     — все тесты (pytest + vitest)
 #   ./deploy.sh build    — сборка веб-клиента и wheel в dist/
 #
-# Просто запускает python-скрипт тем python'ом, который реально работает:
-# venv проекта (.venv), затем системный python3.
+# Просто запускает python-скрипт тем python'ом, который выбран общим
+# способом (scripts/py.sh) и передаёт его deploy.py.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-py_works() { "$1" -c 'import sys' >/dev/null 2>&1; }
+# Общий выбор python (см. scripts/py.sh): задаёт PY и PY_FROM_VENV.
+# shellcheck source=scripts/py.sh
+source "$REPO/scripts/py.sh"
 
-PY=""
-for cand in \
-    "$REPO/.venv/Scripts/python.exe" \
-    "$REPO/.venv/bin/python"; do
-    if [ -f "$cand" ] && py_works "$cand"; then
-        PY="$cand"
-        break
-    fi
-done
-[ -n "$PY" ] || PY="python3"
-
+export PERSINDER_DEPLOY_PYTHON="$PY"
 exec "$PY" "$REPO/deploy/deploy.py" "$@"
