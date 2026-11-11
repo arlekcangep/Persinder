@@ -1,0 +1,27 @@
+{
+  "name": "persinder-web",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "node node_modules/vite/bin/vite.js",
+    "build": "node node_modules/vue-tsc/bin/vue-tsc.js --noEmit && node node_modules/vite/bin/vite.js build",
+    "preview": "node node_modules/vite/bin/vite.js preview",
+    "typecheck": "node node_modules/vue-tsc/bin/vue-tsc.js --noEmit",
+    "test": "node node_modules/vitest/vitest.mjs run"
+  },
+  "dependencies": {
+    "vue": "3.5.45",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@vitejs/plugin-vue": "6.0.10",
+    "@vue/test-utils": "2.5.1",
+    "jsdom": "31.0.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.7",
+    "vitest": "5.1.0",
+    "vue-tsc": "3.3.14"
+  }
+}

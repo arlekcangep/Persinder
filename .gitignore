@@ -28,6 +28,11 @@ models/
 .DS_Store
 Thumbs.db
 
+# --- Веб-клиент (Vue + Vite) ---
+web/node_modules/
+web/dist/
+web/.vite/
+
 # --- Syncthing ---
 .stfolder/
 .stversions/
