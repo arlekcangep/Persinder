@@ -21,6 +21,10 @@ from unittest import mock
 
 from persinder import __main__ as cli
 from persinder.api import make_server
+from persinder.cli import embedding as embedding_mod
+from persinder.cli import parser as parser_mod
+from persinder.cli import search as search_mod
+from persinder.cli import serve as serve_mod
 from persinder.config import Settings
 from persinder.domain import Area
 from persinder.embed import ModelState
@@ -75,7 +79,7 @@ class ServeTest(unittest.TestCase):
             health.update(stats() if stats is not None else {})
 
         out = io.StringIO()
-        with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
+        with mock.patch.object(serve_mod, "serve", fake_serve), redirect_stdout(out):
             rc = cli.run_serve(self.config, self.settings)
 
         self.assertEqual(rc, 0)
@@ -122,7 +126,7 @@ class ServeTest(unittest.TestCase):
             time.sleep(1.0)
 
         with (
-            mock.patch.object(cli, "serve", fake_serve),
+            mock.patch.object(serve_mod, "serve", fake_serve),
             redirect_stdout(io.StringIO()),
         ):
             cli.run_serve(self.config, self.settings)
@@ -151,7 +155,7 @@ class ServeTest(unittest.TestCase):
             time.sleep(2.5)
 
         out = io.StringIO()
-        with mock.patch.object(cli, "serve", fake_serve2), redirect_stdout(out):
+        with mock.patch.object(serve_mod, "serve", fake_serve2), redirect_stdout(out):
             rc = cli.run_serve(self.config, self.settings)
 
         self.assertEqual(rc, 0)
@@ -176,7 +180,7 @@ class ServeTest(unittest.TestCase):
     def test_serve_shares_one_log_between_files_and_embeddings(self):
         """События файлов и эмбеддингов — в одном журнале (оба видны в /logs)."""
         captured: dict[str, Any] = {}
-        real_build = cli.build_embed_worker
+        real_build = embedding_mod.build_embed_worker
 
         def spy_build(settings: Settings, log: Any = None) -> Any:
             captured["embed_log"] = log
@@ -195,8 +199,8 @@ class ServeTest(unittest.TestCase):
 
         out = io.StringIO()
         with (
-            mock.patch.object(cli, "build_embed_worker", spy_build),
-            mock.patch.object(cli, "serve", fake_serve),
+            mock.patch.object(embedding_mod, "build_embed_worker", spy_build),
+            mock.patch.object(serve_mod, "serve", fake_serve),
             redirect_stdout(out),
         ):
             rc = cli.run_serve(self.config, self.settings)
@@ -232,7 +236,7 @@ class ServeTest(unittest.TestCase):
             time.sleep(1.0)  # дать watcher'у проиндексировать файл
 
         out = io.StringIO()
-        with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
+        with mock.patch.object(serve_mod, "serve", fake_serve), redirect_stdout(out):
             rc = cli.run_serve(self.config, self.settings)
 
         self.assertEqual(rc, 0)
@@ -277,7 +281,10 @@ class ServeTest(unittest.TestCase):
         old_cwd = Path.cwd()
         try:
             os.chdir(empty)
-            with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
+            with (
+                mock.patch.object(serve_mod, "serve", fake_serve),
+                redirect_stdout(out),
+            ):
                 rc = cli.main(["serve", "--home", str(home)])
         finally:
             os.chdir(old_cwd)
@@ -323,7 +330,10 @@ class ServeTest(unittest.TestCase):
         old_cwd = Path.cwd()
         try:
             os.chdir(launch)
-            with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
+            with (
+                mock.patch.object(serve_mod, "serve", fake_serve),
+                redirect_stdout(out),
+            ):
                 rc = cli.main(["serve", "--home", str(self.settings.home)])
         finally:
             os.chdir(old_cwd)
@@ -358,7 +368,10 @@ class ServeTest(unittest.TestCase):
         old_cwd = Path.cwd()
         try:
             os.chdir(empty)
-            with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
+            with (
+                mock.patch.object(parser_mod, "serve", fake_serve),
+                redirect_stdout(out),
+            ):
                 rc = cli.main(["serve", "--home", str(self.settings.home)])
         finally:
             os.chdir(old_cwd)
@@ -382,7 +395,7 @@ class ServeTest(unittest.TestCase):
             time.sleep(delay)
 
         out = io.StringIO()
-        with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
+        with mock.patch.object(serve_mod, "serve", fake_serve), redirect_stdout(out):
             rc = cli.run_serve(self.config, self.settings, reindex=reindex)
         self.assertEqual(rc, 0)
         return out.getvalue()
@@ -403,7 +416,7 @@ class ServeTest(unittest.TestCase):
         out = self._run_serve(reindex=True, delay=3.0)
 
         self.assertIn("Полная переиндексация: очередь эмбеддингов очищена", out)
-        self.assertIn("Сверка хэшей:", out)
+        self.assertIn("Переиндексация:", out)
         self.assertIn("без изменений 1", out, "неизменённый файл не перечитывается")
         self.assertIn("изменено 0", out)
         # журнал не тронут: его строки на месте
@@ -593,8 +606,8 @@ class SearchHttpTest(unittest.TestCase):
         )
         out = io.StringIO()
         with (
-            mock.patch.object(cli, "search_over_http", return_value=result),
-            mock.patch.object(cli, "_local_search") as local,
+            mock.patch.object(search_mod, "search_over_http", return_value=result),
+            mock.patch.object(search_mod, "local_search") as local,
             redirect_stdout(out),
         ):
             rc = cli.run_search(None, "кот", 5, port=self.settings.port)
@@ -608,8 +621,8 @@ class SearchHttpTest(unittest.TestCase):
         result = SearchResult(query="кот", semantic_hits=(SearchHit("d", 0, 0.5),))
         out = io.StringIO()
         with (
-            mock.patch.object(cli, "search_over_http", return_value=None),
-            mock.patch.object(cli, "_local_search", return_value=result) as local,
+            mock.patch.object(search_mod, "search_over_http", return_value=None),
+            mock.patch.object(search_mod, "local_search", return_value=result) as local,
             redirect_stdout(out),
         ):
             rc = cli.run_search(
@@ -633,8 +646,8 @@ class SearchHttpTest(unittest.TestCase):
     def test_run_search_local_flag_skips_http(self):
         result = SearchResult(query="кот")
         with (
-            mock.patch.object(cli, "search_over_http") as http,
-            mock.patch.object(cli, "_local_search", return_value=result),
+            mock.patch.object(search_mod, "search_over_http") as http,
+            mock.patch.object(search_mod, "local_search", return_value=result),
             redirect_stdout(io.StringIO()),
         ):
             rc = cli.run_search(None, "кот", 5, local=True)
@@ -646,8 +659,8 @@ class SearchHttpTest(unittest.TestCase):
         config = self.root / "custom.yaml"
         result = SearchResult(query="кот")
         with (
-            mock.patch.object(cli, "search_over_http") as http,
-            mock.patch.object(cli, "_local_search", return_value=result) as local,
+            mock.patch.object(search_mod, "search_over_http") as http,
+            mock.patch.object(search_mod, "local_search", return_value=result) as local,
             redirect_stdout(io.StringIO()),
         ):
             rc = cli.run_search(None, "кот", 5, config)
@@ -659,18 +672,42 @@ class SearchHttpTest(unittest.TestCase):
 
     def test_home_before_subcommand_is_honored(self):
         """``persinder --home X search`` не должен молча искать в ~/.persinder."""
-        with mock.patch.object(cli, "run_search", return_value=0) as run:
+        with mock.patch.object(parser_mod, "run_search", return_value=0) as run:
             rc = cli.main(["--home", "/tmp/other-home", "search", "кот"])
 
         self.assertEqual(rc, 0)
         self.assertEqual(run.call_args.args[0], Path("/tmp/other-home"))
 
     def test_home_after_subcommand_is_honored(self):
-        with mock.patch.object(cli, "run_search", return_value=0) as run:
+        with mock.patch.object(parser_mod, "run_search", return_value=0) as run:
             rc = cli.main(["search", "--home", "/tmp/after-home", "кот"])
 
         self.assertEqual(rc, 0)
         self.assertEqual(run.call_args.args[0], Path("/tmp/after-home"))
+
+
+class HelpTest(unittest.TestCase):
+    """``--help`` не падает: argparse форматирует description через ``%``."""
+
+    def test_all_subcommands_print_help(self):
+        # Литерал ``5%`` в описании — это ``%`` для argparse; без ``%%``
+        # ``serve --help`` падал с "unsupported format character".
+        for argv in (
+            ["--help"],
+            ["serve", "--help"],
+            ["watch", "--help"],
+            ["embed", "--help"],
+            ["model", "--help"],
+            ["search", "--help"],
+            ["ann", "--help"],
+        ):
+            with (
+                self.subTest(argv=argv),
+                redirect_stdout(io.StringIO()),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                cli.main(argv)
+            self.assertEqual(raised.exception.code, 0)
 
 
 if __name__ == "__main__":

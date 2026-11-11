@@ -50,6 +50,7 @@ class IndexingPipeline:
         journal: Journal | None = None,
         semantic: bool = True,
         log: IndexLog | None = None,
+        quiet_unchanged: bool = False,
     ) -> None:
         self._ingest = ingest
         self._registry = registry
@@ -58,6 +59,10 @@ class IndexingPipeline:
         # область не ставит эмбеддинги в очередь.
         self._semantic = semantic
         self._log = log
+        # Сверка reindex прогоняет все файлы подряд; неизменённые (дубликат
+        # по хэшу) не должны писать в журнал и консоль — иначе каждый старт
+        # добавлял бы по три строки на каждый файл библиотеки.
+        self._quiet_unchanged = quiet_unchanged
 
     def _outcome(self, level: str, message: str) -> None:
         """Дописать событие в ``IndexLog`` (консоль + веб-журнал)."""
@@ -121,14 +126,17 @@ class IndexingPipeline:
             stats.deleted += 1
             return
 
-        self._record(
-            area,
-            rel_path,
-            JournalEvent.DISCOVERED,
-            size=event.size,
-            mtime_ns=event.mtime_ns,
-        )
-        self._outcome("info", f"открыт: {rel_path}")
+        if not self._quiet_unchanged:
+            # В сверке reindex эти пометки не нужны: файл и так устроен, а
+            # строка журнала на каждый неизменённый файл — лишний мусор.
+            self._record(
+                area,
+                rel_path,
+                JournalEvent.DISCOVERED,
+                size=event.size,
+                mtime_ns=event.mtime_ns,
+            )
+            self._outcome("info", f"открыт: {rel_path}")
         parts = self._registry.extract(area.path / rel_path, area)
         if parts is None:
             reason = self._registry.explain_miss(area.path / rel_path, area)
@@ -151,7 +159,8 @@ class IndexingPipeline:
             stats.skipped += 1
             return
 
-        self._record(area, rel_path, JournalEvent.SENT)
+        if not self._quiet_unchanged:
+            self._record(area, rel_path, JournalEvent.SENT)
         indexed = duplicates = rejected = 0
         chunks = 0
         doc_ids: list[str] = []
@@ -199,8 +208,9 @@ class IndexingPipeline:
             self._record(area, rel_path, JournalEvent.INDEXED, detail=detail)
             self._outcome("info", f"проиндексирован: {rel_path} ({detail})")
         elif duplicates:
-            self._record(area, rel_path, JournalEvent.DUPLICATE)
-            self._outcome("info", f"дубликат: {rel_path}")
+            if not self._quiet_unchanged:
+                self._record(area, rel_path, JournalEvent.DUPLICATE)
+                self._outcome("info", f"дубликат: {rel_path}")
         else:
             self._record(
                 area,

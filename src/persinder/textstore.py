@@ -25,6 +25,13 @@ class FsTextStore:
 
     def put(self, key: str, text: str) -> str:
         path = self._path(key)
+        # Повторный скан/переиндексация приносят тот же текст: не переписывать
+        # файл зря (полный reindex иначе перезаписывал бы всю библиотеку).
+        try:
+            if path.read_text(encoding="utf-8") == text:
+                return str(path)
+        except (OSError, UnicodeError):
+            pass
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, path)

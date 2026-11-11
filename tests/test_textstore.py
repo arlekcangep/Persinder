@@ -34,6 +34,18 @@ class FsTextStoreTest(unittest.TestCase):
         leftovers = list(self._root.glob("*.tmp"))
         self.assertEqual(leftovers, [])
 
+    def test_same_text_is_not_rewritten(self):
+        """Переиндексация приносит тот же текст — файл не перезаписывается."""
+        import os
+
+        path = Path(self.store.put("k", "тот же текст"))
+        stamp = 1_000_000_000  # заведомо старое время: любая запись его сменит
+        os.utime(path, ns=(stamp, stamp))
+
+        self.store.put("k", "тот же текст")
+
+        self.assertEqual(path.stat().st_mtime_ns, stamp)
+
     def test_rejects_bad_key(self):
         with self.assertRaises(ValueError):
             self.store.put("../escape", "x")

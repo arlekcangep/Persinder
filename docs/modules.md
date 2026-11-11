@@ -31,6 +31,7 @@
 | `vectorindex` | пакет: `service` (VectorSearch: ANN USearch + фолбэк-скан) + `index` (обёртка USearch) | реализован (USearch) |
 | `sources` | watcher'ы, журнал статусов и экстракторы областей | реализован |
 | `search` | фасад запроса (три группы, порядок) | реализован |
+| `cli` | консоль: `__main__` (точка входа) + `Cli`, `ServeRunner`, `WatchRunner`, `EmbedRunner`, `ModelManager` | реализован |
 
 Заглушки — это модули с зафиксированным интерфейсом и пустой/минимальной логикой,
 чтобы очертить границы.
@@ -62,6 +63,16 @@ src/persinder/
   api/
     models.py        # IngestPayload, IngestResponse, PayloadError — DTO транспорта
     http.py          # IngestHTTPServer, make_server, serve
+  cli/
+    parser.py        # Cli: парсер аргументов и выбор команды
+    serve.py         # ServeRunner: HTTP + watcher + эмбеддинги + старт/стоп
+    watch.py         # WatchRunner: только watcher
+    embedding.py     # EmbedRunner: проход по очереди и фоновый цикл
+    models.py        # ModelManager: install/use/remove/list (D24)
+    search.py        # поиск из консоли: HTTP-first, локальный fallback
+    service.py       # сборка сервисов, скоупы моделей, воркер эмбеддингов
+    report.py        # отчёты и безопасная печать для консоли/логов
+    ann.py           # пересборка ANN-индексов
   sources/
     models.py        # AreaConfig, WatchConfig, AreaScan, ChangeEvent, ScanResult
     config.py        # загрузка YAML-конфига областей и watcher'а
@@ -80,8 +91,8 @@ src/persinder/
     catalog.py       # стартовый обход: полные каталоги областей сверяются с
                      # журналом по именам — новые индексируются, исчезнувшие
                      # убираются (D25)
-    hashsweep.py     # фоновая сверка хэшей при --reindex: текст файла против
-                     # content_hash в базе, не более 5% CPU (D25)
+    reindex.py       # фоновая переиндексация при --reindex: все файлы через
+                     # обычный конвейер (хэш сверяет ingest), не более 5% CPU (D25)
 ```
 
 Переход между слоями — только через явные мапперы (`IngestPayload.to_request`,

@@ -49,7 +49,7 @@ from persinder.sources import (
     default_registry,
     sync_catalog,
 )
-from persinder.sources.hashsweep import sweep_hashes
+from persinder.sources.reindex import reindex_files
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
 from persinder.vectorindex import UsannIndex
@@ -145,10 +145,10 @@ class WatcherEmbedE2ETest(unittest.TestCase):
         return prints
 
     def _startup(self, journal: Journal, *, reindex: bool = False) -> list[str]:
-        """Как ``run_serve`` на старте: каталог по именам, затем сверка хэшей.
+        """Как ``run_serve`` на старте: каталог по именам, затем переиндексация.
 
-        При ``reindex`` очередь эмбеддингов очищается, а неизменённые файлы
-        (совпал хэш текста с базой) не перечитываются вовсе.
+        При ``reindex`` очередь эмбеддингов очищается, все файлы проходят через
+        конвейер, а неизменённые (совпал хэш текста с базой) не переиндексируются.
         """
         prints: list[str] = []
         pipeline = IndexingPipeline(self.ingest, self.registry, journal=journal)
@@ -175,16 +175,18 @@ class WatcherEmbedE2ETest(unittest.TestCase):
         for result in catalog.results:
             process(result)
         if reindex:
-            sweep = sweep_hashes(
+            # Отдельной сверки хэшей нет: конвейер сам узнаёт неизменённый
+            # текст по content_hash и возвращает duplicates.
+            sweep = reindex_files(
                 (self.area,),
                 scanner,
-                self.registry,
-                self.store,
                 journal,
-                process,
+                IndexingPipeline(
+                    self.ingest, self.registry, journal=journal, quiet_unchanged=True
+                ),
                 share=1.0,
             )
-            prints.append(f"changed={sweep.changed} same={sweep.same}")
+            prints.append(f"changed={sweep.changed} same={sweep.unchanged}")
         return prints
 
     def _drain_embeddings(self) -> None:
