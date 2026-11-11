@@ -112,7 +112,12 @@ class ModelInstallE2ETest(unittest.TestCase):
         """Один запуск полного сервиса (HTTP подменён), как ``./run.sh``."""
 
         def fake_serve(
-            ingest: Ingest, search: Search, host: str, port: int, log=None
+            ingest: Ingest,
+            search: Search,
+            host: str,
+            port: int,
+            log=None,
+            stats=None,
         ) -> None:
             time.sleep(1.0)  # дать watcher'у и потоку эмбеддингов отработать
 

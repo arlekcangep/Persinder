@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -354,6 +355,7 @@ class EmbedWorkerTest(unittest.TestCase):
         не убывает, процесс жрёт CPU. Снятые задачи вернутся через
         ``enqueue_missing`` на следующем старте (сайдкара нет).
         """
+
         class BoomEmbedder(PlaceholderEmbedder):
             def embed(self, texts: list[str]) -> list[list[float]]:
                 raise RuntimeError("модель сломалась")
@@ -654,6 +656,130 @@ class EmbedWorkerRobustnessTest(unittest.TestCase):
             file_sidecar_path(boom, "placeholder-v1").exists(),
             "у упавшего документа сайдкара нет",
         )
+
+
+class EmbedBatchProgressTest(unittest.TestCase):
+    """Большой документ: очередь убывает по ходу, а не только в конце."""
+
+    def test_queue_shrinks_between_batches(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SqliteStore(root / "db.sqlite")
+            texts = FsTextStore(root / "pending_texts")
+            observed: list[int] = []
+
+            class Probe(PlaceholderEmbedder):
+                def embed(self, batch: list[str]) -> list[list[float]]:
+                    # сколько задач осталось к началу этой порции
+                    observed.append(store.counts()["pending_embeddings"])
+                    return super().embed(batch)
+
+            try:
+                ingest = IngestService(
+                    store, texts, NoopStemmer(), chunk_size=10, chunk_overlap=0
+                )
+                body = " ".join(f"слово{i}" for i in range(3000))
+                ingest.ingest(
+                    IngestRequest(
+                        text=body,
+                        area=Area.PERSONAL,
+                        filename="big.md",
+                        source_path=str(root / "big.md"),
+                    )
+                )
+                before = store.counts()["pending_embeddings"]
+                self.assertGreater(
+                    before, 1024, "нужно несколько порций по _CHUNK_BATCH"
+                )
+
+                worker = EmbedWorker(
+                    store,
+                    texts,
+                    lambda model: Probe(),
+                    chunk_size=10,
+                    chunk_overlap=0,
+                )
+                stats = worker.run_once(limit=10)
+
+                self.assertEqual(stats.docs, 1)
+                self.assertEqual(store.counts()["pending_embeddings"], 0)
+                self.assertEqual(observed[0], before)
+                self.assertGreater(len(observed), 1)
+                self.assertEqual(
+                    observed,
+                    sorted(observed, reverse=True),
+                    "очередь должна убывать от порции к порции",
+                )
+                self.assertLess(observed[-1], observed[0])
+            finally:
+                store.close()
+
+
+class EmbedLoopTest(unittest.TestCase):
+    """Цикл эмбеддингов не умирает молча из-за ошибок печати и лога."""
+
+    def test_loop_survives_console_encoding_error(self):
+        """UnicodeEncodeError в print не должен убивать поток эмбеддингов.
+
+        На Windows печать отчёта в консоль/файл в локальной кодировке падала
+        с UnicodeEncodeError; исключение вылетало из тела цикла и поток
+        умирал: сервис отвечал по HTTP, а очередь стояла навсегда.
+        """
+        from persinder import __main__ as cli
+        from persinder.embed import EmbedStats
+
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "embed_errors.log"
+            stop = threading.Event()
+            kick = threading.Event()
+            passes: list[int] = []
+
+            def run_once(limit: int) -> EmbedStats:
+                passes.append(limit)
+                if len(passes) >= 3:
+                    stop.set()
+                return EmbedStats(docs=1, chunks=1, sidecars=1)
+
+            worker = mock.Mock(run_once=run_once)
+            error = UnicodeEncodeError("cp1251", "→", 0, 1, "нет символа")
+            with mock.patch("builtins.print", side_effect=error):
+                cli._embed_loop(worker, stop, kick, interval=0.01, log_path=log_path)
+
+        self.assertEqual(len(passes), 3, "цикл продолжил работу после сбоя печати")
+
+    def test_loop_logs_failed_pass_and_keeps_going(self):
+        from persinder import __main__ as cli
+        from persinder.embed import EmbedStats
+
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "embed_errors.log"
+            stop = threading.Event()
+            kick = threading.Event()
+            calls: list[int] = []
+
+            def run_once(limit: int) -> EmbedStats:
+                calls.append(limit)
+                if len(calls) == 1:
+                    raise RuntimeError("база занята")
+                stop.set()
+                return EmbedStats()
+
+            worker = mock.Mock(run_once=run_once)
+            cli._embed_loop(worker, stop, kick, interval=0.01, log_path=log_path)
+            text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(len(calls), 2, "после ошибки прохода цикл продолжается")
+        self.assertIn("база занята", text)
+
+    def test_append_embed_error_never_raises(self):
+        """Лог — best-effort: путь-каталог вместо файла не роняет поток."""
+        from persinder import __main__ as cli
+
+        with TemporaryDirectory() as tmp:
+            fatal = Path(tmp) / "as_dir"
+            fatal.mkdir()
+            cli._append_embed_error(fatal, "boom")  # не должно бросить
+            cli._append_embed_error(None, "boom")
 
 
 if __name__ == "__main__":

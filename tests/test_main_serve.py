@@ -58,13 +58,21 @@ class ServeTest(unittest.TestCase):
 
     def test_serve_indexes_and_embeds_then_stops(self):
         served: list[tuple[str, int]] = []
+        health: dict[str, Any] = {}
 
         def fake_serve(
-            ingest: Ingest, search: Search, host: str, port: int, log=None
+            ingest: Ingest,
+            search: Search,
+            host: str,
+            port: int,
+            log=None,
+            stats=None,
         ) -> None:
             served.append((host, port))
             # даём watcher'у и потоку эмбеддингов отработать первый проход
             time.sleep(1.0)
+            # снимок статистики — как её увидит /health после прохода
+            health.update(stats() if stats is not None else {})
 
         out = io.StringIO()
         with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
@@ -72,6 +80,11 @@ class ServeTest(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(len(served), 1)
+        # /health отдаёт живые счётчики: очередь пуста, векторы посчитаны
+        self.assertEqual(health.get("documents"), 1)
+        self.assertGreater(health.get("vectors") or 0, 0)
+        self.assertEqual(health.get("pending_embeddings"), 0)
+        self.assertIn("model", health)
 
         text = out.getvalue()
         self.assertIn("Останавливаюсь", text)
@@ -99,7 +112,12 @@ class ServeTest(unittest.TestCase):
             return real_build(settings, log)
 
         def fake_serve(
-            ingest: Ingest, search: Search, host: str, port: int, log: Any = None
+            ingest: Ingest,
+            search: Search,
+            host: str,
+            port: int,
+            log: Any = None,
+            stats: Any = None,
         ) -> None:
             captured["http_log"] = log
             time.sleep(1.0)
@@ -133,7 +151,12 @@ class ServeTest(unittest.TestCase):
         )
 
         def fake_serve(
-            ingest: Ingest, search: Search, host: str, port: int, log=None
+            ingest: Ingest,
+            search: Search,
+            host: str,
+            port: int,
+            log=None,
+            stats=None,
         ) -> None:
             time.sleep(1.0)  # дать watcher'у проиндексировать файл
 
@@ -167,7 +190,12 @@ class ServeTest(unittest.TestCase):
         served: list[str] = []
 
         def fake_serve(
-            ingest: Ingest, search: Search, host: str, port: int, log=None
+            ingest: Ingest,
+            search: Search,
+            host: str,
+            port: int,
+            log=None,
+            stats=None,
         ) -> None:
             served.append(host)
             time.sleep(1.0)
@@ -210,7 +238,12 @@ class ServeTest(unittest.TestCase):
         served: list[str] = []
 
         def fake_serve(
-            ingest: Ingest, search: Search, host: str, port: int, log=None
+            ingest: Ingest,
+            search: Search,
+            host: str,
+            port: int,
+            log=None,
+            stats=None,
         ) -> None:
             served.append(host)
             time.sleep(1.0)
@@ -239,7 +272,12 @@ class ServeTest(unittest.TestCase):
         served: list[str] = []
 
         def fake_serve(
-            ingest: Ingest, search: Search, host: str, port: int, log=None
+            ingest: Ingest,
+            search: Search,
+            host: str,
+            port: int,
+            log=None,
+            stats=None,
         ) -> None:
             served.append(host)
 

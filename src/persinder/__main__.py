@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -395,8 +397,29 @@ def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> i
     if embed_thread is not None:
         embed_thread.start()
     print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)
+
+    def health_stats() -> dict[str, object]:
+        """Живые счётчики для ``/health`` — по ним видно, движется ли очередь.
+
+        Смысл — наблюдение за эмбеддингами без консоли: если ``pending_embeddings``
+        не убывает между опросами, значит воркер стоит, и это видно в интерфейсе.
+        """
+        counts = store.counts()
+        state = load(settings.models_state_path)
+        if embed_thread is None:
+            embedding = "выключено"
+        else:
+            embedding = "работает" if embed_thread.is_alive() else "остановлен"
+        return {
+            "documents": counts["documents"],
+            "vectors": counts["vectors"],
+            "model": state.search,
+            "pending_embeddings": counts["pending_embeddings"],
+            "embedding": embedding,
+        }
+
     try:
-        serve(ingest, search, settings.host, settings.port, log)
+        serve(ingest, search, settings.host, settings.port, log, health_stats)
     except KeyboardInterrupt:
         pass
     finally:
@@ -519,8 +542,26 @@ def _append_embed_error(log_path: Path | None, message: str) -> None:
     try:
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
-    except OSError:
+    except (OSError, UnicodeError):
         pass  # лог не должен ронять сервис
+
+
+def _say(text: str) -> None:
+    """Печать, которая не роняет фоновый поток из-за кодировки консоли.
+
+    На Windows вывод в перенаправленный файл идёт в локальной кодировке
+    (cp1251/cp866), и символ вне её (``→``, ``≥``, эмодзи) даёт
+    ``UnicodeEncodeError``. В фоновом потоке это исключение убивает поток
+    целиком: сервис продолжает отвечать по HTTP, а очередь эмбеддингов стоит
+    навсегда и молча. Поэтому печать здесь с запасным вариантом.
+    """
+    try:
+        print(text, flush=True)
+    except UnicodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+        safe = text.encode(encoding, "replace").decode(encoding, "replace")
+        with suppress(Exception):
+            print(safe, flush=True)
 
 
 def _embed_loop(
@@ -537,23 +578,27 @@ def _embed_loop(
     после индексации (иначе новые документы ждали бы тика). Ошибка одного
     прохода не валит сервис: задачи остаются в очереди и уходят в следующий тик.
     Ошибки дублируются в ``log_path`` (``<home>/embed_errors.log``).
+
+    Цикл защищён целиком, а не только вокруг ``run_once``: раньше исключение из
+    печати отчёта (``UnicodeEncodeError`` на Windows-консоли в чужой кодировке)
+    или из записи лога убивало поток молча — сервис отвечал по HTTP, а очередь
+    не двигалась. Теперь поток живёт, а причина попадает в лог.
     """
     while not stop.is_set():
         try:
             stats = worker.run_once(100)
-        except Exception as exc:  # noqa: BLE001 — сервис не должен падать
-            message = f"ошибка прохода: {exc}"
-            print(f"Embed: {message}", flush=True)
+            if stats.docs or stats.skipped or stats.errors:
+                _say(format_embed(stats))
+                for message in stats.messages[:10]:
+                    _say(f"Embed: {message}")
+                    _append_embed_error(log_path, message)
+            if stats.docs == 0:
+                kick.wait(interval)
+                kick.clear()
+        except Exception as exc:  # noqa: BLE001 — поток не должен умирать молча
+            message = f"ошибка прохода: {exc.__class__.__name__}: {exc}"
+            _say(f"Embed: {message}")
             _append_embed_error(log_path, message)
-            kick.wait(interval)
-            kick.clear()
-            continue
-        if stats.docs or stats.skipped or stats.errors:
-            print(format_embed(stats), flush=True)
-            for message in stats.messages[:10]:
-                print(f"Embed: {message}", flush=True)
-                _append_embed_error(log_path, message)
-        if stats.docs == 0:
             kick.wait(interval)
             kick.clear()
 

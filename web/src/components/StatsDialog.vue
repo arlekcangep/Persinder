@@ -41,6 +41,7 @@ const rows = computed(() => [
   { label: "Документов", value: formatNumber(details.value?.documents) },
   { label: "Векторов", value: formatNumber(details.value?.vectors) },
   { label: "Модель поиска", value: details.value?.model ?? "—" },
+  { label: "Эмбеддинги", value: details.value?.embedding ?? "—" },
   {
     label: "Очередь эмбеддингов",
     value: withUnit(details.value?.pending_embeddings, "задача", "задачи", "задач"),

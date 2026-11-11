@@ -20,12 +20,16 @@ export interface ApiSearchResponse {
 
 export interface ApiHealthResponse {
   status: string;
-  /** Появятся, когда у сервера будет эндпоинт статистики. */
+  /** Адрес, если сервер его сообщает (иначе берётся из location). */
   address?: string;
   documents?: number;
   vectors?: number;
   model?: string;
   pending_embeddings?: number;
+  /** Состояние фонового потока эмбеддингов: работает / остановлен / выключено. */
+  embedding?: string;
+  /** Причина, по которой счётчики не пришли (сервер при этом жив). */
+  stats_error?: string;
 }
 
 export type ApiLogLevel = "info" | "warning" | "error";

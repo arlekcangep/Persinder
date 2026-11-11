@@ -25,7 +25,7 @@ from pathlib import Path
 
 from persinder.__main__ import search_scopes
 from persinder.config import Settings
-from persinder.embed import installed_keys, load, models_root
+from persinder.embed import PLACEHOLDER, installed_keys, load, models_root
 from persinder.embed.sidecar import (
     file_sidecar_path,
     read_sidecar,
@@ -385,21 +385,54 @@ def main() -> int:
                 print(f"    [{area}] {row['filename']} -> {where}")
 
         print()
-        print("Очередь эмбеддингов (pending):")
+        print("Очередь эмбеддингов (pending) по документам:")
         try:
-            rows = conn.execute(
-                "SELECT model, source_path = '' AS no_path, COUNT(*) AS n"
+            queue_rows = conn.execute(
+                "SELECT doc_id, model, COUNT(*) AS n, MAX(source_path) AS path"
                 " FROM embedding_queue WHERE status = 'pending'"
-                " GROUP BY model, no_path ORDER BY model"
+                " GROUP BY doc_id, model ORDER BY n, doc_id LIMIT 20"
             ).fetchall()
+            queue_total = _scalar(
+                conn,
+                "SELECT COUNT(*) FROM embedding_queue WHERE status = 'pending'",
+            )
         except sqlite3.OperationalError as exc:
             print(f"  (нет таблицы очереди: {exc})")
-            rows = []
-        if not rows:
+            queue_rows = []
+            queue_total = 0
+        if not queue_rows:
             print("  пусто")
-        for row in rows:
-            kind = "без пути (virtual)" if row["no_path"] else "с путём"
-            print(f"  {row['model']}: {row['n']} задач, {kind}")
+        else:
+            print(
+                f"  всего задач: {queue_total}, документов показано: {len(queue_rows)}"
+            )
+        for row in queue_rows:
+            doc_id = str(row["doc_id"])
+            model = str(row["model"])
+            path = str(row["path"] or "")
+            print()
+            print(f"  {model}: {int(row['n'])} задач")
+            print(f"    документ: {doc_id[:16]}…")
+            print(f"    источник: {path or 'путь не записан (виртуальный)'}")
+            # Воркер читает текст по doc_id; нет файла — задачи сиротские.
+            text_file = settings.text_dir / f"{doc_id}.txt"
+            if text_file.is_file():
+                print(f"    текст: есть, {text_file.stat().st_size} Б")
+            else:
+                print("    текст: НЕТ — задачи сиротские, воркер их снимет")
+            sidecar = (
+                file_sidecar_path(path, model)
+                if path
+                else virtual_sidecar_path(settings.virtual_dir, doc_id, model)
+            )
+            print(f"    сайдкар: {'есть' if sidecar.is_file() else 'НЕТ'}")
+            if model != PLACEHOLDER and model not in installed:
+                print(
+                    f"    ВНИМАНИЕ: модель {model} не установлена — задачи не"
+                    " посчитаются, пока её не поставить"
+                )
+            elif model not in (models.embedding, models.search):
+                print(f"    модель {model} не активна в профиле (embedding/search)")
 
         print()
         print("Векторы в БД (таблица embeddings):")

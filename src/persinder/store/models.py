@@ -59,4 +59,5 @@ class StoreCounts(TypedDict):
     documents: int
     sources: int
     chunks: int
+    vectors: int
     pending_embeddings: int

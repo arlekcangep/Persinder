@@ -236,6 +236,12 @@ class EmbedWorker:
                 for index, (start, end) in enumerate(spans)
                 if index in existing
             ]
+            # id задач очереди по номеру чанка: снимаем задачи по мере записи
+            # порций, чтобы у большого документа очередь убывала по ходу
+            # (иначе счётчик «стоит» минутами и кажется, что воркер встал).
+            queue_ids: dict[int, int] = {
+                int(row["chunk_index"]): int(row["id"]) for row in model_rows
+            }
             index_obj: UsannIndex | None = None
 
             def _ann_add(
@@ -269,6 +275,14 @@ class EmbedWorker:
                     rows_for_db.append((doc_id, index, blob))
                 ids = self._store.put_embeddings(model, rows_for_db)
                 _ann_add(ids, computed, model, embedder)
+                done = [queue_ids.pop(index, None) for index, _, _ in part]
+                self._store.drop_queue_rows([i for i in done if i is not None])
+                if len(spans) > _CHUNK_BATCH and self._log is not None:
+                    self._log.info(
+                        f"эмбеддинг: {label} ({model}) — {len(packed)}"
+                        f" из {len(spans)} чанков",
+                        kind=KIND_EMBED,
+                    )
 
             fingerprint = EmbedFingerprint(
                 model=embedder.name, dim=embedder.dim, quant="f16"
@@ -290,7 +304,9 @@ class EmbedWorker:
                 write_sidecar_packed(path, fingerprint, params, packed)
                 stats.sidecars += 1
             stats.chunks += len(packed)
-            self._store.drop_queue_rows([int(row["id"]) for row in model_rows])
+            # Остались задачи чанков, уже лежавших в БД (existing), и задач,
+            # которых нет в текущей нарезке (файл пересобрали) — снимаем их.
+            self._store.drop_queue_rows(list(queue_ids.values()))
             counted = True
             if self._log is not None:
                 self._log.info(

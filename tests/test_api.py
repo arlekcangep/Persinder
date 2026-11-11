@@ -59,6 +59,70 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             self.assertEqual(json.load(resp)["status"], "ok")
 
+    def test_health_without_stats_has_only_status(self):
+        with urllib.request.urlopen(self.base + "/health") as resp:
+            body = json.load(resp)
+        self.assertNotIn("pending_embeddings", body)
+
+    def test_health_reports_store_counts(self):
+        """Веб-клиент показывает очередь по ``/health`` — она должна быть живой."""
+        with self._post(
+            "/ingest", {"filename": "a.md", "area": "personal", "text": "кот пёс"}
+        ):
+            pass
+
+        server = make_server(
+            self.server.ingest,
+            self.server.search,
+            host="127.0.0.1",
+            port=0,
+            stats=lambda: {
+                "documents": self.store.counts()["documents"],
+                "vectors": self.store.counts()["vectors"],
+                "model": "placeholder-v1",
+                "pending_embeddings": 7,
+            },
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            addr = server.server_address
+            with urllib.request.urlopen(f"http://{addr[0]}:{addr[1]}/health") as resp:
+                body = json.load(resp)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["documents"], 1)
+        self.assertEqual(body["vectors"], 0)
+        self.assertEqual(body["pending_embeddings"], 7)
+        self.assertEqual(body["model"], "placeholder-v1")
+
+    def test_health_survives_broken_stats(self):
+        """Сбой статистики не должен выглядеть как «сервер недоступен»."""
+
+        def boom() -> dict[str, object]:
+            raise RuntimeError("база занята")
+
+        server = make_server(
+            self.server.ingest, self.server.search, host="127.0.0.1", port=0, stats=boom
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            addr = server.server_address
+            with urllib.request.urlopen(f"http://{addr[0]}:{addr[1]}/health") as resp:
+                body = json.load(resp)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(body["status"], "ok")
+        self.assertIn("stats_error", body)
+
     def test_logs_empty_when_no_log_attached(self):
         with urllib.request.urlopen(self.base + "/logs") as resp:
             body = json.load(resp)

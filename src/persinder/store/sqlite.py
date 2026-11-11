@@ -304,6 +304,7 @@ class SqliteStore:
                 documents=one("SELECT COUNT(*) FROM documents"),
                 sources=one("SELECT COUNT(*) FROM document_sources"),
                 chunks=one("SELECT COUNT(*) FROM chunks"),
+                vectors=one("SELECT COUNT(*) FROM embeddings"),
                 pending_embeddings=one(
                     "SELECT COUNT(*) FROM embedding_queue WHERE status = 'pending'"
                 ),
