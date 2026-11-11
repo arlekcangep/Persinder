@@ -55,14 +55,13 @@ function runExample(text: string): void {
 }
 
 function applyFilters(values: SearchFilterValues): void {
+  // Параметры применяются сразу (на отпускании бегунка) — панель не закрываем.
   apply(values);
-  filtersOpen.value = false;
   void search.runNow();
 }
 
 function resetFilters(): void {
   reset();
-  filtersOpen.value = false;
   void search.runNow();
 }
 

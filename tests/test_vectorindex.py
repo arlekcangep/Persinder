@@ -259,6 +259,22 @@ class VectorSearchAnnTest(unittest.TestCase):
         self.assertEqual(count, 4)
         self.assertTrue((self.ann_dir / "m1.usearch").exists())
 
+    def test_embedder_created_once_per_model(self):
+        """Эмбеддер кэшируется: загрузка токенизатора/ONNX-сессии/warmup
+        не повторяется на каждый запрос (иначе каждая буква в поиске
+        платила бы секунды за создание эмбеддера)."""
+        calls: list[str] = []
+
+        def factory(key: str) -> Embedder:
+            calls.append(key)
+            return FixedEmbedder(self.query_vector)
+
+        search = VectorSearch(self.store, factory, search_model="m1")
+        self._seed()
+        search.search("запрос", 10)
+        search.search("запрос", 10)
+        self.assertEqual(calls, ["m1"])
+
     def test_ann_matches_exact_scan(self):
         self._seed()
         rebuild_index(self.store, self.factory, self.ann_dir, "m1")

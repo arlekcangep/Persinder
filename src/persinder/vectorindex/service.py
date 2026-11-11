@@ -77,6 +77,18 @@ class VectorSearch:
         self._ann_dir = Path(ann_dir) if ann_dir else None
         # None — скоупа нет (ищем по всем источникам, как раньше).
         self._scopes = dict(scopes) if scopes is not None else None
+        # Кэш эмбеддеров по модели: build_embedder грузит токенизатор, создаёт
+        # ONNX-сессию и гоняет warmup — на каждый запрос это секунды (каждый
+        # символ в строке поиска платил бы заново).
+        self._embedders: dict[str, Embedder] = {}
+
+    def _embedder(self, model: str) -> Embedder:
+        """Эмбеддер модели с кэшем: один экземпляр на весь процесс."""
+        cached = self._embedders.get(model)
+        if cached is None:
+            cached = self._embedder_factory(model)
+            self._embedders[model] = cached
+        return cached
 
     def search(
         self, text: str, limit: int = 20, min_score: float | None = None
@@ -105,7 +117,7 @@ class VectorSearch:
         allowed = self._allowed_doc_ids(model)
         if allowed is not None and not allowed:
             return []  # модель есть в конфиге, но индексировать ею нечего
-        embedder = self._embedder_factory(model)
+        embedder = self._embedder(model)
         dim = embedder.dim
         query_vector = embedder.embed_query([text])[0]
         hits = self._search_index(model, query_vector, dim, limit, allowed)
