@@ -101,6 +101,18 @@ USearch-индексу (mmap-файл на модель, `persinder ann rebuild`
 единое ранжирование (D16) — следующий шаг. Карта и интерфейсы — в
 `docs/modules.md`.
 
+## Веб-интерфейс
+
+Клиент поиска — Vue 3 + TypeScript + Vite, живёт в [`web/`](web/README.md).
+В разработке Vite проксирует `/search` и `/health` на запущенный
+`persinder serve` (127.0.0.1:8756):
+
+```bash
+cd web
+npm install --no-bin-links
+npm run dev
+```
+
 ## Статус
 
 Проект на стадии инициализации.
