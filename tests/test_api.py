@@ -1,18 +1,20 @@
 """Тесты HTTP-сервиса приёма."""
 
+import io
 import json
 import re
 import threading
 import unittest
 import urllib.error
 import urllib.request
+from contextlib import redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import urlencode
 
 from persinder.api import make_server
-from persinder.api.http import STATIC_DIR
+from persinder.api.http import STATIC_DIR, _Handler
 from persinder.ingest import IngestService
 from persinder.morphology import NoopStemmer
 from persinder.search import SearchService
@@ -56,6 +58,51 @@ class ApiTest(unittest.TestCase):
         with urllib.request.urlopen(self.base + "/health") as resp:
             self.assertEqual(resp.status, 200)
             self.assertEqual(json.load(resp)["status"], "ok")
+
+    def _handler_with_wfile(self, wfile: Any) -> _Handler:
+        """Минимальный обработчик без сокета: только то, что нужно отправке."""
+        handler = object.__new__(_Handler)
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = "GET /search HTTP/1.1"
+        handler.client_address = ("127.0.0.1", 1)
+        handler.wfile = wfile
+        return handler
+
+    def test_send_json_silences_aborted_connection(self):
+        """Разрыв соединения при записи ответа — не ошибка (WinError 10053)."""
+
+        class AbortedWFile:
+            def write(self, data: bytes) -> int:
+                raise ConnectionAbortedError(10053, "соединение разорвано")
+
+        handler = self._handler_with_wfile(AbortedWFile())
+        handler._send_json(200, {"status": "ok"})  # не должно упасть
+
+    def test_send_file_silences_aborted_connection(self):
+        class AbortedWFile:
+            def write(self, data: bytes) -> int:
+                raise ConnectionResetError(10054, "соединение разорвано")
+
+        handler = self._handler_with_wfile(AbortedWFile())
+        handler._send_file(STATIC_DIR / "index.html", "no-cache")  # не должно упасть
+
+    def test_handle_error_ignores_connection_errors(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            try:
+                raise ConnectionAbortedError(10053, "aborted")
+            except ConnectionAbortedError:
+                self.server.handle_error(None, ("127.0.0.1", 1))
+        self.assertEqual(
+            err.getvalue(), "", "traceback разрыва соединения не печатается"
+        )
+
+        with redirect_stderr(err):
+            try:
+                raise ValueError("boom")
+            except ValueError:
+                self.server.handle_error(None, ("127.0.0.1", 1))
+        self.assertIn("ValueError: boom", err.getvalue())
 
     def test_ingest_ok(self):
         with self._post(

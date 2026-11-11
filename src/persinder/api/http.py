@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import mimetypes
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
@@ -53,17 +54,31 @@ class PersinderHTTPServer(ThreadingHTTPServer):
         self.ingest = ingest
         self.search = search
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Клиент мог разорвать соединение (например, отменил запрос при
+        новом вводе) — это штатно, traceback не печатаем; прочие ошибки
+        показываем как раньше."""
+        exc_type = sys.exc_info()[0]
+        if exc_type is not None and issubclass(exc_type, ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "Persinder/0.1"
 
     def _send_json(self, code: int, payload: dict[str, object]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except ConnectionError:
+            # Windows: ConnectionAbortedError (WinError 10053) — браузер
+            # разорвал соединение, отвечать некому; это не ошибка сервера.
+            return
 
     def _services(self) -> PersinderHTTPServer:
         return cast(PersinderHTTPServer, self.server)
@@ -110,13 +125,16 @@ class _Handler(BaseHTTPRequestHandler):
             or mimetypes.guess_type(path.name)[0]
             or "application/octet-stream"
         )
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", cache)
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", cache)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+        except ConnectionError:  # клиент отключился — см. _send_json
+            return
 
     def _handle_search(self, raw_query: str) -> None:
         params = parse_qs(raw_query)
