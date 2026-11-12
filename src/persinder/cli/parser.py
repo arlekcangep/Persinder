@@ -6,9 +6,10 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 
-from ..api import IndexLog, serve
+from ..api import IndexLog, serve_fastapi
 from ..config import Settings
 from ..sources import default_registry, load_config
+from ..textstore import FsTextStore
 from .ann import run_ann_rebuild
 from .config import candidate_config, config_candidates
 from .embedding import run_embed
@@ -256,7 +257,16 @@ class Cli:
             print(format_recovery(recovery))
         print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)
         try:
-            serve(ingest, search, settings.host, settings.port, IndexLog())
+            serve_fastapi(
+                ingest,
+                search,
+                settings.host,
+                settings.port,
+                IndexLog(),
+                store=store,
+                textstore=FsTextStore(settings.text_dir),
+                registry=default_registry(),
+            )
         except KeyboardInterrupt:
             pass
         finally:

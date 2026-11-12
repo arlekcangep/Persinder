@@ -119,11 +119,15 @@ class ModelInstallE2ETest(unittest.TestCase):
             port: int,
             log=None,
             stats=None,
+            **kwargs,
         ) -> None:
             time.sleep(1.0)  # дать watcher'у и потоку эмбеддингов отработать
 
         out = io.StringIO()
-        with mock.patch.object(serve_mod, "serve", fake_serve), redirect_stdout(out):
+        with (
+            mock.patch.object(serve_mod, "serve_fastapi", fake_serve),
+            redirect_stdout(out),
+        ):
             rc = cli.run_serve(self.config, self.settings, reindex=True)
         self.assertEqual(rc, 0)
         return out.getvalue()

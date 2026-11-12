@@ -9,9 +9,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
+from ..api.textresolver import TextResolver
 from ..config import Settings
 from ..search import SearchHit, SearchQuery, SearchResult
 from ..sources import AreaConfig, default_registry, load_config
+from ..store import SqliteStore
+from ..textstore import FsTextStore
 from .config import candidate_config, known_models
 from .service import build_service
 
@@ -40,6 +43,10 @@ def _json_opt_str(value: object) -> str:
     return "" if value is None else _json_str(value)
 
 
+def _json_opt_int(value: object) -> int | None:
+    return None if value is None else _json_int(value)
+
+
 def _hits_from_json(raw: object) -> tuple[SearchHit, ...]:
     """Разобрать список хитов ответа ``GET /search``; ошибка — ``ValueError``."""
     if not isinstance(raw, list):
@@ -49,13 +56,13 @@ def _hits_from_json(raw: object) -> tuple[SearchHit, ...]:
         if not isinstance(item, dict):
             raise ValueError("hit object expected")
         data = cast("dict[str, object]", item)
-        context = data.get("context")
         hits.append(
             SearchHit(
                 document_id=_json_str(data["document_id"]),
                 chunk_index=_json_int(data["chunk_index"]),
                 score=_json_float(data["score"]),
-                context=None if context is None else _json_str(context),
+                chunk_start=_json_opt_int(data.get("chunk_start")),
+                chunk_end=_json_opt_int(data.get("chunk_end")),
                 area=_json_opt_str(data.get("area")),
                 source_path=_json_opt_str(data.get("source_path")),
                 filename=_json_opt_str(data.get("filename")),
@@ -157,16 +164,86 @@ def hit_source(hit: SearchHit) -> str:
     return f"{label} ({hit.area})" if hit.area else label
 
 
-def print_search_result(result: SearchResult) -> None:
-    print(f"морфология: {len(result.hits)}, семантика: {len(result.semantic_hits)}")
-    for kind, hits in (
+def _layers(result: SearchResult) -> tuple[tuple[str, tuple[SearchHit, ...]], ...]:
+    """Слои выдачи в порядке печати: морфология, затем семантика."""
+    return (
         ("морфология", result.hits),
         ("семантика", result.semantic_hits),
-    ):
+    )
+
+
+def print_search_result(result: SearchResult) -> None:
+    print(f"морфология: {len(result.hits)}, семантика: {len(result.semantic_hits)}")
+    for kind, hits in _layers(result):
         for hit in hits:
             print(
                 f"  [{kind}] {hit_source(hit)} чанк {hit.chunk_index} = {hit.score:.4f}"
             )
+
+
+def _one_line(text: str) -> str:
+    """Сниппет одной строкой: коллапс пробелов, обрезка."""
+    compact = " ".join(text.split())
+    return compact[:300]
+
+
+def context_over_http(settings: Settings, hit: SearchHit) -> str | None:
+    """Сниппет хита через ``GET /context`` (NDJSON); ``None`` — недоступен."""
+    if hit.chunk_start is None or hit.chunk_end is None:
+        return None
+    params = {
+        "doc_id": hit.document_id,
+        "start": str(hit.chunk_start),
+        "end": str(hit.chunk_end),
+    }
+    url = (
+        f"http://{settings.host}:{settings.port}/context"
+        f"?{urllib.parse.urlencode(params)}"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=SEARCH_HTTP_TIMEOUT) as resp:
+            text = ""
+            for raw_line in resp:
+                line = raw_line.decode("utf-8").strip()
+                if not line:
+                    continue
+                frag = json.loads(line)
+                if isinstance(frag, dict) and frag.get("type") == "fragment":
+                    text += str(frag.get("text") or "")
+                else:
+                    return None
+            return text
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _print_contexts_http(settings: Settings, result: SearchResult) -> None:
+    """Печать сниппетов через ``/context`` по мере прихода."""
+    for kind, hits in _layers(result):
+        for hit in hits:
+            text = context_over_http(settings, hit)
+            if text:
+                print(f"    [{kind}] {_one_line(text)}", flush=True)
+
+
+def _print_contexts_local(settings: Settings, result: SearchResult) -> None:
+    """Печать сниппетов локально: ``TextResolver`` (textstore → оригинал)."""
+    store = SqliteStore(settings.db_path)
+    try:
+        resolver = TextResolver(
+            store, FsTextStore(settings.text_dir), default_registry()
+        )
+        for kind, hits in _layers(result):
+            for hit in hits:
+                if hit.chunk_start is None or hit.chunk_end is None:
+                    continue
+                resolved, _error = resolver.resolve(
+                    hit.document_id, hit.chunk_start, hit.chunk_end
+                )
+                if resolved is not None and resolved.text:
+                    print(f"    [{kind}] {_one_line(resolved.text)}", flush=True)
+    finally:
+        store.close()
 
 
 def run_search(
@@ -210,6 +287,7 @@ def run_search(
         )
         if result is not None:
             print_search_result(result)
+            _print_contexts_http(settings, result)
             return 0
         print(
             f"ВНИМАНИЕ: сервер http://{settings.host}:{settings.port} не отвечает — "
@@ -227,4 +305,5 @@ def run_search(
         semantic_limit,
     )
     print_search_result(result)
+    _print_contexts_local(settings, result)
     return 0

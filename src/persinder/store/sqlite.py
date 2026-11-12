@@ -12,7 +12,14 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..domain import Chunk, Document, EmbeddingJob, utcnow
-from .models import EmbeddingQueueItem, EmbeddingRow, MorphHit, SourceRow, StoreCounts
+from .models import (
+    DocumentSource,
+    EmbeddingQueueItem,
+    EmbeddingRow,
+    MorphHit,
+    SourceRow,
+    StoreCounts,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -189,6 +196,33 @@ class SqliteStore:
                 "SELECT id FROM documents WHERE content_hash = ?", (content_hash,)
             ).fetchone()
         return row["id"] if row else None
+
+    def document_source(self, doc_id: str) -> DocumentSource | None:
+        """Документ + его главный источник: для ``/context`` (вариант C).
+
+        Возвращает ``extractor`` (имя типа), ``content_hash`` и ``source_path``
+        главного источника. Порядок источников — реальные файлы раньше
+        виртуальных (``source_path = ''``), затем по ``id`` — как в
+        ``sources_for_docs``. ``None`` — документа нет.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT d.id, d.content_hash, d.extractor, s.source_path "
+                "FROM documents d "
+                "LEFT JOIN document_sources s ON s.doc_id = d.id "
+                "WHERE d.id = ? "
+                "ORDER BY CASE WHEN s.source_path = '' THEN 1 ELSE 0 END, s.id "
+                "LIMIT 1",
+                (doc_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return DocumentSource(
+            doc_id=str(row["id"]),
+            content_hash=str(row["content_hash"]),
+            extractor=str(row["extractor"]),
+            source_path=str(row["source_path"]),
+        )
 
     def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]:
         """Морфологический поиск по FTS5 (запрос уже стеммирован)."""

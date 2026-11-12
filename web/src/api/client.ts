@@ -61,6 +61,79 @@ export async function search(
   return (await response.json()) as ApiSearchResponse;
 }
 
+export interface ContextParams {
+  docId: string;
+  /** Символьное смещение начала чанка в документе. */
+  start: number;
+  /** Символьное смещение конца чанка (не включительно). */
+  end: number;
+}
+
+/**
+ * Текст чанка через ``GET /context`` (NDJSON-поток).
+ *
+ * Читает поток построчно, склеивает фрагменты ``type: "fragment"`` в один текст.
+ * Фрагмент с ``error`` (документ недоступен) — бросает ``ApiError``.
+ */
+export async function fetchContext(
+  params: ContextParams,
+  signal?: AbortSignal,
+): Promise<string> {
+  const query = new URLSearchParams({
+    doc_id: params.docId,
+    start: String(params.start),
+    end: String(params.end),
+  });
+  const response = await fetch(apiUrl(`/context?${query.toString()}`), {
+    signal,
+    headers: { Accept: "application/x-ndjson" },
+  });
+  if (!response.ok) {
+    throw new ApiError(await readError(response), response.status);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let text = "";
+  const parseLine = (line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let frag: unknown;
+    try {
+      frag = JSON.parse(trimmed);
+    } catch {
+      return; // битая строка — игнорируем
+    }
+    if (typeof frag !== "object" || frag === null) return;
+    const record = frag as { type?: unknown; text?: unknown; error?: unknown };
+    if (record.type === "fragment") {
+      if (typeof record.text === "string") text += record.text;
+    } else if (record.error) {
+      throw new ApiError(String(record.error), response.status);
+    }
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline = buffer.indexOf("\n");
+      while (newline !== -1) {
+        parseLine(buffer.slice(0, newline));
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) parseLine(buffer);
+  } finally {
+    reader.releaseLock();
+  }
+  return text;
+}
+
 export async function health(signal?: AbortSignal): Promise<ApiHealthResponse> {
   const response = await fetch(apiUrl("/health"), {
     signal,

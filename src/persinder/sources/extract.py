@@ -945,6 +945,17 @@ class ExtractorRegistry:
         """Классы этого реестра (без легаси-алиасов)."""
         return frozenset(self._classes | RESERVED)
 
+    def extractor_for(self, name: str) -> Extractor | None:
+        """Вернуть экстрактор по его имени (атрибут ``name`` класса).
+        
+        Регистр перебирает свои ``_extractors`` и возвращает первого,
+        чье ``name`` совпадает. Если ничего не найдено — ``None``.
+        """
+        for ext in self._extractors:
+            if ext.name == name:
+                return ext
+        return None
+
     # --- проверка поддержки (без чтения файла) ---
 
     def enabled_suffixes(self, area: AreaConfig) -> frozenset[str]:

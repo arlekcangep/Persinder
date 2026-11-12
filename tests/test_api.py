@@ -31,7 +31,7 @@ class ApiTest(unittest.TestCase):
         ingest = IngestService(
             self.store, self.texts, NoopStemmer(), chunk_size=40, chunk_overlap=0
         )
-        search = SearchService(self.store, NoopStemmer(), textstore=self.texts)
+        search = SearchService(self.store, NoopStemmer())
         self.server = make_server(ingest, search, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -440,21 +440,19 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(hit["area"], "personal")
         self.assertEqual(hit["filename"], "ctx.txt")
         self.assertEqual(hit["source_path"], "", "HTTP-вставка — виртуальный документ")
-        # Контекст — от найденного слова, по 3 предложения назад и вперёд,
-        # а не весь чанк (строки с 4-й по 7-ю не попадают).
-        self.assertEqual(
-            hit["context"],
-            "line one\nline two\nline three\nline four\n"
-            "line five\nline six\nline seven",
-        )
+        # Контекст из /search убран (шаг 3): клиент сам идёт в /context.
+        self.assertNotIn("context", hit)
+        self.assertIsInstance(hit["chunk_start"], int)
+        self.assertIsInstance(hit["chunk_end"], int)
+        self.assertGreaterEqual(hit["chunk_start"], 0)
+        self.assertLessEqual(hit["chunk_start"], hit["chunk_end"])
 
-    def test_search_hit_context_is_bounded_not_whole_chunk(self):
-        # Чанк маленький, но контекст всё равно только вокруг найденного слова:
-        # ничего дальше 3 предложений от хита не выводится.
+    def test_search_span_is_chunk_not_whole_document(self):
+        # Границы в хите — символьный охват чанка, а не всего документа:
+        # слово в конце второго чанка даёт start >= 40 (chunk_size=40).
         text = (
-            "alpha one\nalpha two\nцелевое слово\n"
-            "delta one\ndelta two\ndelta three\ndelta four\ndelta five\n"
-            "delta six\ndelta seven\ndelta eight\ndelta nine\n"
+            "строка один\nстрока два\nстрока три\nстрока четыре\n"
+            "целевое слово\n"
         )
         with self._post(
             "/ingest", {"filename": "ctx2.txt", "area": "personal", "text": text}
@@ -464,11 +462,12 @@ class ApiTest(unittest.TestCase):
         body = self._search("слово")
         self.assertTrue(body["hits"])
         hit = body["hits"][0]
-        self.assertIn("целевое слово", hit["context"])
-        self.assertNotIn("delta eight", hit["context"])
-        self.assertNotIn("delta nine", hit["context"])
+        self.assertNotIn("context", hit)
+        self.assertGreaterEqual(hit["chunk_start"], 40, "слово во втором чанке")
+        self.assertLessEqual(hit["chunk_end"], 80)
 
-    def test_search_context_is_null_without_raw_text(self):
+    def test_search_spans_survive_textstore_loss(self):
+        # Границы чанка — из БД (chunks), сырой текст хитам не нужен.
         with self._post(
             "/ingest",
             {"filename": "gone.txt", "area": "personal", "text": "исчезнувший текст"},
@@ -478,7 +477,10 @@ class ApiTest(unittest.TestCase):
 
         body = self._search("исчезнувший")
         self.assertTrue(body["hits"])
-        self.assertIsNone(body["hits"][0]["context"])
+        hit = body["hits"][0]
+        self.assertNotIn("context", hit)
+        self.assertIsInstance(hit["chunk_start"], int)
+        self.assertIsInstance(hit["chunk_end"], int)
 
 
 if __name__ == "__main__":

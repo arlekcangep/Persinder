@@ -142,7 +142,6 @@ def build_service(
         store=store,
         stemmer=stemmer,
         vector_search=vector_search,
-        textstore=textstore,
         default_min_score=min_score,
     )
     return ingest, search, store

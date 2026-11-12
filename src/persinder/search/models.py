@@ -36,16 +36,19 @@ class SearchQuery:
 class SearchHit:
     """Одно попадание поиска.
 
-    ``context`` — текст вокруг чанка (строки хита плюс несколько строк до и
-    после, ``None`` — если сырой текст недоступен). ``area``, ``source_path``
-    и ``filename`` — источник документа: область, полный путь на диске и имя
-    файла (``source_path`` пуст у виртуального документа — web/вставка).
+    ``chunk_start``/``chunk_end`` — символьные границы чанка в документе
+    (из ``chunks``); по ним клиент строит запрос ``/context``. ``area``,
+    ``source_path`` и ``filename`` — источник документа: область, полный путь
+    на диске и имя файла (``source_path`` пуст у виртуального документа —
+    web/вставка). Текст сервис не отдаёт: сниппет клиент запрашивает сам
+    через ``/context``.
     """
 
     document_id: str
     chunk_index: int
     score: float
-    context: str | None = None
+    chunk_start: int | None = None
+    chunk_end: int | None = None
     area: str = ""
     source_path: str = ""
     filename: str = ""

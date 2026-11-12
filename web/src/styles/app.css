@@ -590,6 +590,11 @@ code {
   font-weight: 700;
 }
 
+.result-snippet-loading {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .result-meta {
   display: flex;
   align-items: center;

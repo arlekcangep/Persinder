@@ -5,8 +5,14 @@ export interface ResultItem {
   key: string;
   documentId: string;
   chunkIndex: number;
+  /** Символьные границы чанка — для запроса /context (null — недоступны). */
+  chunkStart: number | null;
+  chunkEnd: number | null;
   score: number;
+  /** Сниппет; сначала пустой, наполняется /context по мере прихода. */
   snippet: string;
+  /** Контекст ещё не пришёл (сниппет в пути). */
+  snippetLoading: boolean;
   area: string;
   areaLabel: string;
   sourcePath: string;
@@ -48,7 +54,7 @@ function shorten(text: string): string {
   return `${body}…`;
 }
 
-/** Контекст из API — окно вокруг чанка; убираем markdown-заголовки и схлопываем строки. */
+/** Текст из /context — окно вокруг чанка; убираем markdown-заголовки и схлопываем строки. */
 export function makeSnippet(context: string | null): string {
   if (!context) return "";
   const text = context
@@ -66,12 +72,16 @@ export function makeSnippet(context: string | null): string {
 export function hitToResult(hit: ApiHit): ResultItem {
   const { dir, file } = splitPath(hit.source_path);
   const filename = hit.filename || file || "Без имени";
+  const hasSpans = hit.chunk_start !== null && hit.chunk_end !== null;
   return {
     key: `${hit.document_id}\u0000${hit.source_path}`,
     documentId: hit.document_id,
     chunkIndex: hit.chunk_index,
+    chunkStart: hit.chunk_start,
+    chunkEnd: hit.chunk_end,
     score: hit.score,
-    snippet: makeSnippet(hit.context),
+    snippet: "",
+    snippetLoading: hasSpans,
     area: hit.area,
     areaLabel: areaLabel(hit.area),
     sourcePath: hit.source_path,

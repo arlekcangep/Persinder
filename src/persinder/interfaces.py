@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from .ingest.models import IngestRequest, IngestResult, RemoveResult
     from .search.models import SearchQuery, SearchResult
     from .store.models import (
+        DocumentSource,
         EmbeddingQueueItem,
         EmbeddingRow,
         MorphHit,
@@ -73,6 +74,14 @@ class MetaStore(Protocol):
     """Метастор: документы, чанки, FTS5, очередь."""
 
     def find_document_by_hash(self, content_hash: str) -> str | None: ...
+
+    def document_source(self, doc_id: str) -> DocumentSource | None:
+        """Документ + главный источник: extractor, content_hash, source_path.
+
+        Нужно для ``/context`` (вариант C): endpoint сам запрашивает, как
+        перечитать оригинал. ``None`` — документа нет в базе.
+        """
+        ...
 
     def add_source(
         self, doc_id: str, area: str, filename: str, source_path: str = ""

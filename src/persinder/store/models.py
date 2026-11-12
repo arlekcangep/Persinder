@@ -37,6 +37,19 @@ class SourceRow(TypedDict):
     source_path: str
 
 
+class DocumentSource(TypedDict):
+    """Документ + его главный источник (для ``/context``, вариант C).
+
+    ``extractor`` — имя типа экстрактора (``"markdown"``, ``"pdf"`` …),
+    по которому перечитывается оригинал при отсутствии текста в textstore.
+    """
+
+    doc_id: str
+    content_hash: str
+    extractor: str
+    source_path: str
+
+
 class EmbeddingRow(TypedDict):
     """Строка таблицы эмбеддингов (локальное производное, §8).
 

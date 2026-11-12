@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # setup.sh — установка Persinder в локальный venv (Git Bash / Windows).
 #
-#   ./setup.sh              — установка + индексация test-content + поиск
-#   ./setup.sh --install    — только установка (без запуска)
+#   ./setup.sh    — только установка (флагов нет); запуск сервиса — ./run.sh
 #
 # Что делает:
 #   1. Проверяет Python 3.10+ и создаёт venv в корне репозитория (.venv).
@@ -10,7 +9,7 @@
 #      config, watch, http, stemming).
 #   3. Скачивает модель эмбеддингов e5-small-int8-v1 (~120 МБ) в каталог
 #      приложения ~/.persinder/models (модели всегда в <home>/models).
-#   4. Показывает, как запустить индексацию test-content.
+#   4. Показывает, как запустить сервис.
 
 set -euo pipefail
 

@@ -14,7 +14,8 @@ function hit(overrides: Partial<ApiHit> = {}): ApiHit {
     document_id: "doc-1",
     chunk_index: 0,
     score: 0.8,
-    context: "контекст вокруг чанка",
+    chunk_start: 10,
+    chunk_end: 40,
     area: "personal",
     source_path: "D:\\Obsidian\\заметки.md",
     filename: "заметки.md",
@@ -25,30 +26,42 @@ function hit(overrides: Partial<ApiHit> = {}): ApiHit {
 describe("groupHits", () => {
   it("сворачивает чанки одного документа в одну строку и берёт лучший score", () => {
     const result = groupHits([
-      hit({ chunk_index: 0, score: 0.81, context: "первый чанк" }),
-      hit({ chunk_index: 3, score: 0.9, context: "лучший чанк" }),
+      hit({ chunk_index: 0, score: 0.81, chunk_start: 0, chunk_end: 30 }),
+      hit({ chunk_index: 3, score: 0.9, chunk_start: 100, chunk_end: 130 }),
       hit({ document_id: "doc-2", score: 0.7, filename: "другой.md" }),
     ]);
 
     expect(result).toHaveLength(2);
     expect(result[0].documentId).toBe("doc-1");
     expect(result[0].chunkIndex).toBe(3);
-    expect(result[0].snippet).toContain("лучший чанк");
+    expect(result[0].chunkStart).toBe(100);
+    expect(result[0].chunkEnd).toBe(130);
     expect(result[1].documentId).toBe("doc-2");
   });
 
   it("для bm25 лучшим считается меньшее значение", () => {
     const result = groupHits(
       [
-        hit({ chunk_index: 0, score: -1.2, context: "слабее" }),
-        hit({ chunk_index: 1, score: -4.5, context: "сильнее" }),
+        hit({ chunk_index: 0, score: -1.2, chunk_start: 0, chunk_end: 20 }),
+        hit({ chunk_index: 1, score: -4.5, chunk_start: 50, chunk_end: 90 }),
       ],
       "lower",
     );
 
     expect(result).toHaveLength(1);
     expect(result[0].chunkIndex).toBe(1);
-    expect(result[0].snippet).toContain("сильнее");
+    expect(result[0].chunkStart).toBe(50);
+    expect(result[0].chunkEnd).toBe(90);
+  });
+
+  it("сниппет пока пуст, загрузка контекста зависит от наличия границ", () => {
+    const withSpans = groupHits([hit()]);
+    expect(withSpans[0].snippet).toBe("");
+    expect(withSpans[0].snippetLoading).toBe(true);
+
+    const noSpans = groupHits([hit({ chunk_start: null, chunk_end: null })]);
+    expect(noSpans[0].snippet).toBe("");
+    expect(noSpans[0].snippetLoading).toBe(false);
   });
 
   it("не сливает документы с одинаковым id, но разными путями", () => {

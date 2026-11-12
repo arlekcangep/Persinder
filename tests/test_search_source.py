@@ -38,7 +38,7 @@ class SearchSourceTest(unittest.TestCase):
         self.ingest = IngestService(
             self.store, self.texts, NoopStemmer(), chunk_size=1000, chunk_overlap=0
         )
-        self.search = SearchService(self.store, NoopStemmer(), textstore=self.texts)
+        self.search = SearchService(self.store, NoopStemmer())
 
     def tearDown(self):
         self.store.close()
@@ -72,6 +72,20 @@ class SearchSourceTest(unittest.TestCase):
         self.assertEqual(hit.area, "personal")
         self.assertEqual(hit.source_path, "/notes/note.md")
         self.assertEqual(hit.filename, "note.md")
+
+    def test_hit_carries_chunk_spans(self):
+        """Границы чанка (символьные) — в хите: по ним клиент зовёт /context."""
+        self._ingest("note.md", "кот сидит на коврике", source_path="/notes/note.md")
+
+        result = self.search.search(SearchQuery(text="кот"))
+
+        self.assertEqual(len(result.hits), 1)
+        hit = result.hits[0]
+        self.assertIsNotNone(hit.chunk_start)
+        self.assertIsNotNone(hit.chunk_end)
+        assert hit.chunk_start is not None and hit.chunk_end is not None
+        self.assertGreaterEqual(hit.chunk_start, 0)
+        self.assertLessEqual(hit.chunk_start, hit.chunk_end)
 
     def test_virtual_hit_has_area_and_filename_without_path(self):
         self._ingest("web-note", "кот сидит на коврике", area=Area.WEB)

@@ -11,7 +11,7 @@ import os
 import threading
 from pathlib import Path
 
-from ..api import IndexLog, serve
+from ..api import IndexLog, serve_fastapi
 from ..api.index_log import KIND_SYSTEM
 from ..config import Settings
 from ..embed import (
@@ -205,13 +205,16 @@ class ServeRunner:
         print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)
 
         try:
-            serve(
+            serve_fastapi(
                 self.ingest,
                 self.search,
                 settings.host,
                 settings.port,
                 self.log,
                 self._health_stats,
+                store=self.store,
+                textstore=FsTextStore(settings.text_dir),
+                registry=self.registry,
             )
         except KeyboardInterrupt:
             pass

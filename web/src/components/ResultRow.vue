@@ -44,6 +44,9 @@ const snippet = computed(() => splitHighlight(props.item.snippet, props.query));
         <template v-else>{{ part.text }}</template>
       </template>
     </p>
+    <p v-else-if="item.snippetLoading" class="result-snippet result-snippet-loading">
+      Контекст загружается…
+    </p>
 
     <div class="result-meta">
       <span class="score">{{ score }}</span>

@@ -20,7 +20,7 @@ from typing import Any, cast
 from unittest import mock
 
 from persinder import __main__ as cli
-from persinder.api import make_server
+from persinder.api import make_fastapi_server, make_server
 from persinder.cli import embedding as embedding_mod
 from persinder.cli import parser as parser_mod
 from persinder.cli import search as search_mod
@@ -28,10 +28,13 @@ from persinder.cli import serve as serve_mod
 from persinder.config import Settings
 from persinder.domain import Area
 from persinder.embed import ModelState
+from persinder.ingest import IngestRequest, IngestService
 from persinder.interfaces import Ingest, Search
-from persinder.search import SearchHit, SearchQuery, SearchResult
-from persinder.sources import AreaConfig
+from persinder.morphology import NoopStemmer
+from persinder.search import SearchHit, SearchQuery, SearchResult, SearchService
+from persinder.sources import AreaConfig, default_registry
 from persinder.store import SqliteStore
+from persinder.textstore import FsTextStore
 
 TEXT = "Кот сидит на коврике в комнате. The quick brown fox. " * 10
 
@@ -71,6 +74,7 @@ class ServeTest(unittest.TestCase):
             port: int,
             log=None,
             stats=None,
+            **kwargs,
         ) -> None:
             served.append((host, port))
             # даём watcher'у и потоку эмбеддингов отработать первый проход
@@ -79,7 +83,10 @@ class ServeTest(unittest.TestCase):
             health.update(stats() if stats is not None else {})
 
         out = io.StringIO()
-        with mock.patch.object(serve_mod, "serve", fake_serve), redirect_stdout(out):
+        with (
+            mock.patch.object(serve_mod, "serve_fastapi", fake_serve),
+            redirect_stdout(out),
+        ):
             rc = cli.run_serve(self.config, self.settings)
 
         self.assertEqual(rc, 0)
@@ -122,11 +129,12 @@ class ServeTest(unittest.TestCase):
             port: int,
             log=None,
             stats=None,
+            **kwargs,
         ) -> None:
             time.sleep(1.0)
 
         with (
-            mock.patch.object(serve_mod, "serve", fake_serve),
+            mock.patch.object(serve_mod, "serve_fastapi", fake_serve),
             redirect_stdout(io.StringIO()),
         ):
             cli.run_serve(self.config, self.settings)
@@ -151,11 +159,15 @@ class ServeTest(unittest.TestCase):
             port: int,
             log=None,
             stats=None,
+            **kwargs,
         ) -> None:
             time.sleep(2.5)
 
         out = io.StringIO()
-        with mock.patch.object(serve_mod, "serve", fake_serve2), redirect_stdout(out):
+        with (
+            mock.patch.object(serve_mod, "serve_fastapi", fake_serve2),
+            redirect_stdout(out),
+        ):
             rc = cli.run_serve(self.config, self.settings)
 
         self.assertEqual(rc, 0)
@@ -193,6 +205,7 @@ class ServeTest(unittest.TestCase):
             port: int,
             log: Any = None,
             stats: Any = None,
+            **kwargs,
         ) -> None:
             captured["http_log"] = log
             time.sleep(1.0)
@@ -200,7 +213,7 @@ class ServeTest(unittest.TestCase):
         out = io.StringIO()
         with (
             mock.patch.object(embedding_mod, "build_embed_worker", spy_build),
-            mock.patch.object(serve_mod, "serve", fake_serve),
+            mock.patch.object(serve_mod, "serve_fastapi", fake_serve),
             redirect_stdout(out),
         ):
             rc = cli.run_serve(self.config, self.settings)
@@ -232,11 +245,15 @@ class ServeTest(unittest.TestCase):
             port: int,
             log=None,
             stats=None,
+            **kwargs,
         ) -> None:
             time.sleep(1.0)  # дать watcher'у проиндексировать файл
 
         out = io.StringIO()
-        with mock.patch.object(serve_mod, "serve", fake_serve), redirect_stdout(out):
+        with (
+            mock.patch.object(serve_mod, "serve_fastapi", fake_serve),
+            redirect_stdout(out),
+        ):
             rc = cli.run_serve(self.config, self.settings)
 
         self.assertEqual(rc, 0)
@@ -271,6 +288,7 @@ class ServeTest(unittest.TestCase):
             port: int,
             log=None,
             stats=None,
+            **kwargs,
         ) -> None:
             served.append(host)
             time.sleep(1.0)
@@ -282,7 +300,7 @@ class ServeTest(unittest.TestCase):
         try:
             os.chdir(empty)
             with (
-                mock.patch.object(serve_mod, "serve", fake_serve),
+                mock.patch.object(serve_mod, "serve_fastapi", fake_serve),
                 redirect_stdout(out),
             ):
                 rc = cli.main(["serve", "--home", str(home)])
@@ -322,6 +340,7 @@ class ServeTest(unittest.TestCase):
             port: int,
             log=None,
             stats=None,
+            **kwargs,
         ) -> None:
             served.append(host)
             time.sleep(1.0)
@@ -331,7 +350,7 @@ class ServeTest(unittest.TestCase):
         try:
             os.chdir(launch)
             with (
-                mock.patch.object(serve_mod, "serve", fake_serve),
+                mock.patch.object(serve_mod, "serve_fastapi", fake_serve),
                 redirect_stdout(out),
             ):
                 rc = cli.main(["serve", "--home", str(self.settings.home)])
@@ -359,6 +378,7 @@ class ServeTest(unittest.TestCase):
             port: int,
             log=None,
             stats=None,
+            **kwargs,
         ) -> None:
             served.append(host)
 
@@ -369,7 +389,7 @@ class ServeTest(unittest.TestCase):
         try:
             os.chdir(empty)
             with (
-                mock.patch.object(parser_mod, "serve", fake_serve),
+                mock.patch.object(parser_mod, "serve_fastapi", fake_serve),
                 redirect_stdout(out),
             ):
                 rc = cli.main(["serve", "--home", str(self.settings.home)])
@@ -391,11 +411,15 @@ class ServeTest(unittest.TestCase):
             port: int,
             log=None,
             stats=None,
+            **kwargs,
         ) -> None:
             time.sleep(delay)
 
         out = io.StringIO()
-        with mock.patch.object(serve_mod, "serve", fake_serve), redirect_stdout(out):
+        with (
+            mock.patch.object(serve_mod, "serve_fastapi", fake_serve),
+            redirect_stdout(out),
+        ):
             rc = cli.run_serve(self.config, self.settings, reindex=reindex)
         self.assertEqual(rc, 0)
         return out.getvalue()
@@ -508,13 +532,14 @@ class _StubSearch:
                     "doc-1",
                     0,
                     0.75,
-                    "контекст",
+                    chunk_start=10,
+                    chunk_end=30,
                     area="personal",
                     source_path="/notes/a.md",
                     filename="a.md",
                 ),
             ),
-            semantic_hits=(SearchHit("doc-2", 1, 0.5, None),),
+            semantic_hits=(SearchHit("doc-2", 1, 0.5),),
         )
 
 
@@ -552,14 +577,15 @@ class SearchHttpTest(unittest.TestCase):
                     "doc-1",
                     0,
                     0.75,
-                    "контекст",
+                    chunk_start=10,
+                    chunk_end=30,
                     area="personal",
                     source_path="/notes/a.md",
                     filename="a.md",
                 ),
             ),
         )
-        self.assertEqual(result.semantic_hits, (SearchHit("doc-2", 1, 0.5, None),))
+        self.assertEqual(result.semantic_hits, (SearchHit("doc-2", 1, 0.5),))
         self.assertEqual(self.stub.queries, [SearchQuery(text="кот", limit=3)])
 
     def test_search_over_http_passes_min_score(self):
@@ -684,6 +710,98 @@ class SearchHttpTest(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(run.call_args.args[0], Path("/tmp/after-home"))
+
+
+class CliContextTest(unittest.TestCase):
+    """CLI-сниппеты (шаг 3): ``/context`` по каждому хиту и локальный резолвер."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.settings = Settings(home=self.root)
+        self.store = SqliteStore(self.settings.db_path)
+        self.texts = FsTextStore(self.settings.text_dir)
+        self.ingest = IngestService(
+            self.store, self.texts, NoopStemmer(), chunk_size=100, chunk_overlap=0
+        )
+        result = self.ingest.ingest(
+            IngestRequest(
+                filename="note.md",
+                area=Area.PERSONAL,
+                text="Кот сидит на коврике и мурчит.",
+            )
+        )
+        assert result.document_id is not None
+        self.doc_id = result.document_id
+        self.server = make_fastapi_server(
+            self.ingest,
+            SearchService(self.store, NoopStemmer()),
+            "127.0.0.1",
+            0,
+            store=self.store,
+            textstore=self.texts,
+            registry=default_registry(),
+        )
+        self.thread = threading.Thread(target=self.server.serve, daemon=True)
+        self.thread.start()
+        self.settings = Settings(home=self.root, port=self._bound_port())
+
+    def _bound_port(self) -> int:
+        for _ in range(200):
+            server = self.server._server
+            if server is not None and getattr(server, "servers", None):
+                return server.servers[0].sockets[0].getsockname()[1]
+            time.sleep(0.05)
+        raise RuntimeError("uvicorn не поднялся")
+
+    def tearDown(self):
+        self.server.close()
+        self.thread.join(timeout=5)
+        self.store.close()
+        self._tmp.cleanup()
+
+    def _hit(self, start: int = 0, end: int = 40) -> SearchHit:
+        return SearchHit(
+            self.doc_id,
+            0,
+            1.0,
+            chunk_start=start,
+            chunk_end=end,
+            area="personal",
+            source_path="/notes/note.md",
+            filename="note.md",
+        )
+
+    def test_context_over_http_returns_text(self):
+        text = search_mod.context_over_http(self.settings, self._hit())
+        self.assertIn("коврике", text or "")
+
+    def test_context_over_http_none_without_spans(self):
+        text = search_mod.context_over_http(
+            self.settings, SearchHit(self.doc_id, 0, 1.0)
+        )
+        self.assertIsNone(text)
+
+    def test_print_contexts_http_prints_snippet(self):
+        result = SearchResult(query="кот", hits=(self._hit(),))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            search_mod._print_contexts_http(self.settings, result)
+        self.assertIn("коврике", buf.getvalue())
+
+    def test_print_contexts_local_resolves_from_db(self):
+        result = SearchResult(query="кот", hits=(self._hit(),))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            search_mod._print_contexts_local(self.settings, result)
+        self.assertIn("коврике", buf.getvalue())
+
+    def test_print_contexts_local_skips_without_spans(self):
+        result = SearchResult(query="кот", hits=(SearchHit(self.doc_id, 0, 1.0),))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            search_mod._print_contexts_local(self.settings, result)
+        self.assertEqual(buf.getvalue(), "")
 
 
 class HelpTest(unittest.TestCase):

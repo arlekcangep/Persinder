@@ -275,8 +275,10 @@ HTTP-сервис слушает только локальный интерфе�
   API/CLI не ломаются. Объединение в единый рейтинг (D16) — следующий шаг.
   `SearchService` обогащает каждый хит источником (`area`, `source_path`,
   `filename` из `document_sources`; у дубликата берётся реальный файл, а не
-  виртуальная запись) и, если есть `TextStore`, полем `context` — текст
-  чанка плюс три строки до и три после (`search/context.py`).
+  виртуальная запись) и границами чанка (`chunk_start`/`chunk_end` из
+  `chunks`). Текст сервис не читает: сниппет клиент запрашивает сам через
+  `/context` (`api/textresolver.py`) — сначала из `TextStore`, иначе
+  перечитыванием оригинала экстрактором.
 - **CLI/API.** `persinder search <text> [--limit N] [--morph-limit N]
   [--semantic-limit N] [--min-score S] [--home …] [--host …] [--port …]` —
   HTTP-first: если запущенный `serve` отвечает, CLI делает `GET /search` и

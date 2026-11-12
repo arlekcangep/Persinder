@@ -4,7 +4,9 @@ export interface ApiHit {
   document_id: string;
   chunk_index: number;
   score: number;
-  context: string | null;
+  /** Символьные границы чанка в документе — по ним клиент запрашивает /context. */
+  chunk_start: number | null;
+  chunk_end: number | null;
   area: string;
   source_path: string;
   filename: string;

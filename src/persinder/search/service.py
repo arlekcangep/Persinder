@@ -5,8 +5,9 @@
 группы: точные совпадения → семантика → морфология → тэги (ADR D16) — единый
 рейтинг будет следующим шагом.
 
-Если передан ``TextStore``, каждый хит обогащается контекстом — текстом
-документа вокруг чанка (несколько строк до и после, см. ``context_around``).
+Текст документа сервис не читает: каждый хит несёт источник и символьные
+границы чанка (``chunk_start``/``chunk_end``), а сам текст клиент запрашивает
+через ``/context``.
 """
 
 from __future__ import annotations
@@ -14,14 +15,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from ..interfaces import MetaStore, Stemmer, TextStore
+from ..interfaces import MetaStore, Stemmer
 from ..morphology import analyze_to_string
-from .context import (
-    DEFAULT_CONTEXT_LINES,
-    DEFAULT_CONTEXT_SENTENCES,
-    context_around,
-    hit_context,
-)
 from .models import SearchHit, SearchQuery, SearchResult
 
 if TYPE_CHECKING:
@@ -36,21 +31,11 @@ class SearchService:
         store: MetaStore,
         stemmer: Stemmer,
         vector_search: VectorSearch | None = None,
-        textstore: TextStore | None = None,
-        context_lines: int = DEFAULT_CONTEXT_LINES,
-        context_sentences: int = DEFAULT_CONTEXT_SENTENCES,
         default_min_score: float | None = None,
     ) -> None:
-        if context_lines < 0:
-            raise ValueError("число строк контекста не может быть отрицательным")
-        if context_sentences < 0:
-            raise ValueError("число предложений контекста не может быть отрицательным")
         self._store = store
         self._stemmer = stemmer
         self._vector_search = vector_search
-        self._textstore = textstore
-        self._context_lines = context_lines
-        self._context_sentences = context_sentences
         self._default_min_score = default_min_score
 
     def search(self, query: SearchQuery) -> SearchResult:
@@ -92,24 +77,19 @@ class SearchService:
                     score=row["score"],
                 )
                 for row in rows
-            ),
-            stems=frozenset(stemmed.split()),
+            )
         )
         return SearchResult(query=query.text, hits=hits, semantic_hits=semantic)
 
-    def _enrich(
-        self,
-        hits: tuple[SearchHit, ...],
-        stems: frozenset[str] | None = None,
-    ) -> tuple[SearchHit, ...]:
-        """Добавить источник и контекст (если есть ``TextStore``).
+    def _enrich(self, hits: tuple[SearchHit, ...]) -> tuple[SearchHit, ...]:
+        """Добавить источник и границы чанка (текст не читаем).
 
         Источник (``area``/``source_path``/``filename``) — из
         ``document_sources``: если у документа несколько источников, берётся
-        первый (реальный файл раньше виртуального). Морфологический слой
-        (``stems`` задан): контекст от найденного слова — ``context_sentences``
-        предложений до и после него. Семантический слой (``stems is None``):
-        строки вокруг чанка — ``context_lines``.
+        первый (реальный файл раньше виртуального). Границы чанка
+        (``chunk_start``/``chunk_end``) — из ``chunks``: по ним клиент
+        запрашивает ``/context``. ``context`` намеренно не заполняется —
+        текст тянется только тем, кому он нужен.
         """
         if not hits:
             return hits
@@ -120,54 +100,23 @@ class SearchService:
                 sorted({hit.document_id for hit in hits})
             )
         }
+        spans: dict[tuple[str, int], tuple[int, int]] = {}
+        for hit in hits:
+            span = self._store.chunk_span(hit.document_id, hit.chunk_index)
+            if span is not None:
+                spans[(hit.document_id, hit.chunk_index)] = span
         enriched: list[SearchHit] = []
         for hit in hits:
             source = sources.get(hit.document_id)
-            if source is None:
-                enriched.append(hit)
-            else:
-                enriched.append(
-                    replace(
-                        hit,
-                        area=source["area"],
-                        source_path=source["source_path"],
-                        filename=source["filename"],
-                    )
+            span = spans.get((hit.document_id, hit.chunk_index))
+            enriched.append(
+                replace(
+                    hit,
+                    area=source["area"] if source else "",
+                    source_path=source["source_path"] if source else "",
+                    filename=source["filename"] if source else "",
+                    chunk_start=span[0] if span else None,
+                    chunk_end=span[1] if span else None,
                 )
-
-        if self._textstore is None:
-            return tuple(enriched)
-
-        textstore = self._textstore
-        texts: dict[str, str | None] = {}
-        with_context: list[SearchHit] = []
-        for hit in enriched:
-            doc_id = hit.document_id
-            if doc_id not in texts:
-                texts[doc_id] = self._read_text(textstore, doc_id)
-            text = texts[doc_id]
-            span = (
-                None
-                if text is None
-                else self._store.chunk_span(doc_id, hit.chunk_index)
             )
-            if text is None or span is None:
-                with_context.append(hit)
-                continue
-            if stems is None:
-                context = context_around(text, span[0], span[1], self._context_lines)
-            else:
-                context = hit_context(
-                    text, span, stems, self._stemmer, self._context_sentences
-                )
-            with_context.append(replace(hit, context=context))
-        return tuple(with_context)
-
-    def _read_text(self, textstore: TextStore, doc_id: str) -> str | None:
-        """Сырой текст документа; ``None`` — если его нет или он недоступен."""
-        try:
-            if not textstore.exists(doc_id):
-                return None
-            return textstore.read(doc_id)
-        except OSError:
-            return None
+        return tuple(enriched)
