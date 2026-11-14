@@ -39,7 +39,7 @@ class WatchRunner:
             known_formats=registry.known_names(),
             known_models=known_models(settings),
         )
-        ingest, _search, store = build_service(
+        ingest, _search, store, recovery = build_service(
             settings, areas=areas, semantic=watch.semantic
         )
         journal = Journal(settings.home / "journal.jsonl")
@@ -49,7 +49,6 @@ class WatchRunner:
                 f"Журнал: обрезано старых записей: {dropped} "
                 f"(старше {JOURNAL_RETENTION_DAYS} дней)"
             )
-        recovery = ingest.recover()
         if recovery.removed:
             print(format_recovery(recovery))
         log = IndexLog()

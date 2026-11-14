@@ -251,8 +251,7 @@ class Cli:
             "Полный сервис: persinder serve --config persinder.yaml",
             flush=True,
         )
-        ingest, search, store = build_service(settings)
-        recovery = ingest.recover()
+        ingest, search, store, recovery = build_service(settings)
         if recovery.removed:
             print(format_recovery(recovery))
         print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)

@@ -138,7 +138,7 @@ def local_search(
         )
         semantic = watch.semantic
         config_min_score = watch.min_score
-    _ingest, search, store = build_service(
+    _ingest, search, store, _recovery = build_service(
         settings,
         areas=areas,
         semantic=semantic,

@@ -13,7 +13,7 @@ from ..embed import (
     build_embedder,
     load,
 )
-from ..ingest import IngestJournal, IngestService
+from ..ingest import IngestJournal, IngestService, RecoveryStats
 from ..morphology import default_stemmer
 from ..search import SearchService
 from ..sources import AreaConfig, ExtractorRegistry, default_registry, queue_models_for
@@ -98,7 +98,7 @@ def build_service(
     areas: tuple[AreaConfig, ...] | None = None,
     semantic: bool = True,
     min_score: float | None = None,
-) -> tuple[IngestService, SearchService, SqliteStore]:
+) -> tuple[IngestService, SearchService, SqliteStore, RecoveryStats]:
     """Собрать сервисы приёма и поиска из настроек.
 
     ``areas`` — области из конфига: по ним строится скоуп каждой модели
@@ -107,6 +107,9 @@ def build_service(
     ``semantic=False`` — семантика выключена полностью: эмбеддинги не ставятся
     в очередь, векторного слоя поиска нет. ``min_score`` — порог косинуса
     семантического слоя по умолчанию (из блока ``search`` конфига).
+
+    Возвращает четвёртым элементом отчёт о восстановлении (`RecoveryStats`):
+    брошенные по журналу тексты удалены, если это произошло.
     """
     settings.ensure()
     store = SqliteStore(settings.db_path)
@@ -123,6 +126,7 @@ def build_service(
         virtual_dir=settings.virtual_dir,
         embedding_models=models.queue_models() if semantic else (),
     )
+    recovery = ingest.recover()
     vector_search: VectorSearch | None = None
     if semantic:
         if areas is None:
@@ -144,7 +148,7 @@ def build_service(
         vector_search=vector_search,
         default_min_score=min_score,
     )
-    return ingest, search, store
+    return ingest, search, store, recovery
 
 
 def build_embed_worker(

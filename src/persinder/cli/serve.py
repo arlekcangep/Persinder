@@ -22,7 +22,7 @@ from ..embed import (
     load,
     virtual_sidecar_path,
 )
-from ..ingest import IngestService
+from ..ingest import IngestService, RecoveryStats
 from ..search import SearchService
 from ..sources import (
     JOURNAL_RETENTION_DAYS,
@@ -82,6 +82,7 @@ class ServeRunner:
         self.ingest: IngestService | None = None
         self.search: SearchService | None = None
         self.store: SqliteStore | None = None
+        self.recovery: RecoveryStats = RecoveryStats()
         self.log = IndexLog()
         self.journal: Journal | None = None
         self.pipeline: IndexingPipeline | None = None
@@ -109,13 +110,14 @@ class ServeRunner:
             known_formats=self.registry.known_names(),
             known_models=known_models(settings),
         )
-        ingest, search, store = build_service(
+        ingest, search, store, recovery = build_service(
             settings,
             areas=self.areas,
             semantic=self.watch.semantic,
             min_score=self.watch.min_score,
         )
         self.ingest, self.search, self.store = ingest, search, store
+        self.recovery = recovery
 
         if self.watch.semantic:
             self.embed = EmbedRunner(settings, self.log, registry=self.registry)
@@ -165,7 +167,7 @@ class ServeRunner:
 
         self._compact_journal()
         self._enqueue_missing(models)
-        self._recover()
+        self._print_recovery()
 
         scanner = self.scanner
         self.watcher = Watcher(
@@ -328,11 +330,9 @@ class ServeRunner:
                 flush=True,
             )
 
-    def _recover(self) -> None:
-        assert self.ingest is not None
-        recovery = self.ingest.recover()
-        if recovery.removed:
-            print(format_recovery(recovery), flush=True)
+    def _print_recovery(self) -> None:
+        if self.recovery.removed:
+            print(format_recovery(self.recovery), flush=True)
 
     def _print_startup(self) -> None:
         assert self.watch is not None and self.store is not None

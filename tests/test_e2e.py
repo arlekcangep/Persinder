@@ -36,7 +36,7 @@ class EndToEndTest(unittest.TestCase):
         self.data_dir = root / "data"
         settings = Settings(home=self.data_dir)
         self.settings = settings
-        self.ingest, self.search, self.store = build_service(settings)
+        self.ingest, self.search, self.store, _recovery = build_service(settings)
         self.server = make_server(self.ingest, self.search, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
