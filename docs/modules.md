@@ -80,9 +80,15 @@ src/persinder/
     watcher.py       # цикл скана, запуск по требованию
     journal.py       # журнал статусов файлов (JSONL) — состояние watcher'а (D21),
                      # обрезка истории переходов
-    extract.py       # экстракторы (markdown/text/html/mht/pdf), контейнер
-                     # archive (zip/7z/tar/gz/rar), фабрика и реестр
-                     # (ExtractorFactory, ContainerExtractor)
+    extract.py       # публичная точка входа экстракторов (реэкспорт пакета
+                     # extractors/, совместимость импортов)
+    interfaces.py    # порты: Extractor, ContainerExtractor, EntryResolver
+    extractors/      # пакет экстракторов: по одному модулю на формат
+      _base.py       #   Extracted (результат извлечения), BaseExtractor
+      _common.py     #   общие помощники (HTML→текст, тэги, суффиксы архивов)
+      registry.py    #   ExtractorRegistry + фабрика default_registry
+      markdown.py / text.py / html.py / mhtml.py / rtf.py / pdf.py /
+      fb2.py / chm.py / epub.py / archive.py   # конкретные экстракторы
     pipeline.py      # события → экстракция (файл или части контейнера) →
                      # ingest (документ на каждую часть) → журнал
     reconcile.py     # сверка журнала с базой при старте: пропущенный формат,

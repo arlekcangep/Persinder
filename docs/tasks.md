@@ -85,7 +85,7 @@
 - [ ] **T1. Баг (серьёзный): архивы распаковываются целиком в память** — недопустимо,
       архив может быть любого размера. Все читатели
       (`ArchiveExtractor._read_zip/_read_tar/_read_7z/_read_rar/_read_gz`,
-      `sources/extract.py:664-737`) возвращают `list[tuple[str, bytes]]`: **все**
+      `sources/extractors/archive.py:86-158`) возвращают `list[tuple[str, bytes]]`: **все**
       записи материализуются в RAM целиком. Лимиты анти-бомб
       (`ARCHIVE_MAX_ENTRIES=1000`, `ARCHIVE_MAX_ENTRY_BYTES=32 МБ`,
       `ARCHIVE_MAX_TOTAL_BYTES=64 МБ`) проверяются уже **после** чтения — от OOM
