@@ -68,7 +68,13 @@ class Extracted:
     """Результат извлечения одной единицы (файла или части контейнера).
 
     ``name`` — путь части внутри исходного файла (например записи ZIP:
-    ``"dir/inner.md"``); пусто — сам исходный файл.
+    ``"dir/inner.md"``); пусто — сам исходный файл. Для нескольких
+    экстракторов на одну запись к имени добавляется ``/<extractor>`` — это
+    только человекочитаемое имя, **не** элемент пути в архиве.
+    ``container_path`` — путь файла-контейнера на диске (``""`` — обычный
+    файл); ``container_entries`` — цепочка записей внутри контейнера, однозначно
+    задающая часть: ``("folder/second.zip", "folder/some.pdf")``. Вместе они
+    дают обратный разбор ``source_path`` без эвристик по строке.
     ``extractor`` — имя экстрактора, который дал этот результат (пишется в БД).
     ``error`` — непустой при проблеме разбора; текст в этом случае пуст.
     """
@@ -79,6 +85,8 @@ class Extracted:
     error: str | None = None
     name: str = ""
     extractor: str = ""
+    container_path: str = ""
+    container_entries: tuple[str, ...] = ()
 
 
 @runtime_checkable
@@ -624,6 +632,20 @@ def _resolve_opf_path(opf_path: str, href: str) -> str:
 ARCHIVE_MAX_ENTRIES = 1000
 ARCHIVE_MAX_ENTRY_BYTES = 32 * 1024 * 1024
 ARCHIVE_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+# Максимальная вложенность архивов (сколько раз рекурсивно раскрываем).
+# ``folder/first.zip/folder/second.zip/file.pdf`` — глубина 2; 4 с запасом.
+ARCHIVE_MAX_DEPTH = 4
+
+
+class _ArchiveBudget:
+    """Общий на весь файл бюджет распаковки (счётчики на рекурсию)."""
+
+    __slots__ = ("entries", "total")
+
+    def __init__(self) -> None:
+        self.entries = 0
+        self.total = 0
+
 
 # Составные суффиксы проверяются до обычных: tar.gz/tgz — один tar-контейнер.
 COMPOUND_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz")
@@ -644,12 +666,15 @@ class ArchiveExtractor(BaseExtractor):
 
     Каждая запись — отдельная часть; экстрактор для записи выбирает резолвер
     (``_AreaEntryResolver``) **по содержимому записи** (магия/снифф байтов),
-    расширение — лишь хинт. Записи-архивы раскрываются **на один уровень**
-    (глубже — защита от бомб и рекурсии). ``tar.gz``/``tgz`` — один tar-уровень,
-    одиночный ``.gz`` — один «файл» без суффикса. Пределы анти-бомб: число
-    записей, размер записи, суммарный размер. Битая запись не валит архив
-    (часть с ``error``), битый архив — одна часть с ошибкой. ``7z`` требует
-    extra ``7z`` (py7zr), ``rar`` — extra ``rar`` (rarfile + внешний распаковщик).
+    расширение — лишь хинт. Записи-архивы раскрываются **рекурсивно** с лимитом
+    глубины ``ARCHIVE_MAX_DEPTH`` (``folder/a.zip/b.zip/c.pdf``): у части
+    явно сохраняется ``container_path`` и цепочка ``container_entries``, а не только
+    человекочитаемое имя. ``tar.gz``/``tgz`` — один tar-уровень, одиночный
+    ``.gz`` — один «файл» без суффикса. Пределы анти-бомб — на весь файл:
+    число записей, размер записи, суммарный объём, глубина. Битая запись не
+    валит архив (часть с ``error``), битый архив — одна часть с ошибкой.
+    ``7z`` требует extra ``7z`` (py7zr), ``rar`` — extra ``rar`` (rarfile +
+    внешний распаковщик).
     """
 
     name = "archive"
@@ -755,92 +780,129 @@ class ArchiveExtractor(BaseExtractor):
     # --- главный вход контейнера ---
 
     def extract_all(self, path: Path, resolver: _AreaEntryResolver) -> list[Extracted]:
+        container_path = str(path)
         try:
             suffix = archive_suffix(path.name)
             reader = self._reader(suffix)
             if reader is None:
                 return [
-                    Extracted(text="", error=f"archive: формат {suffix} не читается")
+                    Extracted(
+                        text="",
+                        error=f"archive: формат {suffix} не читается",
+                        container_path=container_path,
+                    )
                 ]
             entries = reader(path)
         except RuntimeError as exc:
-            return [Extracted(text="", error=str(exc))]
+            return [Extracted(text="", error=str(exc), container_path=container_path)]
         except Exception as exc:  # noqa: BLE001 — битый/нечитаемый архив
-            return [Extracted(text="", error=f"archive: {exc}")]
-        return self._expand_entries(entries, resolver)
+            return [
+                Extracted(
+                    text="", error=f"archive: {exc}", container_path=container_path
+                )
+            ]
+        return self._expand_entries(
+            entries, resolver, container_path=container_path, budget=_ArchiveBudget()
+        )
 
     def _expand_entries(
         self,
         entries: list[tuple[str, bytes]],
         resolver: _AreaEntryResolver,
+        *,
+        container_path: str,
+        prefix: tuple[str, ...] = (),
+        depth: int = 0,
+        budget: _ArchiveBudget,
     ) -> list[Extracted]:
-        """Записи архива → части (классификация по байтам); вложенные на 1 уровень."""
+        """Записи архива → части; вложенные архивы раскрываются рекурсивно.
+
+        ``prefix`` — цепочка записей от контейнера до текущего архива,
+        ``depth`` — сколько архивов уже раскрыто. Часть получает
+        ``container_path`` + ``container_entries = prefix + (name,)`` — однозначный
+        обратный путь, не зависящий от разбора ``source_path``. Бюджет
+        (записи/байты) общий на весь файл, поэтому вложенность не обходит
+        анти-бомб-лимиты.
+        """
         parts: list[Extracted] = []
-        total = 0
-        for index, (name, data) in enumerate(entries):
-            if index >= ARCHIVE_MAX_ENTRIES:
+        for name, data in entries:
+            budget.entries += 1
+            if budget.entries > ARCHIVE_MAX_ENTRIES:
                 break
-            suffix = archive_suffix(name)
-            if total + len(data) > ARCHIVE_MAX_TOTAL_BYTES:
+            if budget.total + len(data) > ARCHIVE_MAX_TOTAL_BYTES:
                 break
-            if (
-                self._reader(suffix) is not None
-                and len(data) <= ARCHIVE_MAX_ENTRY_BYTES
-            ):
-                # Вложенный архив по имени — раскрыть его записи как части (глубина 1).
-                parts.extend(self._nested_parts(name, data, resolver))
-                total += len(data)
-                continue
             if len(data) > ARCHIVE_MAX_ENTRY_BYTES:
                 continue
-            total += len(data)
+            chain = (*prefix, name)
+            entry_name = "/".join(chain)
+            if self._reader(archive_suffix(name)) is not None:
+                budget.total += len(data)
+                if depth >= ARCHIVE_MAX_DEPTH:
+                    parts.append(
+                        Extracted(
+                            text="",
+                            name=entry_name,
+                            error=(
+                                "archive: превышена глубина вложенности"
+                                f" ({ARCHIVE_MAX_DEPTH})"
+                            ),
+                            container_path=container_path,
+                            container_entries=chain,
+                        )
+                    )
+                    continue
+                try:
+                    nested = self._read_nested(name, data)
+                except Exception as exc:  # noqa: BLE001 — битый вложенный архив
+                    parts.append(
+                        Extracted(
+                            text="",
+                            name=entry_name,
+                            error=f"archive: {exc}",
+                            container_path=container_path,
+                            container_entries=chain,
+                        )
+                    )
+                    continue
+                parts.extend(
+                    self._expand_entries(
+                        nested,
+                        resolver,
+                        container_path=container_path,
+                        prefix=chain,
+                        depth=depth + 1,
+                        budget=budget,
+                    )
+                )
+                continue
+            budget.total += len(data)
             extractors = resolver.extractors_for(name, data)
             if not extractors:
                 continue  # формат не поддержан/класс не в конфиге области
             multi = len(extractors) > 1
             for extractor in extractors:
-                part = self._part_from_bytes(extractor, name, data)
+                part = self._part_from_bytes(extractor, entry_name, data)
                 if multi:
                     # Несколько экстракторов на одну запись: имена частей
                     # различаем по экстрактору, чтобы источники не конфликтовали.
-                    part = dataclasses.replace(part, name=f"{name}/{extractor.name}")
-                parts.append(part)
+                    part = dataclasses.replace(
+                        part, name=f"{entry_name}/{extractor.name}"
+                    )
+                parts.append(
+                    dataclasses.replace(
+                        part, container_path=container_path, container_entries=chain
+                    )
+                )
         return parts
 
-    def _nested_parts(
-        self, name: str, data: bytes, resolver: _AreaEntryResolver
-    ) -> list[Extracted]:
-        """Раскрыть вложенный архив (ровно один уровень глубже)."""
+    def _read_nested(self, name: str, data: bytes) -> list[tuple[str, bytes]]:
+        """Прочитать вложенный архив из байтов записи (через временный файл)."""
         with tempfile.TemporaryDirectory() as tmp:
             inner_path = Path(tmp) / Path(name).name
             inner_path.write_bytes(data)
-            try:
-                reader = self._reader(archive_suffix(name))
-                assert reader is not None
-                nested_entries = reader(inner_path)
-            except Exception as exc:  # noqa: BLE001 — битый вложенный архив
-                return [Extracted(text="", name=name, error=f"archive: {exc}")]
-        parts: list[Extracted] = []
-        total = 0
-        for index, (entry_name, entry_data) in enumerate(nested_entries):
-            if index >= ARCHIVE_MAX_ENTRIES:
-                break
-            if total + len(entry_data) > ARCHIVE_MAX_TOTAL_BYTES:
-                break
-            if len(entry_data) > ARCHIVE_MAX_ENTRY_BYTES:
-                continue
-            total += len(entry_data)
-            extractors = resolver.extractors_for(entry_name, entry_data)
-            if not extractors:
-                continue  # вложенные архивы дальше не раскрываются
-            full = f"{name}/{entry_name}"
-            multi = len(extractors) > 1
-            for extractor in extractors:
-                part = self._part_from_bytes(extractor, full, entry_data)
-                if multi:
-                    part = dataclasses.replace(part, name=f"{full}/{extractor.name}")
-                parts.append(part)
-        return parts
+            reader = self._reader(archive_suffix(name))
+            assert reader is not None
+            return reader(inner_path)
 
     @staticmethod
     def _part_from_bytes(extractor: Extractor, name: str, data: bytes) -> Extracted:
@@ -947,7 +1009,7 @@ class ExtractorRegistry:
 
     def extractor_for(self, name: str) -> Extractor | None:
         """Вернуть экстрактор по его имени (атрибут ``name`` класса).
-        
+
         Регистр перебирает свои ``_extractors`` и возвращает первого,
         чье ``name`` совпадает. Если ничего не найдено — ``None``.
         """

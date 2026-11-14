@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import time
 import unittest
 import zipfile
@@ -225,6 +226,16 @@ class PipelineTest(unittest.TestCase):
         # источники — части архива, каждая со своим именем
         parts = self.store.source_filenames_under(Area.PERSONAL.value, "bundle.zip/")
         self.assertEqual(parts, ["bundle.zip/inside.md", "bundle.zip/sub/two.txt"])
+        # разбор пути сохранён явно: контейнер + цепочка записей
+        doc_id = self.store.source_document(
+            Area.PERSONAL.value, "bundle.zip/sub/two.txt"
+        )
+        assert doc_id is not None
+        source = self.store.document_source(doc_id)
+        assert source is not None
+        self.assertEqual(source["container_path"], str(archive_path))
+        self.assertEqual(source["container_entries"], ["sub/two.txt"])
+        self.assertEqual(source["source_path"], f"{archive_path}/sub/two.txt")
         stored = "".join(
             p.read_text(encoding="utf-8") for p in self.texts.glob("*.txt")
         )
@@ -240,6 +251,38 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(
             self.store.source_filenames_under(Area.PERSONAL.value, "bundle.zip/"), []
         )
+
+    def test_nested_archive_saves_full_ref_chain(self):
+        """folder/top.zip/inner.zip/sub/deep.md: контейнер и цепочка — явно."""
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("archive", "markdown", "text"),
+        )
+        ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
+        pipeline = IndexingPipeline(ingest, default_registry(), journal=self.journal)
+
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as inner_zip:
+            inner_zip.writestr("sub/deep.md", "#deep глубокий текст")
+        archive_path = self.area.path / "top.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("inner.zip", inner.getvalue())
+
+        stats = pipeline.process(self._scan(area))
+        self.assertEqual(stats.indexed, 1)
+        filename = "top.zip/inner.zip/sub/deep.md"
+        self.assertEqual(
+            self.store.source_filenames_under(Area.PERSONAL.value, "top.zip/"),
+            [filename],
+        )
+        doc_id = self.store.source_document(Area.PERSONAL.value, filename)
+        assert doc_id is not None
+        source = self.store.document_source(doc_id)
+        assert source is not None
+        self.assertEqual(source["container_path"], str(archive_path))
+        self.assertEqual(source["container_entries"], ["inner.zip", "sub/deep.md"])
+        self.assertEqual(source["source_path"], f"{archive_path}/inner.zip/sub/deep.md")
 
 
 if __name__ == "__main__":

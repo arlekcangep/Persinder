@@ -27,6 +27,15 @@ class IngestRequest:
     """
     extractor: str | None = None
     """Имя экстрактора, который извлёк этот текст (для атрибуции в БД)."""
+    container_path: str = ""
+    """Путь файла-контейнера на диске (``""`` — обычный файл).
+
+    Для части архива ``source_path`` — человекочитаемая строка вида
+    ``/area/a.zip/b.zip/x.md``, а ``container_path`` + ``container_entries`` —
+    точный разбор: какой файл открыть и какие записи в нём пройти.
+    """
+    container_entries: tuple[str, ...] = ()
+    """Цепочка записей внутри ``container_path`` (пусто — обычный файл)."""
     embedding_models: tuple[str, ...] | None = None
     """Модели для этой записи; ``None`` — глобальные модели сервиса.
 

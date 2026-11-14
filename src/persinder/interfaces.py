@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -84,7 +84,13 @@ class MetaStore(Protocol):
         ...
 
     def add_source(
-        self, doc_id: str, area: str, filename: str, source_path: str = ""
+        self,
+        doc_id: str,
+        area: str,
+        filename: str,
+        source_path: str = "",
+        container_path: str = "",
+        container_entries: Sequence[str] = (),
     ) -> list[str]:
         """Закрепить источник; вернуть id вытесненных документов."""
         ...
@@ -111,6 +117,8 @@ class MetaStore(Protocol):
         chunks: list[Chunk],
         jobs: list[EmbeddingJob],
         source_path: str = "",
+        container_path: str = "",
+        container_entries: Sequence[str] = (),
     ) -> list[str]:
         """Записать документ; вернуть id вытесненных документов."""
         ...

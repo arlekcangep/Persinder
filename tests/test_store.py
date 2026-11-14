@@ -1,5 +1,6 @@
 """Тесты SQLite-метастора."""
 
+import sqlite3
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -245,6 +246,123 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertEqual(rows[0]["source_path"], "/notes/a.txt")
         self.assertIn("", [row["source_path"] for row in rows])
         self.assertEqual(self.store.sources_for_docs([]), [])
+
+    def test_document_source_keeps_container_refs(self):
+        """Разбор пути части архива хранится явно: контейнер + цепочка записей."""
+        self._save()
+        self.store.add_source(
+            "d1",
+            "personal",
+            "bundle.zip/inner.zip/note.md",
+            source_path="/vault/bundle.zip/inner.zip/note.md",
+            container_path="/vault/bundle.zip",
+            container_entries=("inner.zip", "note.md"),
+        )
+        source = self.store.document_source("d1")
+        assert source is not None
+        self.assertEqual(source["container_path"], "/vault/bundle.zip")
+        self.assertEqual(source["container_entries"], ["inner.zip", "note.md"])
+        self.assertEqual(source["source_path"], "/vault/bundle.zip/inner.zip/note.md")
+
+    def test_document_source_defaults_for_plain_file(self):
+        self._save()
+        source = self.store.document_source("d1")
+        assert source is not None
+        self.assertEqual(source["container_path"], "")
+        self.assertEqual(source["container_entries"], [])
+
+    def test_migrate_adds_container_refs_to_old_db(self):
+        """Старая БД без рефов: колонки добавляются, у старых строк пустые рефы."""
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "old.sqlite"
+            conn = sqlite3.connect(str(db))
+            conn.executescript(
+                """
+                CREATE TABLE documents (
+                    id TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL UNIQUE,
+                    title TEXT,
+                    char_count INTEGER NOT NULL,
+                    text_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    extractor TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE document_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    area TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    source_path TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(doc_id, area, filename)
+                );
+                INSERT INTO documents VALUES
+                    ('d1', 'hash', 't', 3, 'hash', '2026-01-01', 'markdown');
+                INSERT INTO document_sources
+                    (doc_id, area, filename, source_path, created_at)
+                    VALUES ('d1', 'personal', 'a.txt', '/vault/a.txt', '2026-01-01');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = SqliteStore(db)
+            try:
+                source = store.document_source("d1")
+            finally:
+                store.close()
+        assert source is not None
+        self.assertEqual(source["source_path"], "/vault/a.txt")
+        self.assertEqual(source["container_path"], "")
+        self.assertEqual(source["container_entries"], [])
+
+    def test_migrate_renames_entries_column(self):
+        """Промежуточное имя ``entries`` переименовывается, данные сохраняются."""
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "old.sqlite"
+            conn = sqlite3.connect(str(db))
+            conn.executescript(
+                """
+                CREATE TABLE documents (
+                    id TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL UNIQUE,
+                    title TEXT,
+                    char_count INTEGER NOT NULL,
+                    text_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    extractor TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE document_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    area TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    source_path TEXT NOT NULL DEFAULT '',
+                    container_path TEXT NOT NULL DEFAULT '',
+                    entries TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(doc_id, area, filename)
+                );
+                INSERT INTO documents VALUES
+                    ('d1', 'hash', 't', 3, 'hash', '2026-01-01', 'markdown');
+                INSERT INTO document_sources
+                    (doc_id, area, filename, source_path, container_path,
+                     entries, created_at)
+                    VALUES ('d1', 'personal', 'a.zip/x.md', '/vault/a.zip/x.md',
+                            '/vault/a.zip', '["x.md"]', '2026-01-01');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = SqliteStore(db)
+            try:
+                source = store.document_source("d1")
+            finally:
+                store.close()
+        assert source is not None
+        self.assertEqual(source["container_path"], "/vault/a.zip")
+        self.assertEqual(source["container_entries"], ["x.md"])
 
     def test_embeddings_roundtrip(self):
         self._save()

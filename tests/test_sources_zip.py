@@ -1,4 +1,4 @@
-"""Тесты архивного контейнера: zip/7z/tar/gz, часть на запись, вложенность 1.
+"""Тесты архивного контейнера: zip/7z/tar/gz, часть на запись, вложенность.
 
 Записи архива классифицируются по содержимому (резолвер ``entry_resolver``),
 расширение записи — лишь хинт для неразличимых типов.
@@ -113,6 +113,9 @@ class ArchiveExtractorTest(unittest.TestCase):
         self.assertEqual(by_name["notes/one.md"].tags, ("python",))
         self.assertEqual(by_name["two.txt"].text, "второй файл")
         self.assertTrue(all(part.error is None for part in parts))
+        # явный разбор пути: контейнер + цепочка записей (не разбор source_path)
+        self.assertEqual(by_name["notes/one.md"].container_path, str(path))
+        self.assertEqual(by_name["notes/one.md"].container_entries, ("notes/one.md",))
 
     def test_zip_unsupported_entries_skipped(self):
         # .bin с реально бинарным содержимым (NUL — не текст) пропускается;
@@ -197,7 +200,7 @@ class ArchiveExtractorTest(unittest.TestCase):
         self.assertEqual(len(parts), 1)
         self.assertIn("persinder[archiverar]", parts[0].error or "")
 
-    # --- вложенность: ровно один уровень ---
+    # --- вложенность (рекурсивно, с лимитом) ---
 
     def test_nested_zip_expanded_one_level(self):
         nested = io.BytesIO()
@@ -212,9 +215,13 @@ class ArchiveExtractorTest(unittest.TestCase):
         self.assertEqual(set(by_name), {"inner.zip/secret.md", "ok.md"})
         self.assertIn("секрет вложенного архива", by_name["inner.zip/secret.md"].text)
         self.assertIn("внешний текст", by_name["ok.md"].text)
+        # разбор вложенной части: контейнер верхнего уровня + цепочка записей
+        nested_part = by_name["inner.zip/secret.md"]
+        self.assertEqual(nested_part.container_path, str(path))
+        self.assertEqual(nested_part.container_entries, ("inner.zip", "secret.md"))
 
-    def test_nested_depth_two_not_expanded(self):
-        # zip → zip → zip: третий уровень не раскрывается
+    def test_nested_depth_two_expanded(self):
+        # zip → zip → zip: раскрываем рекурсивно, а не на один уровень
         level2 = io.BytesIO()
         with zipfile.ZipFile(level2, "w") as z2:
             z2.writestr("deep.txt", "глубокий текст")
@@ -225,9 +232,65 @@ class ArchiveExtractorTest(unittest.TestCase):
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("mid.zip", level1.getvalue())
         parts = self.ext.extract_all(path, self.resolver)
-        # mid.zip раскрыт (уровень 2: deep.zip доступен как запись); deep.zip —
-        # это уровень 3: не раскрывается, а как не-текстовая запись — без частей
-        self.assertEqual(parts, [])
+        self.assertEqual(self._names(parts), ["mid.zip/mid.zip/deep.txt"])
+        self.assertEqual(parts[0].container_entries, ("mid.zip", "mid.zip", "deep.txt"))
+        self.assertIn("глубокий текст", parts[0].text)
+
+    def test_nested_depth_limit_gives_error_part(self):
+        # архивов больше, чем ARCHIVE_MAX_DEPTH: самый глубокий не раскрывается
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, "w") as inner:
+            inner.writestr("deep.txt", "не должны сюда дойти")
+        for level in range(extract_module.ARCHIVE_MAX_DEPTH + 1):
+            outer = io.BytesIO()
+            with zipfile.ZipFile(outer, "w") as archive:
+                archive.writestr(f"l{level}.zip", payload.getvalue())
+            payload = outer
+        path = self.root / "deep.zip"
+        path.write_bytes(payload.getvalue())
+        parts = self.ext.extract_all(path, self.resolver)
+        self.assertEqual(len(parts), 1)
+        self.assertIsNotNone(parts[0].error)
+        assert parts[0].error is not None
+        self.assertIn("глубина вложенности", parts[0].error)
+        self.assertEqual(
+            parts[0].container_entries,
+            tuple(
+                f"l{level}.zip"
+                for level in range(extract_module.ARCHIVE_MAX_DEPTH, -1, -1)
+            ),
+        )
+
+    def test_multi_extractor_names_do_not_leak_into_container_entries(self):
+        class DupOne(BaseExtractor):
+            name = "dup1"
+            format_class = "text"
+
+            def suffixes(self) -> frozenset[str]:
+                return frozenset({".duo"})
+
+            def extract(self, path: Path) -> Extracted:
+                return Extracted(text="первый", extractor=self.name)
+
+        class DupTwo(BaseExtractor):
+            name = "dup2"
+            format_class = "text"
+
+            def suffixes(self) -> frozenset[str]:
+                return frozenset({".duo"})
+
+            def extract(self, path: Path) -> Extracted:
+                return Extracted(text="второй", extractor=self.name)
+
+        resolver = _resolver(self.root, (DupOne(), DupTwo()))
+        path = self.root / "a.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            # бинарное содержимое: классификатор молчит, решают расширения
+            archive.writestr("note.duo", bytes([0, 1, 2, 255]) * 8)
+        parts = self.ext.extract_all(path, resolver)
+        self.assertEqual(self._names(parts), ["note.duo/dup1", "note.duo/dup2"])
+        # entries — только реальная цепочка записей, без имени экстрактора
+        self.assertTrue(all(part.container_entries == ("note.duo",) for part in parts))
 
     def test_nested_tar_inside_zip(self):
         buf = io.BytesIO()

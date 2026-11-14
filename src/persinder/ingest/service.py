@@ -136,6 +136,8 @@ class IngestService:
         text = request.text or ""
         area = request.area.value
         source_path = request.source_path or ""
+        container_path = request.container_path or ""
+        container_entries = tuple(request.container_entries)
         # Модели этой записи: область могла выбрать свою или выключить семантику;
         # None — глобальные модели профиля (старое поведение).
         models = (
@@ -174,7 +176,12 @@ class IngestService:
                 filename=request.filename,
             )
             evicted = self._store.add_source(
-                existing, area, request.filename, source_path=source_path
+                existing,
+                area,
+                request.filename,
+                source_path=source_path,
+                container_path=container_path,
+                container_entries=container_entries,
             )
             self._drop_texts(evicted)
             self._drop_sidecars(evicted, previous, source_path, existing)
@@ -250,6 +257,8 @@ class IngestService:
             chunks,
             jobs,
             source_path=source_path,
+            container_path=container_path,
+            container_entries=container_entries,
         )
         self._drop_texts(evicted)
         self._drop_sidecars(evicted, previous, source_path, doc_id)

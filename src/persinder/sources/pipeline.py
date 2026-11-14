@@ -170,7 +170,9 @@ class IndexingPipeline:
             # архив — часть пути, поэтому source_path = полный виртуальный путь с
             # архивом как каталогом (в т.ч. для вложенных архивов). Сайдкар затем
             # идёт в .persinder/<модель>/<архив>/... (см. sidecar_path).
-            source_path = str(area.path / rel_path)
+            # Сам разбор пути (контейнер + цепочка записей) едет в IngestRequest
+            # отдельно: source_path — человекочитаемый, но не источник истины.
+            source_path = part.container_path or str(area.path / rel_path)
             if part.name:
                 source_path = f"{source_path}/{part.name}"
             outcome = self._ingest.ingest(
@@ -180,6 +182,8 @@ class IndexingPipeline:
                     text=part.text,
                     source_path=source_path,
                     extractor=part.extractor or None,
+                    container_path=part.container_path,
+                    container_entries=part.container_entries,
                     embedding_models=queue_models_for(
                         area, semantic_enabled=self._semantic
                     ),

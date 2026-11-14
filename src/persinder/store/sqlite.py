@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import cast
 
 from ..domain import Chunk, Document, EmbeddingJob, utcnow
 from .models import (
@@ -38,6 +40,8 @@ CREATE TABLE IF NOT EXISTS document_sources (
     area        TEXT NOT NULL,
     filename    TEXT NOT NULL,
     source_path TEXT NOT NULL DEFAULT '',
+    container_path TEXT NOT NULL DEFAULT '',
+    container_entries TEXT NOT NULL DEFAULT '[]',
     created_at  TEXT NOT NULL,
     UNIQUE(doc_id, area, filename)
 );
@@ -93,6 +97,24 @@ CREATE TABLE IF NOT EXISTS embeddings (
 """
 
 
+def _container_entries_json(entries: Sequence[str] | None) -> str:
+    """Цепочка записей → JSON для ``document_sources.container_entries``."""
+    return json.dumps(list(entries or ()), ensure_ascii=False)
+
+
+def _parse_container_entries(raw: object) -> list[str]:
+    """JSON из ``document_sources.container_entries`` → список (битое → [])."""
+    if not raw:
+        return []
+    try:
+        value = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in cast("list[object]", value)]
+
+
 class SqliteStore:
     """Реализация MetaStore на SQLite (см. ``interfaces.MetaStore``)."""
 
@@ -107,10 +129,22 @@ class SqliteStore:
 
     def _migrate(self) -> None:
         """Добавить новые колонки в существующие базы (прототип, без версий)."""
-        for table, column in (
-            ("document_sources", "source_path"),
-            ("embedding_queue", "source_path"),
-            ("documents", "extractor"),
+        # T3: промежуточное имя колонки было ``entries`` — переименовываем.
+        source_cols = [
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(document_sources)")
+        ]
+        if "entries" in source_cols and "container_entries" not in source_cols:
+            self._conn.execute(
+                "ALTER TABLE document_sources"
+                " RENAME COLUMN entries TO container_entries"
+            )
+        for table, column, default in (
+            ("document_sources", "source_path", "''"),
+            ("document_sources", "container_path", "''"),
+            ("document_sources", "container_entries", "'[]'"),
+            ("embedding_queue", "source_path", "''"),
+            ("documents", "extractor", "''"),
         ):
             cols = [
                 str(row["name"])
@@ -118,7 +152,8 @@ class SqliteStore:
             ]
             if column not in cols:
                 self._conn.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    f"ALTER TABLE {table} ADD COLUMN {column}"
+                    f" TEXT NOT NULL DEFAULT {default}"
                 )
         self._migrate_queue_model()
         self._migrate_embeddings_id()
@@ -207,7 +242,8 @@ class SqliteStore:
         """
         with self._lock:
             row = self._conn.execute(
-                "SELECT d.id, d.content_hash, d.extractor, s.source_path "
+                "SELECT d.id, d.content_hash, d.extractor, s.source_path,"
+                " s.container_path, s.container_entries "
                 "FROM documents d "
                 "LEFT JOIN document_sources s ON s.doc_id = d.id "
                 "WHERE d.id = ? "
@@ -222,6 +258,8 @@ class SqliteStore:
             content_hash=str(row["content_hash"]),
             extractor=str(row["extractor"]),
             source_path=str(row["source_path"]),
+            container_path=str(row["container_path"]),
+            container_entries=_parse_container_entries(row["container_entries"]),
         )
 
     def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]:
@@ -362,7 +400,13 @@ class SqliteStore:
     # --- запись ---
 
     def _bind_source(
-        self, doc_id: str, area: str, filename: str, source_path: str
+        self,
+        doc_id: str,
+        area: str,
+        filename: str,
+        source_path: str,
+        container_path: str = "",
+        container_entries: Sequence[str] = (),
     ) -> list[str]:
         """Закрепить ``(area, filename)`` за ``doc_id``, вытеснив прежний документ.
 
@@ -393,20 +437,42 @@ class SqliteStore:
                 evicted.append(old_id)
         self._conn.execute(
             "INSERT INTO document_sources"
-            "(doc_id, area, filename, source_path, created_at) VALUES (?, ?, ?, ?, ?)"
-            " ON CONFLICT(doc_id, area, filename) DO UPDATE SET source_path ="
-            " CASE WHEN excluded.source_path != '' THEN excluded.source_path"
-            " ELSE document_sources.source_path END",
-            (doc_id, area, filename, source_path, utcnow()),
+            "(doc_id, area, filename, source_path, container_path,"
+            " container_entries, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(doc_id, area, filename) DO UPDATE SET"
+            " source_path = CASE WHEN excluded.source_path != ''"
+            "   THEN excluded.source_path ELSE document_sources.source_path END,"
+            " container_path = CASE WHEN excluded.container_path != ''"
+            "   THEN excluded.container_path ELSE document_sources.container_path END,"
+            " container_entries = CASE WHEN excluded.container_entries != '[]'"
+            "   THEN excluded.container_entries"
+            "   ELSE document_sources.container_entries END",
+            (
+                doc_id,
+                area,
+                filename,
+                source_path,
+                container_path,
+                _container_entries_json(container_entries),
+                utcnow(),
+            ),
         )
         return evicted
 
     def add_source(
-        self, doc_id: str, area: str, filename: str, source_path: str = ""
+        self,
+        doc_id: str,
+        area: str,
+        filename: str,
+        source_path: str = "",
+        container_path: str = "",
+        container_entries: Sequence[str] = (),
     ) -> list[str]:
         """Закрепить источник; вернуть id вытесненных документов (для чистки текста)."""
         with self._lock, self._conn:
-            return self._bind_source(doc_id, area, filename, source_path)
+            return self._bind_source(
+                doc_id, area, filename, source_path, container_path, container_entries
+            )
 
     def has_source(self, area: str, filename: str) -> bool:
         """Есть ли в индексе источник ``(area, filename)``."""
@@ -497,12 +563,15 @@ class SqliteStore:
         chunks: list[Chunk],
         jobs: list[EmbeddingJob],
         source_path: str = "",
+        container_path: str = "",
+        container_entries: Sequence[str] = (),
     ) -> list[str]:
         """Атомарно записать документ, источник, чанки (с FTS5) и очередь.
 
         Прежний документ того же файла ``(area, filename)`` вытесняется
-        (см. ``_bind_source``). Возвращает id вытесненных документов, чтобы
-        вызывающий удалил их сырой текст и сайдкары.
+        (см. ``_bind_source``). ``container_path`` + ``container_entries`` —
+        явный разбор пути для части архива. Возвращает id вытесненных
+        документов, чтобы вызывающий удалил их сырой текст и сайдкары.
         """
         with self._lock, self._conn:
             self._conn.execute(
@@ -520,7 +589,14 @@ class SqliteStore:
                     doc.extractor,
                 ),
             )
-            evicted = self._bind_source(doc.id, area, filename, source_path)
+            evicted = self._bind_source(
+                doc.id,
+                area,
+                filename,
+                source_path,
+                container_path,
+                container_entries,
+            )
             for chunk in chunks:
                 cur = self._conn.execute(
                     "INSERT INTO chunks(doc_id, chunk_index, char_start, char_end) "
