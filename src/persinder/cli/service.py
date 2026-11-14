@@ -16,7 +16,7 @@ from ..embed import (
 from ..ingest import IngestJournal, IngestService
 from ..morphology import default_stemmer
 from ..search import SearchService
-from ..sources import AreaConfig, queue_models_for
+from ..sources import AreaConfig, ExtractorRegistry, default_registry, queue_models_for
 from ..store import SqliteStore
 from ..textstore import FsTextStore
 from ..vectorindex import ModelScope, VectorSearch
@@ -150,6 +150,7 @@ def build_service(
 def build_embed_worker(
     settings: Settings,
     log: IndexLog | None = None,
+    registry: ExtractorRegistry | None = None,
 ) -> tuple[EmbedWorker, SqliteStore, str]:
     """Собрать воркер эмбеддингов; вернуть (воркер, сторе, подпись моделей).
 
@@ -157,6 +158,9 @@ def build_embed_worker(
     могут встретиться задачи разных моделей (миграция, D24) — у каждой свой
     сайдкар. Заглушка placeholder-v1 встроена; реальная e5-small берётся из
     ``models_dir/<ключ>/``, если установлена.
+
+    ``registry`` нужен фолбэку: если текста нет в кэше, воркер перечитывает
+    оригинал и сверяет хэш (D26). По умолчанию — стандартный набор экстракторов.
     """
     store = SqliteStore(settings.db_path)
     textstore = FsTextStore(settings.text_dir)
@@ -169,6 +173,7 @@ def build_embed_worker(
         virtual_dir=settings.virtual_dir,
         ann_dir=settings.ann_dir,
         log=log,
+        registry=registry if registry is not None else default_registry(),
     )
     return worker, store, describe_models(settings)
 

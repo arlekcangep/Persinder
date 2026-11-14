@@ -10,6 +10,7 @@ from pathlib import Path
 from ..api import IndexLog
 from ..config import Settings
 from ..embed import EmbedStats, EmbedWorker, load
+from ..sources import ExtractorRegistry
 from ..store import SqliteStore
 from .report import append_embed_error, format_embed, say
 from .service import build_embed_worker
@@ -18,9 +19,16 @@ from .service import build_embed_worker
 class EmbedRunner:
     """Воркер эмбеддингов профиля: проход по очереди и фоновый цикл."""
 
-    def __init__(self, settings: Settings, log: IndexLog | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        log: IndexLog | None = None,
+        registry: ExtractorRegistry | None = None,
+    ) -> None:
         self.settings = settings
-        self.worker, self.store, self.label = build_embed_worker(settings, log)
+        self.worker, self.store, self.label = build_embed_worker(
+            settings, log, registry
+        )
         self.log_path = settings.home / "embed_errors.log"
 
     def close(self) -> None:

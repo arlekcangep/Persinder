@@ -22,7 +22,7 @@ class Settings:
 
     @property
     def text_dir(self) -> Path:
-        """Временный каталог для сырого текста до подсчёта эмбеддингов."""
+        """Кэш сырого текста (``pending_texts``, D26)."""
         return self.home / "pending_texts"
 
     @property

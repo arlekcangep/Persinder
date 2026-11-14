@@ -25,6 +25,7 @@ from persinder.embed import (
 from persinder.ingest import IngestRequest, IngestService
 from persinder.interfaces import Embedder
 from persinder.morphology import NoopStemmer
+from persinder.sources import ExtractorRegistry, default_registry
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
 from persinder.vectorindex import UsannIndex
@@ -57,6 +58,7 @@ class EmbedWorkerTest(unittest.TestCase):
         embedder: Embedder | None = None,
         ann_dir: Path | None = None,
         log: IndexLog | None = None,
+        registry: ExtractorRegistry | None = None,
     ) -> EmbedWorker:
         embedder = embedder if embedder is not None else self.embedder
 
@@ -73,13 +75,14 @@ class EmbedWorkerTest(unittest.TestCase):
             virtual_dir=self.virtual,
             ann_dir=ann_dir,
             log=log,
+            registry=registry,
         )
 
     def tearDown(self):
         self.store.close()
         self._tmp.cleanup()
 
-    def _file(self, name: str, text: str) -> Path:
+    def _file(self, name: str, text: str, extractor: str | None = None) -> Path:
         path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
@@ -89,6 +92,7 @@ class EmbedWorkerTest(unittest.TestCase):
                 area=Area.PERSONAL,
                 text=text,
                 source_path=str(path),
+                extractor=extractor,
             )
         )
         return path
@@ -312,6 +316,68 @@ class EmbedWorkerTest(unittest.TestCase):
         self.assertEqual(stats.skipped, 1)
         self.assertEqual(stats.docs, 0)
         self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_fallback_reads_original_when_text_missing(self):
+        """D26: текста нет в кэше — воркер перечитывает оригинал (хэш сходится)."""
+        text = "заметка про квантовый флакс"
+        src = self._file("books/one.md", text, extractor="markdown")
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        worker = self._worker(registry=default_registry())
+        self.assertTrue(self.textstore.exists(doc_id))
+        self.textstore.delete(doc_id)
+
+        stats = worker.run_once(limit=10)
+
+        self.assertEqual((stats.docs, stats.sidecars, stats.skipped), (1, 1, 0))
+        self.assertIsNotNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_fallback_drops_queue_when_source_changed(self):
+        """Оригинал изменился: текст не тот, из которого нарезаны чанки, —
+        задачи снимаются, в старый ``doc_id`` ничего не пишется."""
+        text = "первая версия текста"
+        src = self._file("books/one.md", text, extractor="markdown")
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        worker = self._worker(registry=default_registry())
+        self.textstore.delete(doc_id)
+        src.write_text("совсем другой текст", encoding="utf-8")
+
+        stats = worker.run_once()
+
+        self.assertEqual((stats.docs, stats.skipped), (0, 1))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+        self.assertIsNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
+
+    def test_fallback_cannot_reread_container_part(self):
+        """Часть контейнера (``arch.zip/inner.md``) на диске не существует:
+        перечитать нельзя — задачи снимаются (такие части обязаны кэшироваться)."""
+        text = "запись внутри архива"
+        self.ingest.ingest(
+            IngestRequest(
+                filename="arch.zip/inner.md",
+                area=Area.PERSONAL,
+                text=text,
+                source_path=str(self.root / "arch.zip/inner.md"),
+                extractor="markdown",
+            )
+        )
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        worker = self._worker(registry=default_registry())
+        self.textstore.delete(doc_id)
+
+        stats = worker.run_once()
+
+        self.assertEqual((stats.docs, stats.skipped), (0, 1))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_fallback_without_registry_drops_queue(self):
+        """Без реестра (старая сборка/тесты) поведение прежнее: сироты снимаются."""
+        text = "текст без реестра"
+        src = self._file("books/one.md", text)
+        self.textstore.delete(hashlib.sha256(text.encode("utf-8")).hexdigest())
+        stats = self.worker.run_once()
+        self.assertEqual((stats.docs, stats.skipped), (0, 1))
+        self.assertIsNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
 
     def test_second_run_is_idle(self):
         self._file("books/one.md", "текст для проверки идемпотентности")

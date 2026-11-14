@@ -118,7 +118,7 @@ class ServeRunner:
         self.ingest, self.search, self.store = ingest, search, store
 
         if self.watch.semantic:
-            self.embed = EmbedRunner(settings, self.log)
+            self.embed = EmbedRunner(settings, self.log, registry=self.registry)
             self.embed_label = self.embed.label
         else:
             self.embed_label = (

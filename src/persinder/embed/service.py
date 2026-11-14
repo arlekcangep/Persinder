@@ -1,10 +1,18 @@
 """Воркер эмбеддингов: очередь → векторы → сайдкары (+ ANN-индекс).
 
 ``EmbedWorker`` разбирает ``embedding_queue``: берёт порцию задач, группирует
-по документу, читает сырой текст из ``TextStore``, нарезает теми же чанками,
-что и ``ingest``, считает векторы через эмбеддер нужной модели и пишет сайдкар
-(§7) атомарно. Сайдкар — кэш: его отсутствие не страшно, векторы просто
-считаются снова.
+по документу, читает сырой текст из ``TextStore`` (``pending_texts`` — это и
+есть кэш поиска, D26; отдельного «временного» хранилища нет), нарезает теми же
+чанками, что и ``ingest``, считает векторы через эмбеддер нужной модели и
+пишет сайдкар (§7) атомарно. Сайдкар — кэш: его отсутствие не страшно, векторы
+просто считаются снова.
+
+Текст берётся из кэша; если файла там нет (крэш, ручная чистка, старый
+профиль) — фолбэк: перечитать оригинал экстрактором (как ``TextResolver`` при
+поиске) и сверить `sha256` с ``documents.content_hash``. Не сошлось или
+перечитать нельзя (виртуальный документ, часть контейнера) — задачи снимаются
+с предупреждением в журнале: индексировать изменившийся файл в старый ``doc_id``
+нельзя.
 
 Задачи привязаны к модели (``embedding_queue.model``): у файла могут
 одновременно жить сайдкары нескольких моделей (D24). Эмбеддер подбирается
@@ -39,6 +47,7 @@ from .sidecar import (
 )
 
 if TYPE_CHECKING:
+    from ..sources.extract import ExtractorRegistry
     from ..store.models import EmbeddingQueueItem
 
 # Сколько недостающих чанков документа считаем и пишем за одну порцию. Весь
@@ -95,6 +104,7 @@ class EmbedWorker:
         virtual_dir: Path | None = None,
         ann_dir: Path | None = None,
         log: IndexLog | None = None,
+        registry: ExtractorRegistry | None = None,
     ) -> None:
         self._store = store
         self._textstore = textstore
@@ -104,6 +114,9 @@ class EmbedWorker:
         self._virtual_dir = Path(virtual_dir) if virtual_dir else None
         self._ann_dir = Path(ann_dir) if ann_dir else None
         self._log = log
+        # Реестр — только для фолбэка: перечитать оригинал, когда текста нет в
+        # кэше (D26). Без него воркер работает как раньше: сироты снимаются.
+        self._registry = registry
         self._indices: dict[str, UsannIndex] = {}
         # Эмбеддеры кэшируются по модели: ONNX-сессия (веса ~100 МБ) создаётся
         # один раз, а не на каждый документ/проход. Иначе пересчёт сотен файлов
@@ -127,6 +140,46 @@ class EmbedWorker:
             index = UsannIndex(self._ann_dir / f"{model}.usearch", dim)
             self._indices[model] = index
         return index
+
+    # --- текст документа: кэш → оригинал (D26) ---
+
+    def _read_original(self, doc_id: str) -> tuple[str | None, str | None]:
+        """Фолбэк: перечитать оригинал экстрактором и проверить хэш.
+
+        Текст должен побайтно (по ``utf-8``) совпасть с тем, из которого
+        построены чанки: ``doc_id`` — это ``sha256`` текста. Не сошлось —
+        файл изменился (или экстрактор другой версии); такие задачи снимаются,
+        документ переиндексирует watcher. Части контейнеров
+        (``arch.zip/inner.md``) перечитать нельзя: их путь на диске не
+        существует — они обязаны кэшироваться.
+        """
+        if self._registry is None:
+            return None, "оригинал перечитать нечем: нет реестра экстракторов"
+        source = self._store.document_source(doc_id)
+        if source is None:
+            return None, "документа нет в базе"
+        if not source["source_path"]:
+            return None, "виртуальный документ: текста нет ни на диске, ни в кэше"
+        path = Path(source["source_path"])
+        if not path.is_file():
+            # Часть контейнера/архива: на диске лежит только сам контейнер.
+            return None, f"оригинал недоступен: {source['source_path']}"
+        extractor = self._registry.extractor_for(source["extractor"])
+        if extractor is None:
+            return None, f"экстрактор {source['extractor']!r} не найден"
+        try:
+            extracted = extractor.extract(path)
+        except (OSError, ValueError, NotImplementedError) as exc:
+            return None, f"ошибка чтения оригинала: {exc}"
+        if extracted.error or not extracted.text:
+            return None, f"ошибка извлечения: {extracted.error or 'пустой текст'}"
+        digest = hashlib.sha256(extracted.text.encode("utf-8")).hexdigest()
+        if digest != source["content_hash"]:
+            return None, (
+                "оригинал изменился (хэш текста не совпал с документом) — "
+                "нужна переиндексация"
+            )
+        return extracted.text, None
 
     def run_once(self, limit: int = 100) -> EmbedStats:
         """Обработать до ``limit`` задач очереди; вернуть итоги.
@@ -198,16 +251,27 @@ class EmbedWorker:
             )
 
         try:
-            text = self._textstore.read(doc_id)
+            text: str | None = self._textstore.read(doc_id)
+            source_error: str | None = None
         except FileNotFoundError:
-            # Документа нет (удалён/вытеснен), а задачи остались — это сироты.
+            # Кэш пуст (крэш, ручная чистка, старый профиль) — фолбэк на
+            # оригинал. Текст нужен тот же, из которого нарезаны чанки,
+            # поэтому _read_original сверяет хэш с документом (D26).
+            text, source_error = self._read_original(doc_id)
+            if text is not None and self._log is not None:
+                self._log.info(
+                    f"эмбеддинг: {label} — нет текста в кэше, перечитан оригинал",
+                    kind=KIND_EMBED,
+                )
+        if text is None:
             self._store.drop_queue_rows([int(row["id"]) for row in rows])
             stats.skipped += 1
             if self._log is not None:
                 left = self._store.counts()["pending_embeddings"]
+                reason = f"; {source_error}" if source_error else ""
                 self._log.warning(
-                    f"пропущен: {label} (нет текста, снято задач: {len(rows)},"
-                    f" в очереди: {left})",
+                    f"пропущен: {label} (нет текста{reason}, снято задач:"
+                    f" {len(rows)}, в очереди: {left})",
                     kind=KIND_EMBED,
                 )
             return

@@ -194,9 +194,9 @@ class ServeTest(unittest.TestCase):
         captured: dict[str, Any] = {}
         real_build = embedding_mod.build_embed_worker
 
-        def spy_build(settings: Settings, log: Any = None) -> Any:
+        def spy_build(settings: Settings, log: Any = None, registry: Any = None) -> Any:
             captured["embed_log"] = log
-            return real_build(settings, log)
+            return real_build(settings, log, registry)
 
         def fake_serve(
             ingest: Ingest,
