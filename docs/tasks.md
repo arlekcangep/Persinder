@@ -52,7 +52,8 @@
 - [x] Убрать `context` из `SearchResponse._hits_to_dict`; в хит добавлены
       `chunk_start`/`chunk_end` — символьные границы чанка из `chunks`
       (иначе клиенту не собрать запрос `/context`).
-- [x] `SearchHit.context` оставить в DTO (порт не ломать), но не заполнять.
+- [x] `SearchHit.context` убран из датакласса полностью — никто не читал
+      (в сети `context` тоже не отдаётся).
 - [x] `_enrich` переписан: только источник + спаны; мёртвые параметры
       конструктора `textstore`/`context_lines`/`context_sentences` убраны
       (call sites почищены).
