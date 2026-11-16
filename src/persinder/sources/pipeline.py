@@ -141,8 +141,13 @@ class IndexingPipeline:
         doc_ids: list[str] = []
         for part in usable:
             filename = self._part_name(rel_path, part)
-            # Части контейнера — виртуальные (на диске только сам архив).
-            source_path = str(area.path / rel_path) if not part.name else ""
+            # Части контейнера (архива) реально на диске только внутри архива;
+            # архив — часть пути, поэтому source_path = полный виртуальный путь с
+            # архивом как каталогом (в т.ч. для вложенных архивов). Сайдкар затем
+            # идёт в .persinder/<модель>/<архив>/... (см. sidecar_path).
+            source_path = str(area.path / rel_path)
+            if part.name:
+                source_path = f"{source_path}/{part.name}"
             outcome = self._ingest.ingest(
                 IngestRequest(
                     filename=filename,

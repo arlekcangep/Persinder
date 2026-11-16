@@ -18,12 +18,14 @@ from .embed import (
     ModelState,
     build_embedder,
     delete_model_sidecars,
+    file_sidecar_path,
     install,
     installed_keys,
     is_installed,
     load,
     remove_weights,
     save,
+    virtual_sidecar_path,
 )
 from .ingest import IngestJournal, IngestService, RecoveryStats
 from .morphology import default_stemmer
@@ -67,7 +69,12 @@ def build_service(
         search_model=models.search,
         ann_dir=settings.ann_dir,
     )
-    search = SearchService(store=store, stemmer=stemmer, vector_search=vector_search)
+    search = SearchService(
+        store=store,
+        stemmer=stemmer,
+        vector_search=vector_search,
+        textstore=textstore,
+    )
     return ingest, search, store
 
 
@@ -111,7 +118,7 @@ def run_watch(config_path: Path, home: Path | None) -> int:
     return 0
 
 
-def run_serve(config_path: Path, settings: Settings) -> int:
+def run_serve(config_path: Path, settings: Settings, reindex: bool = False) -> int:
     """Полный сервис: HTTP + watcher + эмбеддинги + восстановление после сбоев.
 
     Это единая точка запуска всех фоновых активностей:
@@ -122,6 +129,11 @@ def run_serve(config_path: Path, settings: Settings) -> int:
       (журнал считает «устроенными» только завершённые цепочки);
     * поток эмбеддингов — разбирает очередь в векторы/сайдкары, пока сервис жив;
     * HTTP-сервер блокирует главный поток до Ctrl+C.
+
+    При ``reindex=True`` журнал сбрасывается полностью (все файлы считаются
+    новыми): сервис пересканирует все области, ingest сверяет хэши содержимого
+    с базой (файл мог измениться, пока сервис был выключен) и под активную
+    модель ставится пересчёт всех источников — полная переиндексация.
     """
     settings.ensure()
     print(f"Home: {settings.home}", flush=True)
@@ -131,7 +143,41 @@ def run_serve(config_path: Path, settings: Settings) -> int:
     ingest, search, store = build_service(settings)
     embed_worker, embed_store, embed_label = build_embed_worker(settings)
 
+    models_state = load(settings.models_state_path)
+    if models_state.embedding != PLACEHOLDER and not is_installed(
+        settings.models_dir, models_state.embedding
+    ):
+        print(
+            f"ВНИМАНИЕ: активная модель {models_state.embedding} не установлена "
+            f"в {settings.models_dir} — сайдкары не будут считаться.\n"
+            f"Установи её: persinder model install {models_state.embedding}",
+            flush=True,
+        )
+
     journal = Journal(settings.home / "journal.jsonl")
+    if reindex:
+        journal_path = settings.home / "journal.jsonl"
+        if journal_path.exists():
+            journal_path.unlink()
+        print(
+            "Полная переиндексация: журнал сброшен, пересканируются все области. "
+            "Пересчёт эмбеддингов поставлен в очередь.",
+            flush=True,
+        )
+        journal = Journal(settings.home / "journal.jsonl")  # пустой, заново
+    # Под активную модель в очередь идут только источники без сайдкара:
+    # уже посчитанное заново не ставится — рестарт не перезаполняет очередь
+    # и не трогает файлы с сайдкарами. Проверка на каждом старте: после
+    # переключения модели или оборванного прогона досчёт случается и без
+    # полного ``--reindex``.
+    models = load(settings.models_state_path)
+
+    def _has_sidecar(model: str, doc_id: str, source_path: str) -> bool:
+        if source_path:
+            return file_sidecar_path(source_path, model).exists()
+        return virtual_sidecar_path(settings.virtual_dir, doc_id, model).exists()
+
+    store.enqueue_missing([models.embedding], _has_sidecar)
     dropped = journal.compact()
     if dropped:
         print(
@@ -163,13 +209,39 @@ def run_serve(config_path: Path, settings: Settings) -> int:
 
     watcher = Watcher(areas, watch, on_events, journal=journal)
     embed_thread = threading.Thread(
-        target=_embed_loop, args=(embed_worker, stop, kick), daemon=True, name="embed"
+        target=_embed_loop,
+        args=(
+            embed_worker,
+            stop,
+            kick,
+            5.0,
+            settings.home / "embed_errors.log",
+        ),
+        daemon=True,
+        name="embed",
     )
 
     print(
         f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с", flush=True
     )
     print(embed_label, flush=True)
+    print(
+        f"Очередь эмбеддингов при старте: {store.counts()['pending_embeddings']} задач",
+        flush=True,
+    )
+    print(
+        f"Ошибки эмбеддингов пишутся в {settings.home / 'embed_errors.log'}",
+        flush=True,
+    )
+    # Файл лога создаётся при каждом запуске — его наличие само по себе
+    # говорит, что сервис дошёл до фонового цикла. Если файла нет, запуск
+    # упал раньше (конфиг, импорт, OOM) — тогда смотри вывод run.sh.
+    _append_embed_error(
+        settings.home / "embed_errors.log",
+        "запуск: активная модель эмбеддингов "
+        f"{load(settings.models_state_path).embedding}, "
+        f"очередь {store.counts()['pending_embeddings']} задач",
+    )
     watcher.start()
     embed_thread.start()
     print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)
@@ -270,11 +342,27 @@ def _drain(worker: EmbedWorker, limit: int) -> EmbedStats:
     return total
 
 
+def _append_embed_error(log_path: Path | None, message: str) -> None:
+    """Дописать строку ошибки в ``<home>/embed_errors.log`` (best-effort).
+
+    Лог нужен, чтобы сбой был виден после факта: пользователь не сидит у
+    консоли, а отсутствие папки/сайдкара замечает позже.
+    """
+    if log_path is None:
+        return
+    try:
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except OSError:
+        pass  # лог не должен ронять сервис
+
+
 def _embed_loop(
     worker: EmbedWorker,
     stop: threading.Event,
     kick: threading.Event,
     interval: float = 5.0,
+    log_path: Path | None = None,
 ) -> None:
     """Фоновый разбор очереди эмбеддингов, пока сервис жив.
 
@@ -282,17 +370,23 @@ def _embed_loop(
     без паузы, на пустой очереди — пауза ``interval``. ``kick`` будит цикл сразу
     после индексации (иначе новые документы ждали бы тика). Ошибка одного
     прохода не валит сервис: задачи остаются в очереди и уходят в следующий тик.
+    Ошибки дублируются в ``log_path`` (``<home>/embed_errors.log``).
     """
     while not stop.is_set():
         try:
             stats = worker.run_once(100)
         except Exception as exc:  # noqa: BLE001 — сервис не должен падать
-            print(f"Embed: ошибка прохода: {exc}", flush=True)
+            message = f"ошибка прохода: {exc}"
+            print(f"Embed: {message}", flush=True)
+            _append_embed_error(log_path, message)
             kick.wait(interval)
             kick.clear()
             continue
         if stats.docs or stats.skipped or stats.errors:
             print(format_embed(stats), flush=True)
+            for message in stats.messages[:10]:
+                print(f"Embed: {message}", flush=True)
+                _append_embed_error(log_path, message)
         if stats.docs == 0:
             kick.wait(interval)
             kick.clear()
@@ -526,6 +620,12 @@ def main(argv: list[str] | None = None) -> int:
     serve_p.add_argument("--home", type=Path, default=default_home, help=home_help)
     serve_p.add_argument("--host", default=None)
     serve_p.add_argument("--port", type=int, default=None)
+    serve_p.add_argument(
+        "--reindex",
+        action="store_true",
+        help="полная переиндексация: сбросить журнал, пересканировать все области "
+        "и пересчитать все эмбеддинги при старте",
+    )
 
     watch_p = sub.add_parser("watch", help="следить за областями и индексировать")
     watch_p.add_argument("--config", type=Path, required=True, help="YAML-конфиг")
@@ -656,7 +756,7 @@ def _serve_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
                 print(f"Конфиг не задан — использую {config_path}", flush=True)
                 break
     if config_path is not None:
-        return run_serve(config_path, settings)
+        return run_serve(config_path, settings, getattr(args, "reindex", False))
 
     # Конфига нет ни явного, ни в папке запуска/home — деградация до HTTP-only:
     # watcher/эмбеддинги не знают областей.

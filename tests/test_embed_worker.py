@@ -6,6 +6,7 @@ import hashlib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from persinder.domain import Area
 from persinder.embed import (
@@ -13,6 +14,7 @@ from persinder.embed import (
     PlaceholderEmbedder,
     file_sidecar_path,
     read_sidecar,
+    sidecar_path,
     unpack_f16_vectors,
     virtual_sidecar_path,
 )
@@ -157,6 +159,81 @@ class EmbedWorkerTest(unittest.TestCase):
         self.assertEqual(reopened.keys(), live)
         self.assertEqual(reopened.size, 1)
 
+    def test_ann_failure_does_not_block_sidecar(self):
+        """Сайдкар — источник правды: сбой ANN (add) не мешает записать сайдкар
+        и снять задачи с очереди — иначе документ пересчитывался бы вечно."""
+        ann_dir = self.data / "ann"
+        ann_dir.mkdir()
+        worker = self._worker(ann_dir=ann_dir)
+        src = self._file("books/one.md", "заметка про квантовый флакс")
+        with mock.patch(
+            "persinder.vectorindex.UsannIndex.add",
+            side_effect=RuntimeError("index exploded"),
+        ):
+            stats = worker.run_once(limit=10)
+        self.assertEqual((stats.docs, stats.sidecars), (1, 1))
+        self.assertEqual(stats.errors, 1)
+        self.assertTrue(any("ANN" in m for m in stats.messages))
+        data = read_sidecar(file_sidecar_path(src, "placeholder-v1"))
+        self.assertIsNotNone(data)
+        # очередь опустела: задача снята, несмотря на падение ANN
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_skip_already_embedded_chunks(self):
+        """Чанки, уже лежащие в таблице embeddings, повторно не считаются:
+        упавший прогон оставил векторы без сайдкара — следующий проход берёт
+        их из БД и считает только недостающие (иначе каждый рестарт после
+        обрыва пересчитывал бы всё заново)."""
+
+        class CountingEmbedder(PlaceholderEmbedder):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+                self.texts = 0
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                self.calls += 1
+                self.texts += len(texts)
+                return super().embed(texts)
+
+        counting = CountingEmbedder()
+        worker = self._worker(embedder=counting)
+        text = "очень длинный текст про векторный поиск, эмбеддинги и память. " * 60
+        src = self._file("books/one.md", text)
+        stats = worker.run_once(limit=10)
+        self.assertEqual(stats.docs, 1)
+        self.assertGreater(counting.texts, 1, "текст действительно на несколько чанков")
+
+        # эмулируем упавший прогон: векторы в БД есть, сайдкара нет,
+        # задачи снова в очереди
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        file_sidecar_path(src, "placeholder-v1").unlink()
+        self.store.enqueue_document(
+            doc_id, Area.PERSONAL.value, str(src), models=["placeholder-v1"]
+        )
+        counting.calls = 0
+        stats2 = worker.run_once(limit=10)
+        self.assertEqual(stats2.docs, 1)
+        self.assertEqual(counting.calls, 0, "ни один чанк не пересчитывался")
+        self.assertIsNotNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_corrupt_ann_file_rebuilt_without_losing_sidecar(self):
+        """Битый .usearch (обрыв прошлого прогона) не зацикливает документ:
+        воркер чинит индекс с нуля, сайдкар пишется, задачи снимаются."""
+        ann_dir = self.data / "ann"
+        ann_dir.mkdir()
+        bad = ann_dir / "placeholder-v1.usearch"
+        bad.write_bytes(b"corrupt leftovers from a crashed run" * 8)
+        worker = self._worker(ann_dir=ann_dir)
+        src = self._file("books/one.md", "заметка про квантовый флакс")
+        stats = worker.run_once(limit=10)
+        self.assertEqual((stats.docs, stats.sidecars, stats.errors), (1, 1, 0))
+        self.assertIsNotNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+        rebuilt = UsannIndex(bad, self.embedder.dim)
+        self.assertEqual(rebuilt.size, 1)
+
     def test_virtual_sidecar_in_virtual_dir(self):
         text = "вставленный текст без файла на диске"
         outcome = self.ingest.ingest(
@@ -172,6 +249,39 @@ class EmbedWorkerTest(unittest.TestCase):
         )
         # рядом с файлом сайдкара нет — файла нет
         self.assertEqual(list(self.root.glob("**/.persinder")), [])
+
+    def test_archive_part_sidecar_in_archive_folder(self):
+        """Часть архива: source_path = полный виртуальный путь, сайдкар в
+        .persinder/<модель>/<архив>/ папку; при удалении источника уходит вместе."""
+        container = self.root / "arch"
+        container.mkdir(parents=True, exist_ok=True)
+        zip_path = container / "bundle.zip"
+        zip_path.write_text("", encoding="utf-8")  # контейнер существует на диске
+        text = "внутренний документ архива про векторный поиск"
+        part_path = Path(zip_path) / "inner.md"
+        self.ingest.ingest(
+            IngestRequest(
+                filename="bundle.zip/inner.md",
+                area=Area.PERSONAL,
+                text=text,
+                source_path=str(part_path),
+            )
+        )
+        stats = self.worker.run_once(limit=10)
+        self.assertEqual((stats.docs, stats.sidecars, stats.errors), (1, 1, 0))
+
+        sidecar = sidecar_path(part_path, "placeholder-v1")
+        self.assertTrue(sidecar.exists(), f"нет сайдкара: {sidecar}")
+        # папка на архив внутри .persinder
+        self.assertEqual(
+            sidecar.parent,
+            container / ".persinder" / "placeholder-v1" / "bundle.zip",
+        )
+        # в глобальную virtual_dir не ушёл
+        self.assertEqual(list(self.virtual.glob("*.pdr")), [])
+
+        self.ingest.remove_source(Area.PERSONAL, "bundle.zip/inner.md")
+        self.assertFalse(sidecar.exists(), "сайдкар не удалён вместе с источником")
 
     def test_duplicate_gets_its_own_sidecar(self):
         text = "общий текст про котиков и васильки"
@@ -393,6 +503,85 @@ class EmbedWorkerTest(unittest.TestCase):
         self.assertEqual(stats.sidecars, 1)
         self.assertTrue(old.exists(), "старый сайдкар живёт, пока модель установлена")
         self.assertIsNotNone(read_sidecar(file_sidecar_path(src2, "placeholder-v2")))
+
+
+class EmbedWorkerRobustnessTest(unittest.TestCase):
+    """Устойчивость фонового воркера: кэш эмбеддера и изоляция ошибок."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.root = root
+        self.virtual = root / "virtual"
+        self.store = SqliteStore(root / "db.sqlite")
+        self.textstore = FsTextStore(root / "pending_texts")
+        self.ingest = IngestService(
+            self.store, self.textstore, NoopStemmer(), virtual_dir=self.virtual
+        )
+        self.good = PlaceholderEmbedder()
+
+    def tearDown(self):
+        self.store.close()
+        self._tmp.cleanup()
+
+    def _file(self, name: str, text: str) -> Path:
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        self.ingest.ingest(
+            IngestRequest(
+                filename=name,
+                area=Area.PERSONAL,
+                text=text,
+                source_path=str(path),
+            )
+        )
+        return path
+
+    def test_embedder_factory_called_once_per_model(self):
+        """Модель не перезагружается на каждый документ/проход (кэш)."""
+        calls: list[str] = []
+
+        def factory(model: str) -> Embedder:
+            calls.append(model)
+            return self.good
+
+        worker = EmbedWorker(
+            self.store, self.textstore, factory, virtual_dir=self.virtual
+        )
+        self._file("a.md", "первый документ про котиков")
+        self._file("b.md", "второй документ про собак")
+        worker.run_once(limit=10)
+        worker.run_once(limit=10)
+        self.assertEqual(calls, ["placeholder-v1"], "сессия модели — один раз")
+
+    def test_one_document_error_does_not_block_others(self):
+        """Падение одного документа не мешает посчитать остальные."""
+        boom = self._file("0boom.md", "этот документ взорвёт эмбеддер boom")
+        good = self._file("zgood.md", "обычный документ про спокойный флакс")
+
+        class BoomEmbedder(PlaceholderEmbedder):
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                if any("boom" in text for text in texts):
+                    raise RuntimeError("модель упала")
+                return super().embed(texts)
+
+        worker = EmbedWorker(
+            self.store,
+            self.textstore,
+            lambda model: BoomEmbedder(),
+            virtual_dir=self.virtual,
+        )
+        stats = worker.run_once(limit=10)
+        self.assertEqual(stats.errors, 1)
+        self.assertEqual(stats.docs, 1, "второй документ всё равно посчитан")
+        self.assertTrue(
+            read_sidecar(file_sidecar_path(good, "placeholder-v1")) is not None
+        )
+        self.assertFalse(
+            file_sidecar_path(boom, "placeholder-v1").exists(),
+            "у упавшего документа сайдкара нет",
+        )
 
 
 if __name__ == "__main__":

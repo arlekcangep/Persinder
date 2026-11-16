@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from persinder.domain import Area
+from persinder.embed import file_sidecar_path
 from persinder.ingest import IngestRequest, IngestResult, IngestService, chunk_text
 from persinder.morphology import NoopStemmer
 from persinder.store import SqliteStore
@@ -95,6 +96,97 @@ class IngestServiceTest(unittest.TestCase):
         self.assertEqual(result.status, IngestResult.INDEXED)
         self.assertGreater(result.chunks, 1)
         self.assertEqual(len(self.store.pending_embeddings(limit=1000)), result.chunks)
+
+
+class IngestDuplicateQueueTest(unittest.TestCase):
+    """Повторная встреча файла не пересчитывает уже готовые эмбеддинги.
+
+    Сайдкар — признак, что документ отработан под моделью для этого источника:
+    watcher на каждом проходе снова видит те же файлы, и без этой проверки
+    очередь пополнялась бы постоянным пересчётом.
+    """
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.vault = root / "vault"
+        self.vault.mkdir()
+        self.store = SqliteStore(root / "db.sqlite")
+        self.textstore = FsTextStore(root / "texts")
+        self.service = IngestService(
+            self.store,
+            self.textstore,
+            NoopStemmer(),
+            virtual_dir=root / "virtual",
+            embedding_models=("placeholder-v1",),
+        )
+
+    def tearDown(self):
+        self.store.close()
+        self._tmp.cleanup()
+
+    def _ingest(self, src: Path, text: str) -> IngestResult:
+        return self.service.ingest(
+            IngestRequest(
+                filename=src.name,
+                area=Area.PERSONAL,
+                text=text,
+                source_path=str(src),
+            )
+        )
+
+    def _fake_sidecar(self, src: Path) -> Path:
+        path = file_sidecar_path(src, "placeholder-v1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"sidecar")
+        return path
+
+    def test_sidecar_present_means_no_reenqueue(self):
+        text = "документ про повторную индексацию"
+        src = self.vault / "a.md"
+        self._ingest(src, text)
+        self.assertEqual(self.store.counts()["pending_embeddings"], 1)
+        # Воркер разобрал очередь и оставил сайдкар.
+        self.store.drop_queue_model("placeholder-v1")
+        self._fake_sidecar(src)
+
+        result = self._ingest(src, text)
+        self.assertEqual(result.status, IngestResult.ALREADY)
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_reingest_fills_empty_source_path(self):
+        """Старая запись без пути лечится: при повторной встрече путь пишется."""
+        src = self.vault / "a.md"
+        text = "документ, чей путь когда-то потерялся"
+        first = self.service.ingest(
+            IngestRequest(filename=src.name, area=Area.PERSONAL, text=text)
+        )
+        doc_id = first.document_id
+        assert doc_id is not None
+        self.assertEqual(self.store.source_path(Area.PERSONAL.value, src.name), "")
+
+        again = self._ingest(src, text)
+        self.assertEqual(again.status, IngestResult.ALREADY)
+        self.assertEqual(
+            self.store.source_path(Area.PERSONAL.value, src.name), str(src)
+        )
+
+    def test_new_source_without_sidecar_is_enqueued(self):
+        text = "общий текст двух копий"
+        first = self.vault / "a.md"
+        second = self.vault / "b.md"
+        self._ingest(first, text)
+        self.store.drop_queue_model("placeholder-v1")
+        self._fake_sidecar(first)
+
+        result = self._ingest(second, text)
+        self.assertEqual(result.status, IngestResult.ALREADY)
+        self.assertEqual(
+            self.store.counts()["pending_embeddings"],
+            1,
+            "у нового источника своего сайдкара нет — задача нужна",
+        )
+        self.assertFalse(file_sidecar_path(second, "placeholder-v1").exists())
 
 
 if __name__ == "__main__":

@@ -1,11 +1,18 @@
 """Сайдкары эмбеддингов: чтение и атомарная запись (§7).
 
-Один сайдкар на один исходный файл и **одну модель** —
-``.persinder/<модель>/<файл>.pdr`` рядом с источником (папка ``.persinder/``
-игнорируется индексацией и уезжает в Syncthing). У файла могут одновременно
-жить сайдкары нескольких моделей (миграция, D24). Для данных, которых на
-диске нет (web, вставленный текст), сайдкары живут в отдельной виртуальной
-папке: ``virtual_dir/<модель>/<doc_id>.pdr``.
+Один сайдкар на один исходный источник и **одну модель** — рядом с источником
+в его ``.persinder/<модель>/`` папке (папка ``.persinder/`` игнорируется
+индексацией и уезжает в Syncthing). У источника могут одновременно жить
+сайдкары нескольких моделей (миграция, D24). Для данных, которых на диске нет
+(web, вставленный текст), сайдкары живут в отдельной виртуальной папке:
+``virtual_dir/<модель>/<doc_id>.pdr``.
+
+Архив — просто часть пути (в т.ч. вложенные архивы), поэтому внутри
+``.persinder`` заводится папка на архив, а не плоское имя:
+
+  реальный файл  a/note.md          → a/.persinder/<модель>/note.md.pdr
+  часть архива   a/arc.zip/inner.md → a/.persinder/<модель>/arc.zip/inner.md.pdr
+  вложенность    a/o.zip/i.zip/x.md → a/.persinder/<модель>/o.zip/i.zip/x.md.pdr
 
 Формат — компактный бинарный: текст не хранится (он у источника), только
 отпечаток модели, параметры чанкинга и векторы чанков (f16).
@@ -53,13 +60,38 @@ class SidecarData:
 
 
 def file_sidecar_path(source_path: str | Path, model: str) -> Path:
-    """Путь сайдкара реального файла под моделью.
+    """Путь сайдкара источника под моделью (см. ``sidecar_path``).
 
     ``<каталог>/.persinder/<модель>/<файл>.pdr`` — по модели своя подпапка,
     чтобы у файла одновременно жили эмбеды нескольких моделей (D24).
     """
+    return sidecar_path(source_path, model)
+
+
+def sidecar_path(source_path: str | Path, model: str) -> Path:
+    """Путь сайдкара источника: ``.persinder/`` ближайшей реальной папки.
+
+    Архив — часть пути, поэтому вложенность архива (в т.ч. вложенные архивы)
+    сохраняется как каталоги в ``.persinder/<модель>/``:
+
+      реальный файл  a/note.md            → a/.persinder/<model>/note.md.pdr
+      часть архива   a/arc.zip/inner.md   → a/.persinder/<model>/arc.zip/inner.md.pdr
+      вложенность    a/o.zip/i.zip/x.md   → a/.persinder/<model>/o.zip/i.zip/x.md.pdr
+
+    Т.е. внутри ``.persinder`` заводится папка на архив (по имени архива как
+    части пути). Ближайший реальный префикс (до первой несуществующей части
+    пути) — сам файл или внешний контейнер; ``.persinder/`` кладётся в его
+    настоящую папку.
+    """
     src = Path(source_path)
-    return src.parent / ".persinder" / model / f"{src.name}.pdr"
+    # Поднимаемся к первому компоненту, реально существующему на диске:
+    # для обычного файла это он сам, для части архива — внешний контейнер.
+    probe = src
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    real_dir = probe if probe.is_dir() else probe.parent
+    rel = src.relative_to(real_dir)
+    return real_dir / ".persinder" / model / f"{rel}.pdr"
 
 
 def virtual_sidecar_path(virtual_dir: str | Path, doc_id: str, model: str) -> Path:
@@ -68,15 +100,43 @@ def virtual_sidecar_path(virtual_dir: str | Path, doc_id: str, model: str) -> Pa
 
 
 def delete_file_sidecars(source_path: str | Path) -> None:
-    """Удалить все сайдкары файла (по всем моделям): источник ушёл — они неактуальны."""
-    root = Path(source_path).parent / ".persinder"
-    if not root.is_dir():
+    """Удалить все сайдкары источника (по всем моделям): источник ушёл — они
+    неактуальны. Учитывает части контейнера по правилу ``sidecar_path``.
+    """
+    real_dir = _real_dir(Path(source_path))
+    if real_dir is None:
         return
-    name = Path(source_path).name + ".pdr"
-    for model_dir in root.iterdir():
+    pen = real_dir / ".persinder"
+    if not pen.is_dir():
+        return
+    rel = Path(source_path).relative_to(real_dir)
+    for model_dir in pen.iterdir():
         if model_dir.is_dir():
             with contextlib.suppress(FileNotFoundError):
-                (model_dir / name).unlink()
+                path = model_dir / f"{rel}.pdr"
+                path.unlink()
+                _prune_empty_dirs(path)
+
+
+def _real_dir(src: Path) -> Path | None:
+    """Ближайшая реальная папка для ``.persinder/`` источника (см. ``sidecar_path``)."""
+    probe = src
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if not probe.exists():
+        return None
+    return probe if probe.is_dir() else probe.parent
+
+
+def _prune_empty_dirs(path: Path) -> None:
+    """Убрать опустевшие каталоги вверх до ``.persinder/<модель>/``."""
+    model_dir = path.parent
+    while model_dir != model_dir.parent and model_dir.name != ".persinder":
+        try:
+            model_dir.rmdir()
+        except OSError:
+            return
+        model_dir = model_dir.parent
 
 
 def delete_virtual_sidecars(virtual_dir: str | Path, doc_id: str) -> None:
@@ -97,6 +157,8 @@ def delete_model_sidecars(
     """Удалить все сайдкары модели (``model remove``): веса и эмбеды уходят вместе.
 
     ``sources`` — строки ``document_sources`` (см. ``MetaStore.all_sources``).
+    Учитывает и части контейнера (архив как часть пути) — берётся
+    ``sidecar_path`` каждого источника.
     """
     virtual_root = Path(virtual_dir) / model
     with contextlib.suppress(FileNotFoundError):
@@ -105,16 +167,13 @@ def delete_model_sidecars(
                 path.unlink()
     for row in sources:
         raw = row.get("source_path")
-        if raw:
-            source_path = str(raw)
-            path = (
-                Path(source_path).parent
-                / ".persinder"
-                / model
-                / f"{Path(source_path).name}.pdr"
-            )
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
+        if not raw:
+            continue
+        source_path = str(raw)
+        path = sidecar_path(source_path, model)
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        _prune_empty_dirs(path)
 
 
 def pack_f16_vectors(vectors: list[list[float]], dim: int) -> bytes:
@@ -145,6 +204,29 @@ def write_sidecar(
 
     Каждый элемент ``chunks`` — ``(char_start, char_end, vector)``.
     """
+    vector_fmt = struct.Struct(f">{fingerprint.dim}e")
+    packed: list[tuple[int, int, bytes]] = []
+    for start, end, vector in chunks:
+        if len(vector) != fingerprint.dim:
+            raise ValueError(f"размерность вектора {len(vector)} != {fingerprint.dim}")
+        packed.append((start, end, vector_fmt.pack(*vector)))
+    write_sidecar_packed(path, fingerprint, params, packed)
+
+
+def write_sidecar_packed(
+    path: Path,
+    fingerprint: EmbedFingerprint,
+    params: ChunkParams,
+    chunks: list[tuple[int, int, bytes]],
+) -> None:
+    """Записать сайдкар из готовых упакованных векторов (атомарно).
+
+    Каждый элемент ``chunks`` — ``(char_start, char_end, vector)``, где
+    ``vector`` — блоб ``dim * quant`` байт (f16/f32, см. ``pack_f16_vectors``).
+    Потоковый путь воркера: огромный документ (десятки тысяч чанков) не
+    должен держать все векторы развёрнутыми в памяти — они пакуются по мере
+    расчёта и только копятся байтами.
+    """
     quant_code = _QUANT_CODES[fingerprint.quant]
     name = fingerprint.model.encode("utf-8")
     if len(name) > _MAX_MODEL_LEN:
@@ -164,12 +246,12 @@ def write_sidecar(
         len(chunks),
     )
     buf += name
-    vector_fmt = struct.Struct(f">{fingerprint.dim}e")
+    vector_bytes = fingerprint.dim * _QUANT_CODES[fingerprint.quant]
     for start, end, vector in chunks:
-        if len(vector) != fingerprint.dim:
-            raise ValueError(f"размерность вектора {len(vector)} != {fingerprint.dim}")
+        if len(vector) != vector_bytes:
+            raise ValueError(f"блоб вектора {len(vector)} != {vector_bytes}")
         buf += struct.pack(">II", start, end)
-        buf += vector_fmt.pack(*vector)
+        buf += vector
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")

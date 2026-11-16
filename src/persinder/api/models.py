@@ -119,6 +119,7 @@ class SearchResponse:
                 "document_id": hit.document_id,
                 "chunk_index": hit.chunk_index,
                 "score": hit.score,
+                "context": hit.context,
             }
             for hit in hits
         ]

@@ -48,6 +48,12 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["doc_id"], "d1")
 
+    def test_chunk_span(self):
+        self._save()
+        self.assertEqual(self.store.chunk_span("d1", 0), (0, 10))
+        self.assertIsNone(self.store.chunk_span("d1", 99))
+        self.assertIsNone(self.store.chunk_span("nope", 0))
+
     def test_pending_embeddings(self):
         self._save()
         pending = self.store.pending_embeddings()
@@ -75,6 +81,41 @@ class SqliteStoreTest(unittest.TestCase):
         self.store.enqueue_all(["m1", "m2"])
         pending = self.store.pending_embeddings(limit=100)
         self.assertEqual(len(pending), 3)  # placeholder-v1 + m1 + m2
+
+    def test_pending_embeddings_small_docs_first(self):
+        """Очередь отдаёт малые документы раньше гигантских: большой PDF не
+        замораживает появление сайдкаров для мелких файлов (порция 100 задач
+        не захватывается целиком одним огромным документом)."""
+
+        def save_doc(doc_id: str, n: int) -> None:
+            doc = Document(
+                id=doc_id,
+                content_hash=doc_id,
+                title=None,
+                char_count=n * 10,
+                text_key=doc_id,
+                created_at="2026-01-01T00:00:00+00:00",
+            )
+            chunks = [
+                Chunk(index=i, char_start=i * 10, char_end=i * 10 + 10, stemmed="слово")
+                for i in range(n)
+            ]
+            jobs = [
+                EmbeddingJob(
+                    doc_id=doc_id,
+                    chunk_index=i,
+                    area="personal",
+                    created_at="2026-01-01T00:00:00+00:00",
+                )
+                for i in range(n)
+            ]
+            self.store.save_document(doc, "personal", f"{doc_id}.txt", chunks, jobs)
+
+        save_doc("big", 50)  # гигантский — в БД первый, задач больше всех
+        save_doc("small", 1)  # мелкий — после
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual(pending[0]["doc_id"], "small", "мелкий документ первым")
+        self.assertEqual(len(pending), 51)
 
     def test_all_sources(self):
         self._save()

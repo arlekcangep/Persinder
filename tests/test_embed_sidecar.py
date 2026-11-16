@@ -13,6 +13,7 @@ from persinder.embed import (
     delete_model_sidecars,
     file_sidecar_path,
     read_sidecar,
+    sidecar_path,
     virtual_sidecar_path,
     write_sidecar,
 )
@@ -92,9 +93,42 @@ class SidecarTest(unittest.TestCase):
         self.assertIsNone(read_sidecar(self.root / "нет.pdr"))
 
     def test_path_derivation(self):
+        # Реальные файлы
+        vault = self.root / "vault"
+        (vault / "books").mkdir(parents=True, exist_ok=True)
+        real = vault / "books" / "deep.pdf"
+        real.write_text("x", encoding="utf-8")
         self.assertEqual(
-            file_sidecar_path("/vault/books/deep.pdf", "placeholder-v1"),
-            Path("/vault/books/.persinder/placeholder-v1/deep.pdf.pdr"),
+            file_sidecar_path(real, "placeholder-v1"),
+            vault / "books" / ".persinder" / "placeholder-v1" / "deep.pdf.pdr",
+        )
+        # Часть архива: контейнер существует, архив — часть пути, внутри
+        # .persinder заводится папка на архив.
+        arc = vault / "books" / "arc.zip"
+        arc.write_text("", encoding="utf-8")
+        part = vault / "books" / "arc.zip" / "inner.md"
+        self.assertEqual(
+            sidecar_path(part, "placeholder-v1"),
+            vault
+            / "books"
+            / ".persinder"
+            / "placeholder-v1"
+            / "arc.zip"
+            / "inner.md.pdr",
+        )
+        # Вложенный архив: o.zip/i.zip/x.md — глубина сохраняется как каталоги.
+        o = vault / "books" / "o.zip"
+        o.write_text("", encoding="utf-8")
+        nested = vault / "books" / "o.zip" / "i.zip" / "x.md"
+        self.assertEqual(
+            sidecar_path(nested, "placeholder-v1"),
+            vault
+            / "books"
+            / ".persinder"
+            / "placeholder-v1"
+            / "o.zip"
+            / "i.zip"
+            / "x.md.pdr",
         )
         self.assertEqual(
             virtual_sidecar_path("/data/virtual", "abc123", "placeholder-v1"),
