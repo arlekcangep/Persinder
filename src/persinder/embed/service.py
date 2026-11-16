@@ -8,11 +8,11 @@
 просто считаются снова.
 
 Текст берётся из кэша; если файла там нет (крэш, ручная чистка, старый
-профиль) — фолбэк: перечитать оригинал экстрактором (как ``TextResolver`` при
-поиске) и сверить `sha256` с ``documents.content_hash``. Не сошлось или
-перечитать нельзя (виртуальный документ, часть контейнера) — задачи снимаются
-с предупреждением в журнале: индексировать изменившийся файл в старый ``doc_id``
-нельзя.
+профиль) — фолбэк: перечитать оригинал тем же резолвером, что и ``/context``
+(``sources/textresolver.py``: файл или адресно прочитанная часть контейнера),
+и сверить `sha256` с ``documents.content_hash``. Не сошлось или перечитать
+нельзя (виртуальный документ) — задачи снимаются с предупреждением в журнале:
+индексировать изменившийся файл в старый ``doc_id`` нельзя.
 
 Задачи привязаны к модели (``embedding_queue.model``): у файла могут
 одновременно жить сайдкары нескольких моделей (D24). Эмбеддер подбирается
@@ -37,6 +37,7 @@ from ..api.index_log import KIND_EMBED, IndexLog
 from ..domain import chunk_text
 from ..interfaces import Embedder, MetaStore, TextStore
 from ..morphology import tokenize
+from ..sources.textresolver import DocumentText, TextResolver
 from ..vectorindex import UsannIndex
 from .models import ChunkParams, EmbedFingerprint, EmbedStats
 from .sidecar import (
@@ -107,16 +108,17 @@ class EmbedWorker:
         registry: ExtractorRegistry | None = None,
     ) -> None:
         self._store = store
-        self._textstore = textstore
         self._embedder_factory = embedder_factory
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._virtual_dir = Path(virtual_dir) if virtual_dir else None
         self._ann_dir = Path(ann_dir) if ann_dir else None
         self._log = log
-        # Реестр — только для фолбэка: перечитать оригинал, когда текста нет в
-        # кэше (D26). Без него воркер работает как раньше: сироты снимаются.
-        self._registry = registry
+        # Текст берётся там же, где его берёт ``/context``: один резолвер на
+        # «кэш → оригинал», без копии разбора источника в воркере. Реестр нужен
+        # только для фолбэка (перечитать оригинал, D26); без него — сироты
+        # снимаются, как раньше.
+        self._texts = TextResolver(store, textstore, registry)
         self._indices: dict[str, UsannIndex] = {}
         # Эмбеддеры кэшируются по модели: ONNX-сессия (веса ~100 МБ) создаётся
         # один раз, а не на каждый документ/проход. Иначе пересчёт сотен файлов
@@ -143,43 +145,28 @@ class EmbedWorker:
 
     # --- текст документа: кэш → оригинал (D26) ---
 
-    def _read_original(self, doc_id: str) -> tuple[str | None, str | None]:
-        """Фолбэк: перечитать оригинал экстрактором и проверить хэш.
+    def _trusted_text(self, document: DocumentText) -> tuple[str | None, str | None]:
+        """Текст документа, если он совпадает с тем, из которого построены чанки.
 
-        Текст должен побайтно (по ``utf-8``) совпасть с тем, из которого
-        построены чанки: ``doc_id`` — это ``sha256`` текста. Не сошлось —
-        файл изменился (или экстрактор другой версии); такие задачи снимаются,
-        документ переиндексирует watcher. Части контейнеров
-        (``arch.zip/inner.md``) перечитать нельзя: их путь на диске не
-        существует — они обязаны кэшироваться.
+        Разбор источника (файл / адресно прочитанная часть контейнера) —
+        в ``TextResolver`` (общий с ``/context``); здесь только политика
+        воркера: перечитанный текст должен побайтно (по ``utf-8``) совпасть с
+        ``documents.content_hash`` — ``doc_id`` это ``sha256`` текста. Не
+        сошлось — файл изменился (или экстрактор другой версии); такие задачи
+        снимаются, документ переиндексирует watcher. Текст из кэша доверяем:
+        ключ кэша и есть этот хэш.
         """
-        if self._registry is None:
-            return None, "оригинал перечитать нечем: нет реестра экстракторов"
-        source = self._store.document_source(doc_id)
-        if source is None:
-            return None, "документа нет в базе"
-        if not source["source_path"]:
-            return None, "виртуальный документ: текста нет ни на диске, ни в кэше"
-        path = Path(source["source_path"])
-        if not path.is_file():
-            # Часть контейнера/архива: на диске лежит только сам контейнер.
-            return None, f"оригинал недоступен: {source['source_path']}"
-        extractor = self._registry.extractor_for(source["extractor"])
-        if extractor is None:
-            return None, f"экстрактор {source['extractor']!r} не найден"
-        try:
-            extracted = extractor.extract(path)
-        except (OSError, ValueError, NotImplementedError) as exc:
-            return None, f"ошибка чтения оригинала: {exc}"
-        if extracted.error or not extracted.text:
-            return None, f"ошибка извлечения: {extracted.error or 'пустой текст'}"
-        digest = hashlib.sha256(extracted.text.encode("utf-8")).hexdigest()
-        if digest != source["content_hash"]:
+        if document.text is None:
+            return None, document.detail or document.code
+        if document.from_cache:
+            return document.text, None
+        digest = hashlib.sha256(document.text.encode("utf-8")).hexdigest()
+        if digest != document.content_hash:
             return None, (
                 "оригинал изменился (хэш текста не совпал с документом) — "
                 "нужна переиндексация"
             )
-        return extracted.text, None
+        return document.text, None
 
     def run_once(self, limit: int = 100) -> EmbedStats:
         """Обработать до ``limit`` задач очереди; вернуть итоги.
@@ -250,19 +237,13 @@ class EmbedWorker:
                 kind=KIND_EMBED,
             )
 
-        try:
-            text: str | None = self._textstore.read(doc_id)
-            source_error: str | None = None
-        except FileNotFoundError:
-            # Кэш пуст (крэш, ручная чистка, старый профиль) — фолбэк на
-            # оригинал. Текст нужен тот же, из которого нарезаны чанки,
-            # поэтому _read_original сверяет хэш с документом (D26).
-            text, source_error = self._read_original(doc_id)
-            if text is not None and self._log is not None:
-                self._log.info(
-                    f"эмбеддинг: {label} — нет текста в кэше, перечитан оригинал",
-                    kind=KIND_EMBED,
-                )
+        document = self._texts.document_text(doc_id)
+        text, source_error = self._trusted_text(document)
+        if text is not None and not document.from_cache and self._log is not None:
+            self._log.info(
+                f"эмбеддинг: {label} — нет текста в кэше, перечитан оригинал",
+                kind=KIND_EMBED,
+            )
         if text is None:
             self._store.drop_queue_rows([int(row["id"]) for row in rows])
             stats.skipped += 1

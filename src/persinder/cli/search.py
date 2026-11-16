@@ -9,10 +9,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
-from ..api.textresolver import TextResolver
 from ..config import Settings
 from ..search import SearchHit, SearchQuery, SearchResult
 from ..sources import AreaConfig, default_registry, load_config
+from ..sources.textresolver import TextResolver
 from ..store import SqliteStore
 from ..textstore import FsTextStore
 from .config import candidate_config, known_models

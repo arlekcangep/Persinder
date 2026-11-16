@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -77,4 +78,20 @@ class ContainerExtractor(Protocol):
 
     def extract_all(self, path: Path, resolver: EntryResolver) -> list[Extracted]:
         """Раскрыть контейнер в список частей."""
+        ...
+
+    def extract_part(
+        self,
+        container_path: str,
+        entries: Sequence[str],
+        extractor: Extractor,
+    ) -> Extracted | None:
+        """Извлечь **одну** часть по цепочке записей — без раскрытия всего контейнера.
+
+        ``container_path`` — файл-контейнер на диске, ``entries`` — цепочка
+        записей от него к нужному файлу (может быть вложенной), ``extractor`` —
+        листовой экстрактор, который превращает байты записи в текст. Нужен
+        для адресного чтения части (T4): не материализовать весь архив.
+        ``None`` — записи нет / формат не позволяет адресное чтение.
+        """
         ...

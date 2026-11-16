@@ -6,6 +6,7 @@ import hashlib
 import io
 import threading
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -368,6 +369,36 @@ class EmbedWorkerTest(unittest.TestCase):
         stats = worker.run_once()
 
         self.assertEqual((stats.docs, stats.skipped), (0, 1))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_fallback_rereads_container_part_addressably(self):
+        """D26/T4: часть контейнера с явным разбором (``container_path`` +
+        ``container_entries``) перечитывается **адресно** — без раскрытия
+        всего архива; хэш сходится, задачи отрабатывают."""
+        text = "запись внутри архива про адресное чтение"
+        container = self.root / "arch"
+        container.mkdir(parents=True, exist_ok=True)
+        zip_path = container / "bundle.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("inner.md", text)
+        self.ingest.ingest(
+            IngestRequest(
+                filename="bundle.zip/inner.md",
+                area=Area.PERSONAL,
+                text=text,
+                source_path=str(zip_path / "inner.md"),
+                extractor="markdown",
+                container_path=str(zip_path),
+                container_entries=("inner.md",),
+            )
+        )
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        worker = self._worker(registry=default_registry())
+        self.textstore.delete(doc_id)
+
+        stats = worker.run_once(limit=10)
+
+        self.assertEqual((stats.docs, stats.skipped, stats.errors), (1, 0, 0))
         self.assertEqual(self.store.counts()["pending_embeddings"], 0)
 
     def test_fallback_without_registry_drops_queue(self):

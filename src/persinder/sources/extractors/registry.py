@@ -125,6 +125,19 @@ class ExtractorRegistry:
                 return ext
         return None
 
+    def container_for(self, container_path: str) -> ContainerExtractor | None:
+        """Контейнер, обслуживающий файл-контейнер (по его суффиксу).
+
+        Нужен для адресного чтения части контейнера (T4): по
+        ``container_path`` из ``DocumentSource`` найти контейнер, который умеет
+        прочитать одну запись цепочки. ``None`` — формата нет среди контейнеров.
+        """
+        suffix = archive_suffix(Path(container_path).name)
+        for container in self._containers:
+            if suffix in container.suffixes():
+                return container
+        return None
+
     # --- проверка поддержки (без чтения файла) ---
 
     def enabled_suffixes(self, area: AreaConfig) -> frozenset[str]:

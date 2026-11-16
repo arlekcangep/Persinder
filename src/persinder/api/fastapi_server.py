@@ -26,9 +26,9 @@ from uvicorn.server import Server
 
 from ..interfaces import Ingest, MetaStore, Search, TextStore
 from ..search import SearchQuery, SearchResult
+from ..sources.textresolver import SOURCE_MISSING, TextResolver
 from .index_log import IndexLog
 from .models import IngestPayload, IngestResponse, SearchResponse
-from .textresolver import SOURCE_MISSING, TextResolver
 
 if TYPE_CHECKING:
     from ..sources.extract import ExtractorRegistry

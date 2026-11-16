@@ -29,12 +29,16 @@ from persinder.api.fastapi_server import (
     context_stream_batch,
     make_fastapi_server,
 )
-from persinder.api.textresolver import SOURCE_ERROR, SOURCE_MISSING, TextResolver
 from persinder.domain import Area, Document
 from persinder.ingest import IngestRequest, IngestService
 from persinder.morphology import NoopStemmer
 from persinder.search import SearchService
 from persinder.sources import default_registry
+from persinder.sources.textresolver import (
+    SOURCE_ERROR,
+    SOURCE_MISSING,
+    TextResolver,
+)
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
 
@@ -46,6 +50,8 @@ def _save_document(
     doc_id: str,
     source_path: str = "",
     extractor: str = "",
+    container_path: str = "",
+    container_entries: tuple[str, ...] = (),
 ) -> None:
     """Документ без чанков и очереди: для перечитывания оригинала."""
     store.save_document(
@@ -63,6 +69,8 @@ def _save_document(
         [],
         [],
         source_path=source_path,
+        container_path=container_path,
+        container_entries=container_entries,
     )
 
 
@@ -146,6 +154,50 @@ class TextResolverTest(unittest.TestCase):
         assert text is not None
         self.assertEqual(text.text, "Привет")
 
+    def test_resolve_rereads_container_part_addressably(self):
+        """Часть контейнера (T4): читается адресно по container_path+entries,
+        без раскрытия всего архива."""
+        import zipfile
+
+        text = "запись внутри архива"
+        zip_path = Path(self._tmp.name) / "bundle.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("inner.md", text)
+        _save_document(
+            self.store,
+            "doc1",
+            source_path=str(zip_path / "inner.md"),
+            extractor="markdown",
+            container_path=str(zip_path),
+            container_entries=("inner.md",),
+        )
+        resolver = self._resolver(registry=self.registry)
+        text_result, error = resolver.resolve("doc1", 0, len(text))
+        self.assertIsNone(error)
+        assert text_result is not None
+        self.assertEqual(text_result.text, text)
+
+    def test_resolve_reread_missing_container_entry_is_error(self):
+        """Записи нет в архиве — честная ошибка, не молчаливый пусто."""
+        import zipfile
+
+        zip_path = Path(self._tmp.name) / "bundle.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("other.md", "не та запись")
+        _save_document(
+            self.store,
+            "doc1",
+            source_path=str(zip_path / "inner.md"),
+            extractor="markdown",
+            container_path=str(zip_path),
+            container_entries=("inner.md",),
+        )
+        resolver = self._resolver(registry=self.registry)
+        text, error = resolver.resolve("doc1", 0, 5)
+        self.assertIsNone(text)
+        assert error is not None
+        self.assertIn(SOURCE_ERROR, error)
+
     def test_resolve_reread_missing_file_is_error(self):
         """Файл удалён, textstore пуст — честная ошибка, не молчаливый пусто."""
         missing = Path(self._tmp.name) / "gone.txt"
@@ -199,9 +251,7 @@ class ContextStreamTest(unittest.TestCase):
         root = Path(self._tmp.name)
         self.store = SqliteStore(root / "db.sqlite")
         self.texts = FsTextStore(root / "texts")
-        self.resolver = TextResolver(
-            self.store, self.texts, default_registry()
-        )
+        self.resolver = TextResolver(self.store, self.texts, default_registry())
         self.texts.put("doc1", TEXT)
 
     def tearDown(self):
@@ -244,9 +294,7 @@ class ContextStreamTest(unittest.TestCase):
         """Длинный срез режется на фрагменты: байтовый бюджет, символьные позиции."""
         long_text = "я" * 200  # 200 символов, 400 байт
         self.texts.put("big", long_text)
-        with mock.patch(
-            "persinder.api.fastapi_server._CONTEXT_CHUNK_BYTES", 63
-        ):
+        with mock.patch("persinder.api.fastapi_server._CONTEXT_CHUNK_BYTES", 63):
             body = asyncio.run(self._stream("big", 0, 200, "utf-8"))
         frags = _fragments(body)
         self.assertGreater(len(frags), 1)

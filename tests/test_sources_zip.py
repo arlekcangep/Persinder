@@ -128,6 +128,68 @@ class ArchiveExtractorTest(unittest.TestCase):
         self.assertEqual(self._names(parts), ["ok.md"])
         self.assertEqual(parts[0].text, "нужный текст")
 
+    # --- адресное чтение одной записи (T4) ---
+
+    def test_extract_part_reads_single_entry(self):
+        path = self._zip("a.zip", {"notes/one.md": "одна запись", "two.txt": "вторая"})
+        part = self.ext.extract_part(str(path), ("notes/one.md",), TextExtractor())
+        self.assertIsNotNone(part)
+        assert part is not None
+        self.assertEqual(part.text, "одна запись")
+        self.assertEqual(part.name, "notes/one.md")
+
+    def test_extract_part_nested_chain(self):
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as zf:
+            zf.writestr("inner.md", "вложенная запись")
+        path = self.root / "outer.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("first.zip", inner.getvalue())
+        part = self.ext.extract_part(
+            str(path), ("first.zip", "inner.md"), TextExtractor()
+        )
+        self.assertIsNotNone(part)
+        assert part is not None
+        self.assertEqual(part.text, "вложенная запись")
+        self.assertEqual(part.name, "inner.md")
+
+    def test_extract_part_missing_entry_is_none(self):
+        path = self._zip("a.zip", {"a.txt": "x"})
+        self.assertIsNone(
+            self.ext.extract_part(str(path), ("nope.txt",), TextExtractor())
+        )
+
+    def test_read_entry_chain_returns_leaf_bytes(self):
+        path = self._zip("a.zip", {"a.txt": "байты"})
+        found = self.ext.read_entry_chain(str(path), ["a.txt"])
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertEqual(found[0], "a.txt")
+        self.assertEqual(found[1], "байты".encode())
+
+    def test_extract_part_gz_single_entry(self):
+        path = self.root / "note.txt.gz"
+        path.write_bytes(gzip.compress("сжатый текст".encode()))
+        part = self.ext.extract_part(str(path), ("note.txt",), TextExtractor())
+        self.assertIsNotNone(part)
+        assert part is not None
+        self.assertEqual(part.text, "сжатый текст")
+
+    def test_extract_part_7z_entry(self):
+        try:
+            import py7zr  # noqa: F401
+        except ImportError:
+            self.skipTest("py7zr не установлен")
+        import py7zr
+
+        path = self.root / "addr.7z"
+        with py7zr.SevenZipFile(path, "w") as archive:
+            archive.writestr("текст из 7z", "inner.txt")
+        part = self.ext.extract_part(str(path), ("inner.txt",), TextExtractor())
+        self.assertIsNotNone(part)
+        assert part is not None
+        self.assertEqual(part.text, "текст из 7z")
+
     # --- tar и составные ---
 
     def test_tar_entries(self):

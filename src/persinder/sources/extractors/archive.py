@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import dataclasses
 import gzip
+import io
 import sys
 import tarfile
 import tempfile
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -118,6 +119,35 @@ class ArchiveExtractor(BaseExtractor):
                     out.append((name.replace("\\", "/"), file.read_bytes()))
         return out
 
+    def _read_7z_entry(self, path: Path, entry_name: str) -> bytes | None:
+        """Одна запись из 7z по имени (через ``extract(targets=[...])``).
+
+        Извлекает в temp-папку только выбранную запись и читает её байты;
+        ``None`` — записи нет. ``ImportError`` прокидывается как ``RuntimeError``
+        (формат требует extra '7z').
+        """
+        try:
+            import py7zr  # type: ignore[import-untyped]  # pyright: ignore[reportMissingTypeStubs]
+        except ImportError as exc:  # extra '7z' не установлен
+            raise RuntimeError(
+                "формат 7z требует extra '7z': pip install 'persinder[archive7z]'"
+            ) from exc
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            py7zr.SevenZipFile(path, "r") as archive,
+        ):
+            try:
+                info = archive.getinfo(entry_name)
+            except KeyError:
+                return None
+            if info.is_directory:
+                return None
+            archive.extract(path=tmp, targets=[entry_name])
+            file = Path(tmp) / entry_name
+            if not file.is_file():
+                return None
+            return file.read_bytes()
+
     @staticmethod
     def _read_tar(path: Path) -> list[tuple[str, bytes]]:
         out: list[tuple[str, bytes]] = []
@@ -140,6 +170,19 @@ class ArchiveExtractor(BaseExtractor):
         )
         return [(stem, data)]
 
+    def _read_gz_entry(self, path: Path, entry_name: str) -> bytes | None:
+        """Единственная запись gz (имя — stem без ``.gz``).
+
+        gz — один поток, «адресность» сводится к сверке имени: если запрос не
+        совпадает со stem, вернуть ``None``.
+        """
+        stem = (
+            path.name[: -len(".gz")] if path.name.lower().endswith(".gz") else path.name
+        )
+        if entry_name != stem:
+            return None
+        return gzip.decompress(path.read_bytes())
+
     def _read_rar(self, path: Path) -> list[tuple[str, bytes]]:
         try:
             import rarfile  # type: ignore[import-untyped]  # pyright: ignore[reportMissingTypeStubs]
@@ -156,6 +199,83 @@ class ArchiveExtractor(BaseExtractor):
                 name = str(info.filename).replace("\\", "/")
                 out.append((name, bytes(archive.read(info))))
         return out
+
+    def _read_rar_entry(self, path: Path, entry_name: str) -> bytes | None:
+        """Одна запись из rar по имени (``RarFile.read`` читает поштучно).
+
+        ``None`` — записи нет. ``ImportError`` прокидывается как ``RuntimeError``
+        (формат требует extra 'rar').
+        """
+        try:
+            import rarfile  # type: ignore[import-untyped]  # pyright: ignore[reportMissingTypeStubs]
+        except ImportError as exc:  # extra 'rar' не установлен
+            raise RuntimeError(
+                "формат rar требует extra 'rar': pip install 'persinder[archiverar]'"
+            ) from exc
+        archive: Any = rarfile.RarFile(path)  # pyright: ignore[reportUnknownMemberType]
+        with archive:
+            try:
+                info = archive.getinfo(entry_name)
+            except KeyError:
+                return None
+            if info.is_dir():
+                return None
+            return bytes(archive.read(entry_name))
+
+    def _read_entry_bytes(
+        self, source: Path | bytes, suffix: str, entry_name: str
+    ) -> bytes | None:
+        """Байты одной записи из архива (по пути или уже прочитанным байтам).
+
+        ``source`` — файл-контейнер на диске или его байты (для вложенных
+        архивов: запись верхнего архива — это архив целиком). ``suffix`` —
+        формат контейнера (``.zip``/``.tar.gz``/``.7z``…), ``entry_name`` —
+        имя записи внутри. ``None`` — записи нет или это директория.
+        """
+        if suffix == ".zip":
+            handle: Any = io.BytesIO(source) if isinstance(source, bytes) else source
+            with zipfile.ZipFile(handle) as zf:
+                if entry_name not in zf.namelist():
+                    return None
+                return zf.read(entry_name)
+        if suffix in (
+            ".tar",
+            ".tar.gz",
+            ".tgz",
+            ".tar.bz2",
+            ".tbz2",
+            ".tar.xz",
+            ".txz",
+        ):
+            tarball: Any = io.BytesIO(source) if isinstance(source, bytes) else source
+            with tarfile.open(tarball, "r:*") as tf:
+                try:
+                    member = tf.getmember(entry_name)
+                except KeyError:
+                    return None
+                if not member.isfile():
+                    return None
+                f = tf.extractfile(member)
+                return None if f is None else f.read()
+        if suffix == ".7z":
+            if isinstance(source, bytes):
+                with tempfile.TemporaryDirectory() as tmp:
+                    inner = Path(tmp) / "archive.7z"
+                    inner.write_bytes(source)
+                    return self._read_7z_entry(inner, entry_name)
+            return self._read_7z_entry(Path(source), entry_name)
+        if suffix == ".rar":
+            if isinstance(source, bytes):
+                with tempfile.TemporaryDirectory() as tmp:
+                    inner = Path(tmp) / "archive.rar"
+                    inner.write_bytes(source)
+                    return self._read_rar_entry(inner, entry_name)
+            return self._read_rar_entry(Path(source), entry_name)
+        if suffix == ".gz":
+            if isinstance(source, bytes):
+                return gzip.decompress(source)
+            return self._read_gz_entry(Path(source), entry_name)
+        return None
 
     def _reader(self, suffix: str) -> Callable[[Path], list[tuple[str, bytes]]] | None:
         readers: dict[str, Callable[[Path], list[tuple[str, bytes]]]] = {
@@ -328,3 +448,64 @@ class ArchiveExtractor(BaseExtractor):
             name=name,
             extractor=extractor.name,
         )
+
+    def extract_entry(self, path: Path, entry_name: str) -> Extracted | None:
+        """Извлечь одну запись из архива по имени — без чтения всего архива в память.
+
+        Используется при записи текста в кэш (T4), чтобы не материализовать
+        весь архив. Поддерживает zip, tar, 7z, rar, gz.
+
+        Возвращает ``Extracted`` с текстом записи или ``None``, если запись
+        не найдена, является директорией или формат не поддерживает адресное
+        чтение.
+        """
+        suffix = archive_suffix(path.name)
+        if self._reader(suffix) is None:
+            return None
+        try:
+            data = self._read_entry_bytes(path, suffix, entry_name)
+        except Exception:  # noqa: BLE001 — битый архив не валит индексацию
+            return None
+        if data is None:
+            return None
+        return Extracted(text=data.decode("utf-8", errors="replace"), name=entry_name)
+
+    def read_entry_chain(
+        self, container_path: str | Path, entries: Sequence[str]
+    ) -> tuple[str, bytes] | None:
+        """Пройти цепочку записей контейнера и вернуть ``(имя_листа, байты)``.
+
+        ``entries`` — цепочка от файла-контейнера ``container_path`` к нужному
+        файлу; вложенные архивы проходятся по байтам (без временных файлов,
+        кроме 7z/rar). ``None`` — цепочка пуста или какой-то записи нет.
+        """
+        if not entries:
+            return None
+        current: Path | bytes = Path(container_path)
+        suffix = archive_suffix(Path(container_path).name)
+        for index, name in enumerate(entries):
+            data = self._read_entry_bytes(current, suffix, name)
+            if data is None:
+                return None
+            if index == len(entries) - 1:
+                return name, data
+            current = data
+            suffix = archive_suffix(name)
+        return None
+
+    def extract_part(
+        self,
+        container_path: str,
+        entries: Sequence[str],
+        extractor: Extractor,
+    ) -> Extracted | None:
+        """Извлечь часть контейнера по цепочке записей и прогнать листовой экстрактор.
+
+        Адресное чтение (T4): весь архив в память не материализуется — читается
+        только нужная запись. ``None`` — записи нет или прочитать нельзя.
+        """
+        found = self.read_entry_chain(container_path, entries)
+        if found is None:
+            return None
+        name, data = found
+        return self._part_from_bytes(extractor, name, data)
