@@ -86,6 +86,10 @@ class MetaStore(Protocol):
 
     def source_path(self, area: str, filename: str) -> str: ...
 
+    def source_filenames_under(self, area: str, prefix: str) -> list[str]:
+        """Имена источников области, начинающихся с ``prefix`` (части контейнера)."""
+        ...
+
     def remove_source(self, area: str, filename: str) -> str | None: ...
 
     def delete_document(self, doc_id: str) -> None: ...
@@ -177,6 +181,10 @@ class Ingest(Protocol):
 
     def remove_source(self, area: Area, filename: str) -> RemoveResult:
         """Убрать источник и его сырой текст, если документ вычищен целиком."""
+        ...
+
+    def remove_source_tree(self, area: Area, filename: str) -> RemoveResult:
+        """Убрать источник и все его части (файлы контейнера: ``filename/...``)."""
         ...
 
 

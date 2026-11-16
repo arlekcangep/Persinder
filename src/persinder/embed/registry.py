@@ -1,10 +1,11 @@
 """Реестр моделей эмбеддингов: каталог, установка/удаление, фабрика.
 
-Модель — это каталог с весами и токенизатором в глобальном
-``~/.persinder/models/<ключ>/`` (переопределяется ``PERSINDER_MODEL_DIR``).
+Модель — это каталог с весами и токенизатором внутри каталога приложения:
+``<home>/models/<ключ>/`` (см. ``Settings.models_dir``). Отдельного глобального
+каталога моделей нет — они живут в подкаталоге ``home``.
 Заглушка ``placeholder-v1`` встроена — скачивать её не надо.
 
-Активные модели (на профиль, ``data_dir/models.json``, см. ``state.py``):
+Активные модели (на профиль, ``home/models.json``, см. ``state.py``):
 ``embedding`` — какой считаем новые/изменённые файлы, ``search`` — какой ищем.
 Пока ``embedding`` ≠ ``search`` (миграция после ``model install``), новые
 файлы индексируются **обеими** моделями, чтобы поиск на старой не терял
@@ -55,13 +56,9 @@ CATALOG: dict[str, ModelSpec] = {
 }
 
 
-def models_root() -> Path:
-    """Глобальный каталог моделей (env ``PERSINDER_MODEL_DIR`` или
-    ~/.persinder/models, общий для всех профилей)."""
-    env = os.environ.get("PERSINDER_MODEL_DIR")
-    if env:
-        return Path(env)
-    return Path.home() / ".persinder" / "models"
+def models_root(home: Path) -> Path:
+    """Каталог моделей: ``<home>/models`` (внутри каталога приложения)."""
+    return home / "models"
 
 
 def validate_key(key: str) -> None:

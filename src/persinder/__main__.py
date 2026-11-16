@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -31,6 +32,7 @@ from .sources import (
     JOURNAL_RETENTION_DAYS,
     IndexingPipeline,
     Journal,
+    ScanResult,
     Watcher,
     default_registry,
     load_config,
@@ -55,7 +57,7 @@ def build_service(
         stemmer=stemmer,
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
-        journal=IngestJournal(settings.data_dir / "ingest.jsonl"),
+        journal=IngestJournal(settings.home / "ingest.jsonl"),
         virtual_dir=settings.virtual_dir,
         embedding_models=models.queue_models(),
     )
@@ -69,15 +71,15 @@ def build_service(
     return ingest, search, store
 
 
-def run_watch(config_path: Path, data_dir: Path | None) -> int:
+def run_watch(config_path: Path, home: Path | None) -> int:
     """Запустить watcher: скан областей и индексация найденного."""
     registry = default_registry()
     areas, watch = load_config(config_path, known_formats=registry.known_names())
     settings = Settings.default()
-    if data_dir:
-        settings = replace(settings, data_dir=data_dir)
+    if home:
+        settings = replace(settings, home=home)
     ingest, _search, store = build_service(settings)
-    journal = Journal(settings.data_dir / "journal.jsonl")
+    journal = Journal(settings.home / "journal.jsonl")
     dropped = journal.compact()
     if dropped:
         print(
@@ -109,9 +111,88 @@ def run_watch(config_path: Path, data_dir: Path | None) -> int:
     return 0
 
 
+def run_serve(config_path: Path, settings: Settings) -> int:
+    """Полный сервис: HTTP + watcher + эмбеддинги + восстановление после сбоев.
+
+    Это единая точка запуска всех фоновых активностей:
+
+    * журнал ``compact`` — убрать старую историю, сохранив последние состояния;
+    * ``ingest.recover`` — убрать брошенные тексты прерванных вызовов;
+    * watcher — первый проход сразу доиндексирует всё новое и недоделанное
+      (журнал считает «устроенными» только завершённые цепочки);
+    * поток эмбеддингов — разбирает очередь в векторы/сайдкары, пока сервис жив;
+    * HTTP-сервер блокирует главный поток до Ctrl+C.
+    """
+    settings.ensure()
+    print(f"Home: {settings.home}", flush=True)
+    registry = default_registry()
+    areas, watch = load_config(config_path, known_formats=registry.known_names())
+
+    ingest, search, store = build_service(settings)
+    embed_worker, embed_store, embed_label = build_embed_worker(settings)
+
+    journal = Journal(settings.home / "journal.jsonl")
+    dropped = journal.compact()
+    if dropped:
+        print(
+            f"Журнал: обрезано старых записей: {dropped} "
+            f"(старше {JOURNAL_RETENTION_DAYS} дней)",
+            flush=True,
+        )
+    recovery = ingest.recover()
+    if recovery.removed:
+        print(format_recovery(recovery), flush=True)
+
+    pipeline = IndexingPipeline(ingest, registry, journal=journal)
+    stop = threading.Event()
+    kick = threading.Event()
+
+    def on_events(result: ScanResult) -> None:
+        stats = pipeline.process(result)
+        if (
+            stats.indexed
+            or stats.deleted
+            or stats.duplicates
+            or stats.rejected
+            or stats.skipped
+            or stats.errors
+        ):
+            print_stats(stats)
+        if stats.indexed:
+            kick.set()  # новые документы в очереди — будим эмбеддинги сразу
+
+    watcher = Watcher(areas, watch, on_events, journal=journal)
+    embed_thread = threading.Thread(
+        target=_embed_loop, args=(embed_worker, stop, kick), daemon=True, name="embed"
+    )
+
+    print(
+        f"Областей: {len(areas)}, интервал скана: {watch.poll_interval} с", flush=True
+    )
+    print(embed_label, flush=True)
+    watcher.start()
+    embed_thread.start()
+    print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)
+    try:
+        serve(ingest, search, settings.host, settings.port)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print("Останавливаюсь — завершаю watcher и эмбеддинги...", flush=True)
+        stop.set()
+        kick.set()
+        watcher.stop()
+        embed_thread.join(10.0)
+        if not embed_thread.is_alive():
+            embed_store.close()
+        store.close()
+        print("Persinder остановлен.", flush=True)
+    return 0
+
+
 def print_stats(stats: object) -> None:
     """Печать итогов обработки."""
-    print(stats)
+    print(stats, flush=True)
 
 
 def format_recovery(stats: RecoveryStats) -> str:
@@ -189,13 +270,41 @@ def _drain(worker: EmbedWorker, limit: int) -> EmbedStats:
     return total
 
 
+def _embed_loop(
+    worker: EmbedWorker,
+    stop: threading.Event,
+    kick: threading.Event,
+    interval: float = 5.0,
+) -> None:
+    """Фоновый разбор очереди эмбеддингов, пока сервис жив.
+
+    Один тик — порция задач (``run_once``); пока очередь не опустела, тики идут
+    без паузы, на пустой очереди — пауза ``interval``. ``kick`` будит цикл сразу
+    после индексации (иначе новые документы ждали бы тика). Ошибка одного
+    прохода не валит сервис: задачи остаются в очереди и уходят в следующий тик.
+    """
+    while not stop.is_set():
+        try:
+            stats = worker.run_once(100)
+        except Exception as exc:  # noqa: BLE001 — сервис не должен падать
+            print(f"Embed: ошибка прохода: {exc}", flush=True)
+            kick.wait(interval)
+            kick.clear()
+            continue
+        if stats.docs or stats.skipped or stats.errors:
+            print(format_embed(stats), flush=True)
+        if stats.docs == 0:
+            kick.wait(interval)
+            kick.clear()
+
+
 def run_embed(
-    data_dir: Path | None, limit: int, all_: bool, model: str | None, background: bool
+    home: Path | None, limit: int, all_: bool, model: str | None, background: bool
 ) -> int:
     """Эмбеддинги: очередь → векторы → сайдкары (§7)."""
     settings = Settings.default()
-    if data_dir:
-        settings = replace(settings, data_dir=data_dir)
+    if home:
+        settings = replace(settings, home=home)
     settings.ensure()
     if all_:
         key = model or load(settings.models_state_path).embedding
@@ -331,11 +440,11 @@ def run_model_remove(settings: Settings, key: str) -> int:
     return 0
 
 
-def run_search(data_dir: Path | None, text: str, limit: int) -> int:
+def run_search(home: Path | None, text: str, limit: int) -> int:
     """Поиск из консоли: морфология + семантика (модуль 3)."""
     settings = Settings.default()
-    if data_dir:
-        settings = replace(settings, data_dir=data_dir)
+    if home:
+        settings = replace(settings, home=home)
     settings.ensure()
     store = SqliteStore(settings.db_path)
     try:
@@ -365,15 +474,15 @@ def run_search(data_dir: Path | None, text: str, limit: int) -> int:
     return 0
 
 
-def run_ann_rebuild(data_dir: Path | None, model: str | None) -> int:
+def run_ann_rebuild(home: Path | None, model: str | None) -> int:
     """Пересобрать ANN-индексы из таблицы ``embeddings`` (§8).
 
     Нужно после холодного старта устройства (таблица есть, индекса нет) и при
     рассинхронизации. По умолчанию — все модели, у которых есть векторы.
     """
     settings = Settings.default()
-    if data_dir:
-        settings = replace(settings, data_dir=data_dir)
+    if home:
+        settings = replace(settings, home=home)
     settings.ensure()
     store = SqliteStore(settings.db_path)
     try:
@@ -403,18 +512,27 @@ def main(argv: list[str] | None = None) -> int:
         prog="persinder", description="Персональный индексатор Persinder"
     )
     sub = parser.add_subparsers(dest="command")
+    # Дефолт --home — тот же каталог приложения, что Settings.default(): ~/.persinder.
+    default_home = Settings.default().home
+    home_help = f"каталог приложения (по умолчанию {default_home})"
 
-    serve_p = sub.add_parser("serve", help="HTTP-сервис (приём + поиск)")
-    serve_p.add_argument("--data-dir", type=Path, default=None)
+    serve_p = sub.add_parser("serve", help="HTTP-сервис + watcher + эмбеддинги")
+    serve_p.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="YAML-конфиг областей (по умолчанию <home>/persinder.yaml|yml)",
+    )
+    serve_p.add_argument("--home", type=Path, default=default_home, help=home_help)
     serve_p.add_argument("--host", default=None)
     serve_p.add_argument("--port", type=int, default=None)
 
     watch_p = sub.add_parser("watch", help="следить за областями и индексировать")
     watch_p.add_argument("--config", type=Path, required=True, help="YAML-конфиг")
-    watch_p.add_argument("--data-dir", type=Path, default=None)
+    watch_p.add_argument("--home", type=Path, default=default_home, help=home_help)
 
     embed_p = sub.add_parser("embed", help="эмбеддинги: очередь → векторы → сайдкары")
-    embed_p.add_argument("--data-dir", type=Path, default=None)
+    embed_p.add_argument("--home", type=Path, default=default_home, help=home_help)
     embed_p.add_argument("--limit", type=int, default=100, help="задач за проход")
     embed_p.add_argument(
         "--all",
@@ -430,7 +548,7 @@ def main(argv: list[str] | None = None) -> int:
 
     model_p = sub.add_parser("model", help="управление моделями эмбеддингов (D24)")
     model_common = argparse.ArgumentParser(add_help=False)
-    model_common.add_argument("--data-dir", type=Path, default=None)
+    model_common.add_argument("--home", type=Path, default=default_home, help=home_help)
     model_sub = model_p.add_subparsers(dest="model_command")
 
     model_sub.add_parser(
@@ -452,12 +570,12 @@ def main(argv: list[str] | None = None) -> int:
     search_p = sub.add_parser(
         "search", help="поиск из консоли (морфология + семантика)"
     )
-    search_p.add_argument("--data-dir", type=Path, default=None)
+    search_p.add_argument("--home", type=Path, default=default_home, help=home_help)
     search_p.add_argument("--limit", type=int, default=20)
     search_p.add_argument("text")
 
     ann_p = sub.add_parser("ann", help="ANN-индекс (USearch): пересборка из таблицы")
-    ann_p.add_argument("--data-dir", type=Path, default=None)
+    ann_p.add_argument("--home", type=Path, default=default_home, help=home_help)
     ann_p.add_argument(
         "--model", default=None, help="только эта модель (по умолчанию все)"
     )
@@ -470,21 +588,21 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Совместимость: без подкоманды — serve с флагами.
-    parser.add_argument("--data-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--home", type=Path, default=default_home, help=argparse.SUPPRESS
+    )
     parser.add_argument("--host", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args(argv)
     if args.command == "watch":
-        return run_watch(args.config, args.data_dir)
+        return run_watch(args.config, args.home)
     if args.command == "embed":
-        return run_embed(
-            args.data_dir, args.limit, args.all, args.model, args.background
-        )
+        return run_embed(args.home, args.limit, args.all, args.model, args.background)
     if args.command == "search":
-        return run_search(args.data_dir, args.text, args.limit)
+        return run_search(args.home, args.text, args.limit)
     if args.command == "ann":
-        return run_ann_rebuild(args.data_dir, args.model)
+        return run_ann_rebuild(args.home, args.model)
     if args.command == "model":
         return _model_main(parser, args)
     if args.command == "serve" or args.command is None:
@@ -495,8 +613,8 @@ def main(argv: list[str] | None = None) -> int:
 
 def _model_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     settings = Settings.default()
-    if getattr(args, "data_dir", None):
-        settings = replace(settings, data_dir=args.data_dir)
+    if getattr(args, "home", None):
+        settings = replace(settings, home=args.home)
     if args.model_command is None:
         parser.parse_args([args.command, "--help"])
         return 1
@@ -511,24 +629,57 @@ def _model_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
     return 1
 
 
+def _config_candidates(settings: Settings) -> tuple[Path, ...]:
+    """Где искать конфиг, если ``--config`` не задан: папка запуска, затем home."""
+    names = ("persinder.yaml", "persinder.yml")
+    return tuple(Path.cwd() / name for name in names) + tuple(
+        settings.home / name for name in names
+    )
+
+
 def _serve_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     settings = Settings.default()
-    if getattr(args, "data_dir", None):
-        settings = replace(settings, data_dir=args.data_dir)
+    if getattr(args, "home", None):
+        settings = replace(settings, home=args.home)
     if getattr(args, "host", None):
         settings = replace(settings, host=args.host)
     if getattr(args, "port", None):
         settings = replace(settings, port=args.port)
+    # Home и подкаталоги существуют всегда — даже если конфига нет (HTTP-only).
+    settings = settings.ensure()
 
+    config_path: Path | None = getattr(args, "config", None)
+    if config_path is None:
+        for candidate in _config_candidates(settings):
+            if candidate.is_file():
+                config_path = candidate
+                print(f"Конфиг не задан — использую {config_path}", flush=True)
+                break
+    if config_path is not None:
+        return run_serve(config_path, settings)
+
+    # Конфига нет ни явного, ни в папке запуска/home — деградация до HTTP-only:
+    # watcher/эмбеддинги не знают областей.
+    print(
+        "ВНИМАНИЕ: конфиг не найден — работает только HTTP (приём + поиск), "
+        "без watcher и эмбеддингов.\n"
+        f"Искал: persinder.{{yaml,yml}} в текущей папке и в {settings.home}\n"
+        "Полный сервис: persinder serve --config persinder.yaml",
+        flush=True,
+    )
     ingest, search, store = build_service(settings)
     recovery = ingest.recover()
     if recovery.removed:
         print(format_recovery(recovery))
-    print(f"Persinder слушает http://{settings.host}:{settings.port}")
+    print(f"Persinder слушает http://{settings.host}:{settings.port}", flush=True)
     try:
         serve(ingest, search, settings.host, settings.port)
+    except KeyboardInterrupt:
+        pass
     finally:
+        print("Останавливаюсь (Ctrl+C)...", flush=True)
         store.close()
+        print("Persinder остановлен.", flush=True)
     return 0
 
 

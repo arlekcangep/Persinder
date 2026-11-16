@@ -98,23 +98,12 @@ class RegistryTest(unittest.TestCase):
 
 
 class ModelsRootTest(unittest.TestCase):
-    def setUp(self):
-        self._env = None
-        import os
-
-        self._os = os
-        self._env = os.environ.pop("PERSINDER_MODEL_DIR", None)
-
-    def tearDown(self):
-        if self._env is not None:
-            self._os.environ["PERSINDER_MODEL_DIR"] = self._env
-
-    def test_default_is_user_models(self):
-        self.assertEqual(models_root(), Path.home() / ".persinder" / "models")
-
-    def test_env_overrides(self):
-        self._os.environ["PERSINDER_MODEL_DIR"] = "/custom/models"
-        self.assertEqual(models_root(), Path("/custom/models"))
+    def test_models_live_under_home(self):
+        self.assertEqual(models_root(Path("/x/y")), Path("/x/y") / "models")
+        self.assertEqual(
+            models_root(Path.home() / ".persinder"),
+            Path.home() / ".persinder" / "models",
+        )
 
 
 if __name__ == "__main__":

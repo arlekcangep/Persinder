@@ -1,4 +1,4 @@
-"""Тесты состояния активных моделей профиля (data_dir/models.json, D24)."""
+"""Тесты состояния активных моделей профиля (home/models.json, D24)."""
 
 from __future__ import annotations
 
