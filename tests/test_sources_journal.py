@@ -27,6 +27,7 @@ from persinder.sources import (
     WatchConfig,
     Watcher,
 )
+from persinder.sources.extract import BaseExtractor
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
 
@@ -269,10 +270,11 @@ class JournalCompactTest(unittest.TestCase):
         self.assertFalse(self.path.exists())
 
 
-class _BoomExtractor:
+class _BoomExtractor(BaseExtractor):
     """Экстрактор, который всегда сообщает об ошибке разбора."""
 
     name = "boom"
+    format_class = "text"
 
     def suffixes(self) -> frozenset[str]:
         return frozenset({".boom"})
@@ -367,7 +369,9 @@ class JournalPipelineTest(unittest.TestCase):
         self.assertEqual(self._events("note.md"), ["discovered", "skipped"])
 
     def test_error_chain(self):
-        (self.vault / "broken.boom").write_text("x", encoding="utf-8")
+        # бинарный .boom: текст-класс не срабатывает, экстрактор boom (фолбэк
+        # по расширению) сообщает об ошибке разбора → цепочка "error"
+        (self.vault / "broken.boom").write_bytes(bytes([0, 1, 2, 255]) * 8)
         stats = self.pipeline.process(self._scan())
         self.assertEqual(stats.errors, 1)
         self.assertEqual(self._events("broken.boom"), ["discovered", "error"])

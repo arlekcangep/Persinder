@@ -70,6 +70,58 @@ class IngestServiceTest(unittest.TestCase):
         # задача на эмбеддинги поставлена
         self.assertEqual(len(self.store.pending_embeddings()), 1)
 
+    def test_request_embedding_models_override(self):
+        result = self.service.ingest(
+            IngestRequest(
+                filename="own.md",
+                area=Area.PERSONAL,
+                text="текст с моделью папки",
+                embedding_models=("m-own",),
+            )
+        )
+        self.assertEqual(result.status, IngestResult.INDEXED)
+        self.assertEqual(
+            [item["model"] for item in self.store.pending_embeddings(limit=100)],
+            ["m-own"],
+        )
+
+    def test_request_embedding_models_empty_disables_semantics(self):
+        result = self.service.ingest(
+            IngestRequest(
+                filename="no-sem.md",
+                area=Area.PERSONAL,
+                text="только морфология",
+                embedding_models=(),
+            )
+        )
+        self.assertEqual(result.status, IngestResult.INDEXED)
+        self.assertEqual(self.store.pending_embeddings(limit=100), [])
+
+    def test_duplicate_uses_request_models(self):
+        text = "общий текст с моделью папки"
+        first = self.service.ingest(
+            IngestRequest(
+                filename="a.md",
+                area=Area.PERSONAL,
+                text=text,
+                embedding_models=("m-own",),
+            )
+        )
+        second = self.service.ingest(
+            IngestRequest(
+                filename="b.md",
+                area=Area.FOREIGN,
+                text=text,
+                source_path="/vault/b.md",
+                embedding_models=("m-own",),
+            )
+        )
+        self.assertEqual(first.document_id, second.document_id)
+        self.assertEqual(
+            sorted(item["model"] for item in self.store.pending_embeddings(limit=100)),
+            ["m-own", "m-own"],
+        )
+
     def test_duplicate_by_hash(self):
         first = self.service.ingest(self._request())
         second = self.service.ingest(

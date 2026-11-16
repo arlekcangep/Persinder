@@ -78,6 +78,35 @@ class ApiTest(unittest.TestCase):
         with urllib.request.urlopen(f"{self.base}/search?{params}") as resp:
             return json.load(resp)
 
+    def test_search_invalid_min_score(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(self.base + "/search?q=x&min_score=abc")
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_search_invalid_layer_limit(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(self.base + "/search?q=x&morph_limit=abc")
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_search_morph_limit(self):
+        for i in range(3):
+            with self._post(
+                "/ingest",
+                {
+                    "filename": f"n{i}.txt",
+                    "area": "personal",
+                    "text": f"котик номер {i}",
+                },
+            ) as resp:
+                self.assertEqual(json.load(resp)["status"], "indexed")
+
+        params = urlencode({"q": "котик", "limit": "10", "morph_limit": "2"})
+        url = f"{self.base}/search?{params}"
+        with urllib.request.urlopen(url) as resp:
+            body = json.load(resp)
+
+        self.assertEqual(len(body["hits"]), 2, "морфология ограничена morph_limit")
+
     def test_search_hit_has_context_three_sentences_around(self):
         text = (
             "line one\nline two\nline three\nline four\nline five\n"
@@ -92,6 +121,9 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(body["hits"])
         hit = body["hits"][0]
         self.assertEqual(hit["chunk_index"], 0)
+        self.assertEqual(hit["area"], "personal")
+        self.assertEqual(hit["filename"], "ctx.txt")
+        self.assertEqual(hit["source_path"], "", "HTTP-вставка — виртуальный документ")
         # Контекст — от найденного слова, по 3 предложения назад и вперёд,
         # а не весь чанк (строки с 4-й по 7-ю не попадают).
         self.assertEqual(

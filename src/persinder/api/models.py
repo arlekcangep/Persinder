@@ -120,6 +120,9 @@ class SearchResponse:
                 "chunk_index": hit.chunk_index,
                 "score": hit.score,
                 "context": hit.context,
+                "area": hit.area,
+                "source_path": hit.source_path,
+                "filename": hit.filename,
             }
             for hit in hits
         ]

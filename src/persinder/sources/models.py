@@ -20,21 +20,47 @@ class ChangeKind(str, Enum):
 
 @dataclass(frozen=True)
 class AreaConfig:
-    """Одна область из конфига: папка, роль и разрешённые форматы."""
+    """Одна область из конфига: папка, роль, форматы и семантика."""
 
     path: Path
     role: Area
     recursive: bool = True
-    formats: tuple[str, ...] = ()  # имена экстракторов; пусто — не индексировать
+    formats: tuple[
+        str, ...
+    ] = ()  # класс (весь класс) или конкретный формат; пусто — не индексировать
+    embedding_model: str | None = None
+    """Модель эмбеддингов именно для этой папки; ``None`` — глобальная."""
+    semantic: bool = True
+    """``False`` — не индексировать папку семантически (только морфология)."""
+
+
+def queue_models_for(
+    area: AreaConfig, *, semantic_enabled: bool = True
+) -> tuple[str, ...] | None:
+    """Под какими моделями ставить эмбеддинги документов области.
+
+    ``()`` — семантика выключена (глобально или для папки), очередь не
+    пополняется. Имя модели — только эта модель. ``None`` — глобальные модели
+    профиля (``ModelState.queue_models``): вызывающий подставит их сам.
+    """
+    if not semantic_enabled or not area.semantic:
+        return ()
+    if area.embedding_model:
+        return (area.embedding_model,)
+    return None
 
 
 @dataclass(frozen=True)
 class WatchConfig:
-    """Настройки watcher'а."""
+    """Настройки watcher'а и глобальные переключатели конфига."""
 
     poll_interval: float = 30.0
     debounce: float = 2.0
     ignore: tuple[str, ...] = ()
+    semantic: bool = True
+    """``False`` (верхний уровень конфига) — полностью выключить семантику."""
+    min_score: float | None = None
+    """Порог косинуса семантического поиска по умолчанию (блок ``search``)."""
 
     @classmethod
     def from_dict(cls, raw: object) -> WatchConfig:

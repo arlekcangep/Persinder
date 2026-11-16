@@ -126,9 +126,20 @@ class MetaStore(Protocol):
         self,
         models: list[str],
         has_sidecar: Callable[[str, str, str], bool],
+        models_for: Callable[[str, str], tuple[str, ...]] | None = None,
     ) -> None:
         """Поставить задачи только для источников без сайдкара под моделью
-        (``--reindex``: уже отработанное заново в очередь не возвращается)."""
+        (``--reindex``: уже отработанное заново в очередь не возвращается).
+
+        ``models_for(area, source_path)`` — модели конкретного источника по
+        конфигу; ``None`` — общий список ``models``.
+        """
+        ...
+
+    def doc_ids_in_paths(
+        self, prefixes: list[str], *, include_virtual: bool = False
+    ) -> set[str]:
+        """id документов с источником под одним из префиксов путей (скоуп поиска)."""
         ...
 
     def drop_queue_model(self, model: str) -> None:
@@ -137,6 +148,14 @@ class MetaStore(Protocol):
 
     def all_sources(self) -> list[SourceRow]:
         """Все источники (для удаления сайдкаров модели)."""
+        ...
+
+    def sources_for_docs(self, doc_ids: list[str]) -> list[SourceRow]:
+        """Источники документов (area, filename, source_path) для результатов поиска.
+
+        У документа может быть несколько источников; порядок — реальные файлы
+        раньше виртуальных (``source_path = ''``), затем по порядку добавления.
+        """
         ...
 
     def put_embeddings(
@@ -172,6 +191,10 @@ class MetaStore(Protocol):
 
     def embedding_models(self) -> list[str]:
         """Модели, у которых есть векторы (для ``persinder ann rebuild``)."""
+        ...
+
+    def count_embeddings(self, model: str) -> int:
+        """Сколько векторов чанков есть под моделью (сверка с ANN-индексом)."""
         ...
 
     def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]: ...
