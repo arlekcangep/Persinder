@@ -451,26 +451,46 @@ class ArchiveExtractorTest(unittest.TestCase):
         self.assertTrue(str(by_name["a.boom"].error).startswith("archive entry:"))
         self.assertEqual(by_name["b.txt"].text, "уцелевший текст")
 
-    def test_entry_size_limit_skips_big_entries(self):
-        path = self._zip("a.zip", {"big.txt": "x" * 100, "small.txt": "ok"})
-        with mock.patch.object(extract_module, "ARCHIVE_MAX_ENTRY_BYTES", 10):
+    def test_archive_over_size_limit_is_skipped(self):
+        """Архив больше лимита пропускается целиком — и не открывается."""
+        path = self._zip("a.zip", {"a.txt": "текст"})
+        with (
+            mock.patch.object(extract_module, "ARCHIVE_MAX_BYTES", 1),
+            mock.patch.object(
+                zipfile, "ZipFile", side_effect=AssertionError("архив открывать нельзя")
+            ),
+        ):
             parts = self.ext.extract_all(path, self.resolver)
-        self.assertEqual(self._names(parts), ["small.txt"])
+        self.assertEqual(len(parts), 1)
+        self.assertTrue(parts[0].skipped)
+        self.assertIn("пропущен", parts[0].error or "")
 
-    def test_total_size_limit_stops(self):
-        path = self._zip(
-            "a.zip", {"one.txt": "первый", "two.txt": "второй", "three.txt": "третий"}
-        )
-        with mock.patch.object(extract_module, "ARCHIVE_MAX_TOTAL_BYTES", 1):
+    def test_large_entry_goes_through_temp_not_ram(self):
+        """Запись крупная — читается потоком в temp, ``ZipFile.read`` не нужен."""
+        payload = "x" * (5 * 1024 * 1024)
+        path = self._zip("a.zip", {"big.txt": payload})
+        with mock.patch.object(
+            zipfile.ZipFile, "read", side_effect=AssertionError("read() в память")
+        ):
             parts = self.ext.extract_all(path, self.resolver)
-        self.assertEqual(parts, [])
+        self.assertEqual([p.name for p in parts], ["big.txt"])
+        self.assertEqual(parts[0].text, payload)
 
-    def test_entries_limit(self):
+    def test_temp_limit_stops_expansion(self):
+        """Лимит temp: собранные части сохраняются, хвост — пропуск с причиной."""
+        path = self._zip("a.zip", {"one.txt": "12345678", "two.txt": "12345678"})
+        with mock.patch.object(extract_module, "ARCHIVE_MAX_TEMP_BYTES", 10):
+            parts = self.ext.extract_all(path, self.resolver)
+        self.assertEqual(parts[0].name, "one.txt")
+        self.assertEqual(parts[0].text, "12345678")
+        self.assertTrue(parts[-1].skipped)
+        self.assertIn("лимит temp", parts[-1].error or "")
+
+    def test_all_entries_processed_without_count_limit(self):
         entries = {f"f{i}.txt": "t" for i in range(5)}
         path = self._zip("a.zip", entries)
-        with mock.patch.object(extract_module, "ARCHIVE_MAX_ENTRIES", 3):
-            parts = self.ext.extract_all(path, self.resolver)
-        self.assertEqual(len(parts), 3)
+        parts = self.ext.extract_all(path, self.resolver)
+        self.assertEqual(len(parts), 5)
 
     def test_protocol_satisfied(self):
         self.assertIsInstance(ArchiveExtractor(), ContainerExtractor)

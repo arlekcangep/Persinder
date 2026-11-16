@@ -14,10 +14,9 @@
 
 from ._base import BaseExtractor, Extracted
 from ._common import (
+    ARCHIVE_MAX_BYTES,
     ARCHIVE_MAX_DEPTH,
-    ARCHIVE_MAX_ENTRIES,
-    ARCHIVE_MAX_ENTRY_BYTES,
-    ARCHIVE_MAX_TOTAL_BYTES,
+    ARCHIVE_MAX_TEMP_BYTES,
     COMPOUND_SUFFIXES,
     TGZ_SUFFIXES,
     archive_suffix,
@@ -39,10 +38,9 @@ from .rtf import RtfExtractor
 from .text import TextExtractor
 
 __all__ = [
+    "ARCHIVE_MAX_BYTES",
     "ARCHIVE_MAX_DEPTH",
-    "ARCHIVE_MAX_ENTRIES",
-    "ARCHIVE_MAX_ENTRY_BYTES",
-    "ARCHIVE_MAX_TOTAL_BYTES",
+    "ARCHIVE_MAX_TEMP_BYTES",
     "CLASS_ALIASES",
     "COMPOUND_SUFFIXES",
     "TGZ_SUFFIXES",

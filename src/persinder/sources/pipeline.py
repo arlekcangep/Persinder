@@ -145,7 +145,8 @@ class IndexingPipeline:
             stats.skipped += 1
             return
 
-        errored = [p for p in parts if p.error]
+        errored = [p for p in parts if p.error and not p.skipped]
+        skipped = [p for p in parts if p.skipped]
         usable = [p for p in parts if not p.error and p.text.strip()]
         if not usable:
             if errored:
@@ -153,6 +154,12 @@ class IndexingPipeline:
                 self._record(area, rel_path, JournalEvent.ERROR, detail=detail)
                 self._outcome("error", f"ошибка: {rel_path} — {detail}")
                 self._fail(stats, rel_path, detail)
+            elif skipped:
+                # Намеренный пропуск (архив больше лимита, лимит temp): это не
+                # сбой — в журнал пишем причину как пропуск.
+                detail = "; ".join(p.error or "пропущен" for p in skipped)
+                self._record(area, rel_path, JournalEvent.SKIPPED, detail=detail)
+                self._outcome("warning", f"пропущен: {rel_path} ({detail})")
             else:
                 self._record(area, rel_path, JournalEvent.SKIPPED, detail="нет текста")
                 self._outcome("warning", f"пропущен: {rel_path} (нет текста)")

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import io
+import json
 import time
 import unittest
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from persinder.domain import Area
 from persinder.ingest import IngestService
@@ -25,6 +27,7 @@ from persinder.sources import (
     WatchConfig,
     default_registry,
 )
+from persinder.sources import extract as extract_module
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
 
@@ -204,6 +207,35 @@ class PipelineTest(unittest.TestCase):
         counts = self.store.counts()
         self.assertEqual(counts["documents"], 1)
         self.assertEqual(counts["chunks"], 1)
+
+    def test_too_large_archive_skipped_with_journal_reason(self):
+        """Архив больше лимита: пропуск (не ошибка), причина — в журнале."""
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("archive", "markdown", "text"),
+        )
+        ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
+        pipeline = IndexingPipeline(ingest, default_registry(), journal=self.journal)
+        archive_path = self.area.path / "huge.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("inside.md", "текст внутри большого архива")
+
+        with mock.patch.object(extract_module, "ARCHIVE_MAX_BYTES", 1):
+            stats = pipeline.process(self._scan(area))
+
+        self.assertEqual(stats.skipped, 1)
+        self.assertEqual(stats.indexed, 0)
+        self.assertEqual(self.store.counts()["documents"], 0)
+        events = [
+            json.loads(line)
+            for line in (self.data / "journal.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        final = [e for e in events if e["file"] == "huge.zip"][-1]
+        self.assertEqual(final["event"], "skipped")
+        self.assertIn("ГБ", final["detail"])
 
     def test_zip_archive_indexed_as_part_per_entry(self):
         # Область допускает zip; каждая запись архива — отдельный документ.

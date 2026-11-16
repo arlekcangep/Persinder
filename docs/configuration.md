@@ -114,7 +114,9 @@ watch:
 **Контейнеры.** `archive` — zip, 7z (extra `7z`), tar/tar.gz/tgz/tar.bz2/
 tar.xz, rar (extra `rar` + внешний unrar/7z/bsdtar): каждая запись становится
 отдельным документом. Вложенные архивы раскрываются рекурсивно (лимит
-`ARCHIVE_MAX_DEPTH`, по умолчанию 4). Полный путь части
+`ARCHIVE_MAX_DEPTH`, по умолчанию 4). Архив больше `ARCHIVE_MAX_BYTES`
+(2 ГБ) пропускается целиком, а выгрузка в temp при обходе ограничена
+`ARCHIVE_MAX_TEMP_BYTES` (20 ГБ) — обе причины попадают в журнал. Полный путь части
 (`folder/a.zip/folder/b.zip/x.pdf`) сохраняется разбором: файл-контейнер +
 цепочка записей в `document_sources`.
 

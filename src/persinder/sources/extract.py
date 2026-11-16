@@ -8,10 +8,9 @@
 """
 
 from .extractors import (
+    ARCHIVE_MAX_BYTES,
     ARCHIVE_MAX_DEPTH,
-    ARCHIVE_MAX_ENTRIES,
-    ARCHIVE_MAX_ENTRY_BYTES,
-    ARCHIVE_MAX_TOTAL_BYTES,
+    ARCHIVE_MAX_TEMP_BYTES,
     CLASS_ALIASES,
     COMPOUND_SUFFIXES,
     TGZ_SUFFIXES,
@@ -38,10 +37,9 @@ from .extractors import (
 from .interfaces import ContainerExtractor, Extractor
 
 __all__ = [
+    "ARCHIVE_MAX_BYTES",
     "ARCHIVE_MAX_DEPTH",
-    "ARCHIVE_MAX_ENTRIES",
-    "ARCHIVE_MAX_ENTRY_BYTES",
-    "ARCHIVE_MAX_TOTAL_BYTES",
+    "ARCHIVE_MAX_TEMP_BYTES",
     "CLASS_ALIASES",
     "COMPOUND_SUFFIXES",
     "TGZ_SUFFIXES",

@@ -26,6 +26,8 @@ class Extracted:
     дают обратный разбор ``source_path`` без эвристик по строке.
     ``extractor`` — имя экстрактора, который дал этот результат (пишется в БД).
     ``error`` — непустой при проблеме разбора; текст в этом случае пуст.
+    ``skipped`` — часть **не разбиралась намеренно** (например, архив больше
+    лимита): в журнал это пишется как пропуск, а не как ошибка.
     """
 
     text: str
@@ -36,6 +38,7 @@ class Extracted:
     extractor: str = ""
     container_path: str = ""
     container_entries: tuple[str, ...] = ()
+    skipped: bool = False
 
 
 class BaseExtractor:
