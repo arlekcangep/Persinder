@@ -190,13 +190,24 @@ class SqliteStoreTest(unittest.TestCase):
             self.store.text_cached_docs(["cached", "uncached"]), {"cached"}
         )
         self.assertEqual(self.store.text_cached_docs([]), set())
+        self.assertTrue(self.store.document_wants_cache("cached"))
+        self.assertFalse(self.store.document_wants_cache("uncached"))
 
-        self.store.set_text_cached("uncached", True)
+        # Дубликат из кэширующей области поднимает флаг у документа (T5b).
+        self.store.add_source("uncached", "foreign", "c.md", cache_text=True)
         self.assertEqual(
             self.store.text_cached_docs(["cached", "uncached"]),
             {"cached", "uncached"},
             "дубликат с кэшируемым источником поднимает флаг (D27)",
         )
+
+        # Некэшируемый дубликат уже лежащий кэш не отменяет.
+        self.store.add_source("cached", "foreign", "d.md", cache_text=False)
+        self.assertTrue(self.store.document_wants_cache("cached"))
+
+        # Удаление единственного кэширующего источника сбрасывает флаг.
+        self.store.remove_source("foreign", "c.md")
+        self.assertFalse(self.store.document_wants_cache("uncached"))
 
     def test_enqueue_missing_queues_uncached_doc_without_text(self):
         """Нет текста, но он и не нужен — текст перечитается из оригинала."""
@@ -380,6 +391,9 @@ class SqliteStoreTest(unittest.TestCase):
                 );
                 INSERT INTO documents VALUES
                     ('d1', 'hash', 't', 3, 'hash', '2026-01-01', 'markdown');
+                INSERT INTO document_sources
+                    (doc_id, area, filename, created_at)
+                    VALUES ('d1', 'personal', 'a.txt', '2026-01-01');
                 """
             )
             conn.commit()
@@ -388,9 +402,13 @@ class SqliteStoreTest(unittest.TestCase):
             store = SqliteStore(db)
             try:
                 cached = store.text_cached_docs(["d1"])
+                wants = store.document_wants_cache("d1")
             finally:
                 store.close()
         self.assertEqual(cached, {"d1"})
+        self.assertTrue(
+            wants, "старый источник тоже получает cache_text=1 по умолчанию (T5b)"
+        )
 
     def test_migrate_renames_entries_column(self):
         """Промежуточное имя ``entries`` переименовывается, данные сохраняются."""

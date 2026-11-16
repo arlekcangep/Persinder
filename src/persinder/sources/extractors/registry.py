@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from pathlib import Path
 
 from ..classify import (
@@ -125,15 +126,22 @@ class ExtractorRegistry:
                 return ext
         return None
 
-    def is_cachable(self, name: str) -> bool:
-        """Кэширует ли экстрактор ``name`` свой текст (D27).
+    def is_cachable(self, name: str, no_cache: Sequence[str] = ()) -> bool:
+        """Кэширует ли экстрактор ``name`` свой текст (D27, T5b).
 
+        ``no_cache`` — имена форматов/классов из конфига области (``AreaConfig.
+        no_cache``): и формата, и его класса достаточно, чтобы отключить кэш.
         Неизвестное имя (пустой ``extractor`` у записи) — ``True``: лишняя
         копия дешевле, чем повторное извлечение при каждом ``/context``.
         Части контейнеров кэшируются всегда — это решает пайплайн.
         """
         extractor = self.extractor_for(name)
-        return True if extractor is None else extractor.is_cachable()
+        disabled = frozenset(no_cache)
+        if extractor is None:
+            return name not in disabled
+        if extractor.name in disabled or extractor.format_class in disabled:
+            return False
+        return extractor.is_cachable()
 
     def container_for(self, container_path: str) -> ContainerExtractor | None:
         """Контейнер, обслуживающий файл-контейнер (по его суффиксу).

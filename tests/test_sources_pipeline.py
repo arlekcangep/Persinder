@@ -110,6 +110,34 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(self.store.text_cached_docs([doc_id]), set())
         self.assertNotEqual(self.store.pending_embeddings(limit=100), [])
 
+    def test_area_no_cache_disables_only_listed_formats(self):
+        """T5b: `no_cache` области решает по формату — md кэшируется, txt нет."""
+
+        def doc_id(name: str) -> str:
+            found = self.store.source_document(Area.PERSONAL.value, name)
+            assert found is not None, name
+            return found
+
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("markdown", "text"),
+            no_cache=("text",),
+        )
+        (self.area.path / "note.txt").write_text("заметка txt", encoding="utf-8")
+        (self.area.path / "note.md").write_text("# Заметка md", encoding="utf-8")
+
+        stats = self.pipeline.process(self._scan(area))
+
+        self.assertEqual(stats.indexed, 2)
+        txt_id, md_id = doc_id("note.txt"), doc_id("note.md")
+        self.assertFalse(self.store.document_wants_cache(txt_id))
+        self.assertTrue(self.store.document_wants_cache(md_id))
+        self.assertEqual(self._texts(), [f"{md_id}.txt"])
+        # Эмбеддинги ставятся обоим: воркер перечитает txt из оригинала.
+        queued = {item["doc_id"] for item in self.store.pending_embeddings(limit=100)}
+        self.assertEqual(queued, {txt_id, md_id})
+
     def test_area_model_overrides_global_queue(self):
         area = AreaConfig(
             path=self.area.path,

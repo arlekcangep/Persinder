@@ -91,6 +91,7 @@ class MetaStore(Protocol):
         source_path: str = "",
         container_path: str = "",
         container_entries: Sequence[str] = (),
+        cache_text: bool = True,
     ) -> list[str]:
         """Закрепить источник; вернуть id вытесненных документов."""
         ...
@@ -179,12 +180,13 @@ class MetaStore(Protocol):
         """id документов из списка, чей текст **должен** лежать в кэше.
 
         Флаг ``documents.text_cached`` (D27) отличает «текст потерян» (надо
-        переиндексировать) от «текст не кэшируется по замыслу экстрактора».
+        переиндексировать) от «текст не кэшируется по замыслу»; он
+        пересчитывается по источникам (``cache_text``, T5b, D31).
         """
         ...
 
-    def set_text_cached(self, doc_id: str, cached: bool) -> None:
-        """Поднять/сбросить флаг «текст документа хранится в кэше»."""
+    def document_wants_cache(self, doc_id: str) -> bool:
+        """Нужен ли текст документа в кэше хотя бы одному источнику (T5b)."""
         ...
 
     def sources_for_docs(self, doc_ids: list[str]) -> list[SourceRow]:

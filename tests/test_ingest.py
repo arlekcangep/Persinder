@@ -234,6 +234,35 @@ class CacheTextPolicyTest(unittest.TestCase):
         self.assertTrue(self.textstore.exists(doc_id))
         self.assertEqual(self.store.text_cached_docs([doc_id]), {doc_id})
 
+    def test_rescan_with_disabled_cache_drops_text(self):
+        """Тот же файл перечитан с `cache_text=False` — текст уходит с диска."""
+        text = "переключаем кэш выключен"
+        first = self._ingest("note.md", text, cache_text=True)
+        doc_id = first.document_id
+        assert doc_id is not None
+        self.assertTrue(self.textstore.exists(doc_id))
+
+        again = self._ingest("note.md", text, cache_text=False)
+
+        self.assertEqual(again.status, IngestResult.ALREADY)
+        self.assertEqual(again.document_id, doc_id)
+        self.assertFalse(self.textstore.exists(doc_id))
+        self.assertFalse(self.store.document_wants_cache(doc_id))
+
+    def test_removing_last_cached_source_drops_text(self):
+        """Остался только некэшируемый источник — кэш больше не нужен."""
+        text = "общий текст двух источников"
+        first = self._ingest("a.pdf", text, cache_text=True)
+        doc_id = first.document_id
+        assert doc_id is not None
+        self._ingest("b.md", text, cache_text=False)
+
+        result = self.service.remove_source(Area.PERSONAL, "a.pdf")
+
+        self.assertTrue(result.found)
+        self.assertFalse(self.textstore.exists(doc_id))
+        self.assertFalse(self.store.document_wants_cache(doc_id))
+
 
 class IngestDuplicateQueueTest(unittest.TestCase):
     """Повторная встреча файла не пересчитывает уже готовые эмбеддинги.

@@ -163,15 +163,6 @@ class IngestService:
 
         existing = self._store.find_document_by_hash(content_hash)
         if existing:
-            # Повторный скан того же содержимого: текст пишем, если он нужен в
-            # кэше. Он мог быть потерян (удалён руками, чужой профиль, сбой) —
-            # без него эмбеддинг не посчитать без перечитывания оригинала.
-            # Запись идемпотентна: содержимое то же самое (хэш совпал).
-            # Дубликат с кэшируемым источником поднимает флаг и для документа,
-            # который раньше жил без кэша (D27).
-            if request.cache_text:
-                self._textstore.put(existing, text)
-                self._store.set_text_cached(existing, True)
             self._log(
                 IngestEvent.DUPLICATE,
                 doc_id=existing,
@@ -186,7 +177,16 @@ class IngestService:
                 source_path=source_path,
                 container_path=container_path,
                 container_entries=container_entries,
+                cache_text=request.cache_text,
             )
+            # Файл кэша один на документ (id = хэш), источники могут расходиться
+            # в решении (T5b, D31): текст держим, пока его хочет хотя бы один
+            # источник. Все отказались — удаляем: он воспроизводим из оригиналов
+            # (потерянный кэш кэширующего документа так же восстанавливается).
+            if self._store.document_wants_cache(existing):
+                self._textstore.put(existing, text)
+            else:
+                self._textstore.delete(existing)
             self._drop_texts(evicted)
             self._drop_sidecars(evicted, previous, source_path, existing)
             # У нового источника свои сайдкары — ставим его задачи под каждой
@@ -290,6 +290,10 @@ class IngestService:
         purged = self._store.remove_source(area_name, filename)
         if purged is not None:
             self._textstore.delete(purged)
+        elif not self._store.document_wants_cache(doc_id):
+            # Документ остаётся у других источников, но кэш им не нужен
+            # (T5b, D31): текст воспроизводим из оригинала.
+            self._textstore.delete(doc_id)
         if source_path:
             delete_file_sidecars(source_path)
         elif purged is not None and self._virtual_dir is not None:

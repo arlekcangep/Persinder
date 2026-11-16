@@ -193,11 +193,13 @@ class IndexingPipeline:
                     container_entries=part.container_entries,
                     # Части контейнеров кэшируются всегда: на диске такого
                     # файла нет — перечитывать нечего (D27). Обычный файл —
-                    # по решению экстрактора (сейчас все форматы кэшируют).
+                    # по конфигу области (no_cache, T5b) и решению экстрактора.
                     cache_text=(
                         True
                         if part.container_entries
-                        else self._registry.is_cachable(part.extractor)
+                        else self._registry.is_cachable(
+                            part.extractor, area.no_cache or ()
+                        )
                     ),
                     embedding_models=queue_models_for(
                         area, semantic_enabled=self._semantic

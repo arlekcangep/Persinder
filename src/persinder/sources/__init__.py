@@ -36,6 +36,7 @@ from .extract import (
 )
 from .journal import JOURNAL_RETENTION_DAYS, Journal, JournalEvent
 from .models import (
+    DEFAULT_NO_CACHE,
     AreaConfig,
     AreaScan,
     ChangeEvent,
@@ -67,6 +68,7 @@ __all__ = [
     "ClassMatch",
     "Classifier",
     "ClassifierSet",
+    "DEFAULT_NO_CACHE",
     "EpubExtractor",
     "Extractor",
     "Extracted",

@@ -53,6 +53,7 @@ class ServeTest(unittest.TestCase):
             f"  - path: {self.area}\n"
             "    role: personal\n"
             "    formats: [markdown, text]\n"
+            "    no_cache: []\n"
             "watch:\n"
             "  poll_interval: 1\n"
             "  debounce: 0\n",

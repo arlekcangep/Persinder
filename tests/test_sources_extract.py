@@ -39,13 +39,32 @@ class RegistryTest(unittest.TestCase):
         return path
 
     def test_all_default_extractors_are_cacheable(self):
-        """D27: пока кэшируют все форматы; переключатель — T5b (в YAML)."""
+        """Экстракторы сами по себе кэшируют всё; запрет приходит из конфига."""
         registry = default_registry()
         for name in sorted(registry.known_names()):
             self.assertTrue(registry.is_cachable(name), name)
         self.assertTrue(
             registry.is_cachable("нет-такого"),
             "неизвестное имя — кэшируем: лишняя копия дешевле переизвлечения",
+        )
+
+    def test_no_cache_disables_by_format_and_class(self):
+        """T5b: no_cache принимает и формат, и класс (`structure-text`)."""
+        registry = default_registry()
+        self.assertFalse(registry.is_cachable("markdown", ("markdown",)))
+        self.assertFalse(
+            registry.is_cachable("html", ("structure-text",)),
+            "имя класса отключает кэш всему классу",
+        )
+        self.assertFalse(registry.is_cachable("fb2", ("fb2", "pdf")))
+        self.assertTrue(
+            registry.is_cachable("epub", ("fb2", "structure-text")),
+            "формат вне списка кэшируется как обычно",
+        )
+        self.assertTrue(registry.is_cachable("markdown", ()))
+        self.assertTrue(
+            registry.is_cachable("", ("markdown",)),
+            "неизвестное имя — кэшируем: его класс неизвестен, копия дешевле",
         )
 
     def test_recognized_classes(self):

@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS document_sources (
     source_path TEXT NOT NULL DEFAULT '',
     container_path TEXT NOT NULL DEFAULT '',
     container_entries TEXT NOT NULL DEFAULT '[]',
+    cache_text INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL,
     UNIQUE(doc_id, area, filename)
 );
@@ -149,6 +150,9 @@ class SqliteStore:
             # D27: текст не всех форматов хранится в кэше. Старые документы
             # считаются кэшируемыми — как и было до появления флага.
             ("documents", "text_cached", "INTEGER NOT NULL DEFAULT 1"),
+            # T5b: решение принимается для источника (область + формат), а
+            # флаг документа — производное от источников.
+            ("document_sources", "cache_text", "INTEGER NOT NULL DEFAULT 1"),
         ):
             cols = [
                 str(row["name"])
@@ -408,6 +412,7 @@ class SqliteStore:
         source_path: str,
         container_path: str = "",
         container_entries: Sequence[str] = (),
+        cache_text: bool = True,
     ) -> list[str]:
         """Закрепить ``(area, filename)`` за ``doc_id``, вытеснив прежний документ.
 
@@ -416,6 +421,11 @@ class SqliteStore:
         вычищается, если у него не осталось других источников. Возвращает id
         вычищенных документов — по ним вызывающий удаляет сырой текст и
         сайдкары. Нужен открытый ``with`` (вызывается внутри транзакции).
+
+        ``cache_text`` — решение области/формата (T5b, D31): флаг живёт на
+        источнике, потому что дубликаты из разных областей могут расходиться.
+        После записи флаг документа пересчитывается: он равен «хотя бы один
+        источник хочет кэш».
         """
         stale = self._conn.execute(
             "SELECT DISTINCT doc_id FROM document_sources"
@@ -439,7 +449,8 @@ class SqliteStore:
         self._conn.execute(
             "INSERT INTO document_sources"
             "(doc_id, area, filename, source_path, container_path,"
-            " container_entries, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " container_entries, cache_text, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(doc_id, area, filename) DO UPDATE SET"
             " source_path = CASE WHEN excluded.source_path != ''"
             "   THEN excluded.source_path ELSE document_sources.source_path END,"
@@ -447,7 +458,8 @@ class SqliteStore:
             "   THEN excluded.container_path ELSE document_sources.container_path END,"
             " container_entries = CASE WHEN excluded.container_entries != '[]'"
             "   THEN excluded.container_entries"
-            "   ELSE document_sources.container_entries END",
+            "   ELSE document_sources.container_entries END,"
+            " cache_text = excluded.cache_text",
             (
                 doc_id,
                 area,
@@ -455,10 +467,27 @@ class SqliteStore:
                 source_path,
                 container_path,
                 _container_entries_json(container_entries),
+                1 if cache_text else 0,
                 utcnow(),
             ),
         )
+        self._refresh_text_cached(doc_id)
         return evicted
+
+    def _refresh_text_cached(self, doc_id: str) -> None:
+        """Пересчитать ``documents.text_cached`` по источникам (T5b, D31).
+
+        Нужен открытый ``with``. Текст кэшируется, если его хочет хотя бы один
+        источник: файл кэша общий (``doc_id`` = хэш содержимого), и порядок
+        обхода областей не должен решать его судьбу.
+        """
+        self._conn.execute(
+            "UPDATE documents SET text_cached = CASE WHEN EXISTS("
+            "  SELECT 1 FROM document_sources"
+            "  WHERE doc_id = ? AND cache_text = 1"
+            ") THEN 1 ELSE 0 END WHERE id = ?",
+            (doc_id, doc_id),
+        )
 
     def add_source(
         self,
@@ -468,11 +497,18 @@ class SqliteStore:
         source_path: str = "",
         container_path: str = "",
         container_entries: Sequence[str] = (),
+        cache_text: bool = True,
     ) -> list[str]:
         """Закрепить источник; вернуть id вытесненных документов (для чистки текста)."""
         with self._lock, self._conn:
             return self._bind_source(
-                doc_id, area, filename, source_path, container_path, container_entries
+                doc_id,
+                area,
+                filename,
+                source_path,
+                container_path,
+                container_entries,
+                cache_text,
             )
 
     def has_source(self, area: str, filename: str) -> bool:
@@ -549,6 +585,9 @@ class SqliteStore:
             if int(left) == 0:
                 self._purge_document(doc_id)
                 return doc_id
+            # Источник мог быть единственным, кому нужен кэш (T5b, D31):
+            # документ остаётся, а флаг — по оставшимся источникам.
+            self._refresh_text_cached(doc_id)
             return None
 
     def delete_document(self, doc_id: str) -> None:
@@ -571,7 +610,10 @@ class SqliteStore:
 
         Прежний документ того же файла ``(area, filename)`` вытесняется
         (см. ``_bind_source``). ``container_path`` + ``container_entries`` —
-        явный разбор пути для части архива. Возвращает id вытесненных
+        явный разбор пути для части архива. Решение о кэше едет в
+        ``Document.text_cached`` (T5b, D31): новый документ — это ровно один
+        источник, поэтому флаг документа и есть флаг источника; после привязки
+        он пересчитывается по всем источникам. Возвращает id вытесненных
         документов, чтобы вызывающий удалил их сырой текст и сайдкары.
         """
         with self._lock, self._conn:
@@ -598,6 +640,7 @@ class SqliteStore:
                 source_path,
                 container_path,
                 container_entries,
+                doc.text_cached,
             )
             for chunk in chunks:
                 cur = self._conn.execute(
@@ -799,13 +842,19 @@ class SqliteStore:
             ).fetchall()
         return {str(row["id"]) for row in rows}
 
-    def set_text_cached(self, doc_id: str, cached: bool) -> None:
-        """Поднять/сбросить флаг «текст документа хранится в кэше» (D27)."""
-        with self._lock, self._conn:
-            self._conn.execute(
-                "UPDATE documents SET text_cached = ? WHERE id = ?",
-                (1 if cached else 0, doc_id),
-            )
+    def document_wants_cache(self, doc_id: str) -> bool:
+        """Нужен ли текст документа в кэше хотя бы одному источнику (T5b).
+
+        Флаг ``documents.text_cached`` — производное от
+        ``document_sources.cache_text`` и пересчитывается при каждой привязке
+        источника. ``False`` — текст можно удалить с диска: он воспроизводим
+        из оригиналов (``/context`` и воркер перечитают файл).
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT text_cached FROM documents WHERE id = ?", (doc_id,)
+            ).fetchone()
+        return bool(row["text_cached"]) if row is not None else False
 
     def sources_for_docs(self, doc_ids: list[str]) -> list[SourceRow]:
         """Источники документов (для выдачи пути в результатах поиска).
