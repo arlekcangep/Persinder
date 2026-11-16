@@ -27,3 +27,19 @@ export interface ApiHealthResponse {
   model?: string;
   pending_embeddings?: number;
 }
+
+export type ApiLogLevel = "info" | "warning" | "error";
+
+export interface ApiLogEvent {
+  id: number;
+  /** ISO-метка времени (UTC). */
+  ts: string;
+  level: ApiLogLevel;
+  message: string;
+}
+
+export interface ApiLogResponse {
+  events: ApiLogEvent[];
+  /** Последний выданный id — для догрузки новыми запросами ``after``. */
+  last_id: number;
+}

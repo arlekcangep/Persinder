@@ -59,7 +59,9 @@ class ServeTest(unittest.TestCase):
     def test_serve_indexes_and_embeds_then_stops(self):
         served: list[tuple[str, int]] = []
 
-        def fake_serve(ingest: Ingest, search: Search, host: str, port: int) -> None:
+        def fake_serve(
+            ingest: Ingest, search: Search, host: str, port: int, log=None
+        ) -> None:
             served.append((host, port))
             # даём watcher'у и потоку эмбеддингов отработать первый проход
             time.sleep(1.0)
@@ -100,7 +102,9 @@ class ServeTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-        def fake_serve(ingest: Ingest, search: Search, host: str, port: int) -> None:
+        def fake_serve(
+            ingest: Ingest, search: Search, host: str, port: int, log=None
+        ) -> None:
             time.sleep(1.0)  # дать watcher'у проиндексировать файл
 
         out = io.StringIO()
@@ -132,7 +136,9 @@ class ServeTest(unittest.TestCase):
         )
         served: list[str] = []
 
-        def fake_serve(ingest: Ingest, search: Search, host: str, port: int) -> None:
+        def fake_serve(
+            ingest: Ingest, search: Search, host: str, port: int, log=None
+        ) -> None:
             served.append(host)
             time.sleep(1.0)
 
@@ -173,7 +179,9 @@ class ServeTest(unittest.TestCase):
         )
         served: list[str] = []
 
-        def fake_serve(ingest: Ingest, search: Search, host: str, port: int) -> None:
+        def fake_serve(
+            ingest: Ingest, search: Search, host: str, port: int, log=None
+        ) -> None:
             served.append(host)
             time.sleep(1.0)
 
@@ -200,7 +208,9 @@ class ServeTest(unittest.TestCase):
     def test_serve_without_config_is_http_only(self):
         served: list[str] = []
 
-        def fake_serve(ingest: Ingest, search: Search, host: str, port: int) -> None:
+        def fake_serve(
+            ingest: Ingest, search: Search, host: str, port: int, log=None
+        ) -> None:
             served.append(host)
 
         empty = self.root / "empty"

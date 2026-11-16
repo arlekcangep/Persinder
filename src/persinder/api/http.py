@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 from ..ingest import IngestResult
 from ..interfaces import Ingest, Search
 from ..search import SearchQuery
+from .index_log import IndexLog
 from .models import IngestPayload, IngestResponse, PayloadError, SearchResponse
 
 MAX_BODY_BYTES = 32 * 1024 * 1024  # 32 МБ
@@ -46,13 +47,19 @@ class PersinderHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     ingest: Ingest
     search: Search
+    log: IndexLog | None
 
     def __init__(
-        self, address: tuple[str, int], ingest: Ingest, search: Search
+        self,
+        address: tuple[str, int],
+        ingest: Ingest,
+        search: Search,
+        log: IndexLog | None = None,
     ) -> None:
         super().__init__(address, _Handler)
         self.ingest = ingest
         self.search = search
+        self.log = log
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         """Клиент мог разорвать соединение (например, отменил запрос при
@@ -89,6 +96,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"status": "ok"})
         elif parsed.path == "/search":
             self._handle_search(parsed.query)
+        elif parsed.path == "/logs":
+            self._handle_logs(parsed.query)
         else:
             self._handle_static(parsed.path)
 
@@ -184,6 +193,33 @@ class _Handler(BaseHTTPRequestHandler):
         )
         self._send_json(200, SearchResponse.from_result(result).to_dict())
 
+    def _handle_logs(self, raw_query: str) -> None:
+        """Последние события индексации: ``GET /logs?limit=200&after=N``."""
+        params = parse_qs(raw_query)
+        try:
+            limit = int((params.get("limit") or ["200"])[0])
+        except ValueError:
+            self._send_json(400, {"error": "invalid limit"})
+            return
+        limit = max(1, min(limit, 1000))
+
+        after: int | None = None
+        raw_after = params.get("after")
+        if raw_after:
+            try:
+                after = int(raw_after[0])
+            except ValueError:
+                self._send_json(400, {"error": "invalid after"})
+                return
+
+        log = self._services().log
+        if log is None:
+            self._send_json(200, {"events": [], "last_id": 0})
+            return
+
+        events = [ev.to_dict() for ev in log.entries(limit=limit, after_id=after)]
+        self._send_json(200, {"events": events, "last_id": log.last_id})
+
     def do_POST(self) -> None:  # noqa: N802
         if self.path != "/ingest":
             self._send_json(404, {"error": "not found"})
@@ -218,15 +254,25 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def make_server(
-    ingest: Ingest, search: Search, host: str, port: int
+    ingest: Ingest,
+    search: Search,
+    host: str,
+    port: int,
+    log: IndexLog | None = None,
 ) -> PersinderHTTPServer:
     """Создать HTTP-сервер (без запуска). ``port=0`` выберет свободный порт."""
-    return PersinderHTTPServer((host, port), ingest, search)
+    return PersinderHTTPServer((host, port), ingest, search, log)
 
 
-def serve(ingest: Ingest, search: Search, host: str, port: int) -> None:
+def serve(
+    ingest: Ingest,
+    search: Search,
+    host: str,
+    port: int,
+    log: IndexLog | None = None,
+) -> None:
     """Запустить сервер и работать до остановки."""
-    server = make_server(ingest, search, host, port)
+    server = make_server(ingest, search, host, port, log)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

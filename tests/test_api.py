@@ -59,6 +59,92 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             self.assertEqual(json.load(resp)["status"], "ok")
 
+    def test_logs_empty_when_no_log_attached(self):
+        with urllib.request.urlopen(self.base + "/logs") as resp:
+            body = json.load(resp)
+        self.assertEqual(body["events"], [])
+        self.assertEqual(body["last_id"], 0)
+
+    def test_logs_returns_recent_events(self):
+        from persinder.api import IndexLog
+
+        log = IndexLog()
+        log.enable_console(False)
+        log.info("проиндексирован: a.txt (документ 1, чанков: 2)")
+        log.error("ошибка: b.pdf — boom")
+
+        server = make_server(
+            self.server.ingest, self.server.search, host="127.0.0.1", port=0, log=log
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        addr = server.server_address
+        base = f"http://{addr[0]}:{addr[1]}"
+        try:
+            with urllib.request.urlopen(base + "/logs") as resp:
+                body = json.load(resp)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(5)
+
+        self.assertEqual(body["last_id"], 2)
+        self.assertEqual(len(body["events"]), 2)
+        first, second = body["events"]
+        self.assertEqual(first["level"], "info")
+        self.assertIn("проиндексирован: a.txt", first["message"])
+        self.assertEqual(second["level"], "error")
+        self.assertEqual(first["id"], 1)
+        self.assertEqual(second["id"], 2)
+        self.assertIn("T", first["ts"])
+
+    def test_logs_after_id_filters_newer(self):
+        from persinder.api import IndexLog
+
+        log = IndexLog()
+        log.enable_console(False)
+        log.info("файл 1")
+        log.info("файл 2")
+        log.info("файл 3")
+
+        server = make_server(
+            self.server.ingest, self.server.search, host="127.0.0.1", port=0, log=log
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        addr = server.server_address
+        base = f"http://{addr[0]}:{addr[1]}"
+        try:
+            with urllib.request.urlopen(base + "/logs?after=1") as resp:
+                body = json.load(resp)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(5)
+
+        self.assertEqual([ev["id"] for ev in body["events"]], [2, 3])
+
+    def test_logs_invalid_limit_is_400(self):
+        from persinder.api import IndexLog
+
+        log = IndexLog()
+        log.enable_console(False)
+        server = make_server(
+            self.server.ingest, self.server.search, host="127.0.0.1", port=0, log=log
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        addr = server.server_address
+        base = f"http://{addr[0]}:{addr[1]}"
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(base + "/logs?limit=abc")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(5)
+        self.assertEqual(ctx.exception.code, 400)
+
     def _handler_with_wfile(self, wfile: Any) -> _Handler:
         """Минимальный обработчик без сокета: только то, что нужно отправке."""
         handler = object.__new__(_Handler)

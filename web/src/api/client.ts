@@ -1,4 +1,8 @@
-import type { ApiHealthResponse, ApiSearchResponse } from "./types";
+import type {
+  ApiHealthResponse,
+  ApiLogResponse,
+  ApiSearchResponse,
+} from "./types";
 
 export interface SearchParams {
   text: string;
@@ -65,6 +69,31 @@ export async function health(signal?: AbortSignal): Promise<ApiHealthResponse> {
     throw new ApiError(await readError(response), response.status);
   }
   return (await response.json()) as ApiHealthResponse;
+}
+
+export interface LogsParams {
+  /** Сколько последних событий вернуть. */
+  limit?: number;
+  /** Только события с id больше указанного. */
+  after?: number;
+}
+
+export async function fetchLogs(
+  params: LogsParams = {},
+  signal?: AbortSignal,
+): Promise<ApiLogResponse> {
+  const query = new URLSearchParams();
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.after !== undefined) query.set("after", String(params.after));
+  const qs = query.toString();
+  const response = await fetch(apiUrl(`/logs${qs ? `?${qs}` : ""}`), {
+    signal,
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new ApiError(await readError(response), response.status);
+  }
+  return (await response.json()) as ApiLogResponse;
 }
 
 export function isAbortError(error: unknown): boolean {

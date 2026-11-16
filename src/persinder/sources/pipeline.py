@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 
+from ..api.index_log import IndexLog
 from ..ingest import IngestRequest, IngestResult
 from ..interfaces import Ingest
 from .extract import Extracted, ExtractorRegistry
@@ -48,6 +49,7 @@ class IndexingPipeline:
         registry: ExtractorRegistry,
         journal: Journal | None = None,
         semantic: bool = True,
+        log: IndexLog | None = None,
     ) -> None:
         self._ingest = ingest
         self._registry = registry
@@ -55,6 +57,12 @@ class IndexingPipeline:
         # Глобальный переключатель семантики из конфига: false — ни одна
         # область не ставит эмбеддинги в очередь.
         self._semantic = semantic
+        self._log = log
+
+    def _outcome(self, level: str, message: str) -> None:
+        """Дописать событие в ``IndexLog`` (консоль + веб-журнал)."""
+        if self._log is not None:
+            self._log.add(level, message)
 
     def _record(
         self,
@@ -109,6 +117,7 @@ class IndexingPipeline:
         if event.kind is ChangeKind.DELETED:
             detail = self._remove_source(area, rel_path)
             self._record(area, rel_path, JournalEvent.DELETED, detail=detail)
+            self._outcome("info", f"удалён: {rel_path} ({detail})")
             stats.deleted += 1
             return
 
@@ -119,11 +128,13 @@ class IndexingPipeline:
             size=event.size,
             mtime_ns=event.mtime_ns,
         )
+        self._outcome("info", f"открыт: {rel_path}")
         parts = self._registry.extract(area.path / rel_path, area)
         if parts is None:
             self._record(
                 area, rel_path, JournalEvent.SKIPPED, detail="формат не обслуживается"
             )
+            self._outcome("warning", f"пропущен: {rel_path} (формат не обслуживается)")
             stats.skipped += 1
             return
 
@@ -133,10 +144,12 @@ class IndexingPipeline:
             if errored:
                 detail = "; ".join(p.error or "" for p in errored)
                 self._record(area, rel_path, JournalEvent.ERROR, detail=detail)
+                self._outcome("error", f"ошибка: {rel_path} — {detail}")
                 self._fail(stats, rel_path, detail)
             else:
                 self._record(area, rel_path, JournalEvent.SKIPPED, detail="нет текста")
-                stats.skipped += 1
+                self._outcome("warning", f"пропущен: {rel_path} (нет текста)")
+            stats.skipped += 1
             return
 
         self._record(area, rel_path, JournalEvent.SENT)
@@ -183,14 +196,12 @@ class IndexingPipeline:
         stats.rejected += rejected
 
         if indexed:
-            self._record(
-                area,
-                rel_path,
-                JournalEvent.INDEXED,
-                detail=self._indexed_detail(indexed, chunks, doc_ids),
-            )
+            detail = self._indexed_detail(indexed, chunks, doc_ids)
+            self._record(area, rel_path, JournalEvent.INDEXED, detail=detail)
+            self._outcome("info", f"проиндексирован: {rel_path} ({detail})")
         elif duplicates:
             self._record(area, rel_path, JournalEvent.DUPLICATE)
+            self._outcome("info", f"дубликат: {rel_path}")
         else:
             self._record(
                 area,
@@ -198,6 +209,7 @@ class IndexingPipeline:
                 JournalEvent.REJECTED,
                 detail=f"отклонено частей: {rejected}",
             )
+            self._outcome("warning", f"отклонён: {rel_path} (частей: {rejected})")
 
     def process(self, result: ScanResult) -> PipelineStats:
         """Обработать один результат скана."""
@@ -209,5 +221,6 @@ class IndexingPipeline:
                 self._record(
                     event.area, event.rel_path, JournalEvent.ERROR, detail=str(exc)
                 )
+                self._outcome("error", f"ошибка: {event.rel_path} — {exc}")
                 self._fail(stats, event.rel_path, str(exc))
         return stats
