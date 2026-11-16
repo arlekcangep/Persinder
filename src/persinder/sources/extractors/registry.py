@@ -125,6 +125,16 @@ class ExtractorRegistry:
                 return ext
         return None
 
+    def is_cachable(self, name: str) -> bool:
+        """Кэширует ли экстрактор ``name`` свой текст (D27).
+
+        Неизвестное имя (пустой ``extractor`` у записи) — ``True``: лишняя
+        копия дешевле, чем повторное извлечение при каждом ``/context``.
+        Части контейнеров кэшируются всегда — это решает пайплайн.
+        """
+        extractor = self.extractor_for(name)
+        return True if extractor is None else extractor.is_cachable()
+
     def container_for(self, container_path: str) -> ContainerExtractor | None:
         """Контейнер, обслуживающий файл-контейнер (по его суффиксу).
 

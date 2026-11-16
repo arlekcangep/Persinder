@@ -175,6 +175,18 @@ class MetaStore(Protocol):
         """Все источники (для удаления сайдкаров модели)."""
         ...
 
+    def text_cached_docs(self, doc_ids: Sequence[str]) -> set[str]:
+        """id документов из списка, чей текст **должен** лежать в кэше.
+
+        Флаг ``documents.text_cached`` (D27) отличает «текст потерян» (надо
+        переиндексировать) от «текст не кэшируется по замыслу экстрактора».
+        """
+        ...
+
+    def set_text_cached(self, doc_id: str, cached: bool) -> None:
+        """Поднять/сбросить флаг «текст документа хранится в кэше»."""
+        ...
+
     def sources_for_docs(self, doc_ids: list[str]) -> list[SourceRow]:
         """Источники документов (area, filename, source_path) для результатов поиска.
 

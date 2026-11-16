@@ -163,11 +163,15 @@ class IngestService:
 
         existing = self._store.find_document_by_hash(content_hash)
         if existing:
-            # Повторный скан того же содержимого: текст пишем всегда. Он мог
-            # быть потерян (удалён руками, чужой профиль, сбой) — без него
-            # эмбеддинг не посчитать, а документ уже есть в базе. Запись
-            # идемпотентна: содержимое то же самое (хэш совпал).
-            self._textstore.put(existing, text)
+            # Повторный скан того же содержимого: текст пишем, если он нужен в
+            # кэше. Он мог быть потерян (удалён руками, чужой профиль, сбой) —
+            # без него эмбеддинг не посчитать без перечитывания оригинала.
+            # Запись идемпотентна: содержимое то же самое (хэш совпал).
+            # Дубликат с кэшируемым источником поднимает флаг и для документа,
+            # который раньше жил без кэша (D27).
+            if request.cache_text:
+                self._textstore.put(existing, text)
+                self._store.set_text_cached(existing, True)
             self._log(
                 IngestEvent.DUPLICATE,
                 doc_id=existing,
@@ -214,7 +218,8 @@ class IngestService:
             area=area,
             filename=request.filename,
         )
-        self._textstore.put(doc_id, text)
+        if request.cache_text:
+            self._textstore.put(doc_id, text)
 
         spans = chunk_text(text, self._chunk_size, self._chunk_overlap)
         chunks = [
@@ -236,6 +241,7 @@ class IngestService:
             text_key=doc_id,
             created_at=now,
             extractor=request.extractor or "",
+            text_cached=request.cache_text,
         )
         jobs = [
             EmbeddingJob(

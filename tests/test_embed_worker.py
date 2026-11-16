@@ -83,7 +83,14 @@ class EmbedWorkerTest(unittest.TestCase):
         self.store.close()
         self._tmp.cleanup()
 
-    def _file(self, name: str, text: str, extractor: str | None = None) -> Path:
+    def _file(
+        self,
+        name: str,
+        text: str,
+        extractor: str | None = None,
+        *,
+        cache_text: bool = True,
+    ) -> Path:
         path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
@@ -94,6 +101,7 @@ class EmbedWorkerTest(unittest.TestCase):
                 text=text,
                 source_path=str(path),
                 extractor=extractor,
+                cache_text=cache_text,
             )
         )
         return path
@@ -326,6 +334,22 @@ class EmbedWorkerTest(unittest.TestCase):
         worker = self._worker(registry=default_registry())
         self.assertTrue(self.textstore.exists(doc_id))
         self.textstore.delete(doc_id)
+
+        stats = worker.run_once(limit=10)
+
+        self.assertEqual((stats.docs, stats.sidecars, stats.skipped), (1, 1, 0))
+        self.assertIsNotNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_uncached_doc_embeds_from_original(self):
+        """D27: документ без кэша всё равно получает векторы — из оригинала."""
+        text = "заметка без кэша, но с эмбеддингами"
+        src = self._file(
+            "books/uncached.md", text, extractor="markdown", cache_text=False
+        )
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        self.assertFalse(self.textstore.exists(doc_id))
+        worker = self._worker(registry=default_registry())
 
         stats = worker.run_once(limit=10)
 

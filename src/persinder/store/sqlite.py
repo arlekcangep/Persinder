@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS documents (
     char_count   INTEGER NOT NULL,
     text_key     TEXT NOT NULL,
     created_at   TEXT NOT NULL,
-    extractor    TEXT NOT NULL DEFAULT ''
+    extractor    TEXT NOT NULL DEFAULT '',
+    text_cached  INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS document_sources (
@@ -139,22 +140,22 @@ class SqliteStore:
                 "ALTER TABLE document_sources"
                 " RENAME COLUMN entries TO container_entries"
             )
-        for table, column, default in (
-            ("document_sources", "source_path", "''"),
-            ("document_sources", "container_path", "''"),
-            ("document_sources", "container_entries", "'[]'"),
-            ("embedding_queue", "source_path", "''"),
-            ("documents", "extractor", "''"),
+        for table, column, decl in (
+            ("document_sources", "source_path", "TEXT NOT NULL DEFAULT ''"),
+            ("document_sources", "container_path", "TEXT NOT NULL DEFAULT ''"),
+            ("document_sources", "container_entries", "TEXT NOT NULL DEFAULT '[]'"),
+            ("embedding_queue", "source_path", "TEXT NOT NULL DEFAULT ''"),
+            ("documents", "extractor", "TEXT NOT NULL DEFAULT ''"),
+            # D27: текст не всех форматов хранится в кэше. Старые документы
+            # считаются кэшируемыми — как и было до появления флага.
+            ("documents", "text_cached", "INTEGER NOT NULL DEFAULT 1"),
         ):
             cols = [
                 str(row["name"])
                 for row in self._conn.execute(f"PRAGMA table_info({table})")
             ]
             if column not in cols:
-                self._conn.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {column}"
-                    f" TEXT NOT NULL DEFAULT {default}"
-                )
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
         self._migrate_queue_model()
         self._migrate_embeddings_id()
 
@@ -577,8 +578,8 @@ class SqliteStore:
             self._conn.execute(
                 "INSERT INTO documents"
                 "(id, content_hash, title, char_count, text_key, created_at, "
-                " extractor) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " extractor, text_cached) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     doc.id,
                     doc.content_hash,
@@ -587,6 +588,7 @@ class SqliteStore:
                     doc.text_key,
                     doc.created_at,
                     doc.extractor,
+                    1 if doc.text_cached else 0,
                 ),
             )
             evicted = self._bind_source(
@@ -698,16 +700,21 @@ class SqliteStore:
         семантически.
 
         ``has_text(doc_id)`` — есть ли у документа сырой текст. Нет текста —
-        считать нечего: такие задачи не ставим (иначе каждый старт заново
-        кладёт тысячи задач документа, который воркер тут же снимет как
-        сироту, и «очередь при старте» выглядит огромной без причины).
+        считать нечего, **если** он вообще должен там быть
+        (``documents.text_cached``, D27): для некэшируемого формата текст
+        перечитывается из оригинала, поэтому такие задачи ставим (иначе
+        каждый старт заново кладёт тысячи задач документа, который воркер тут
+        же снимет как сироту, и «очередь при старте» выглядит огромной без
+        причины).
 
         Возвращает число **добавленных** задач (уже стоявшие не в счёт).
         """
         added = 0
         with self._lock, self._conn:
             rows = self._conn.execute(
-                "SELECT DISTINCT doc_id, area, source_path FROM document_sources"
+                "SELECT DISTINCT s.doc_id, s.area, s.source_path, d.text_cached"
+                " FROM document_sources s"
+                " JOIN documents d ON d.id = s.doc_id"
             ).fetchall()
             for row in rows:
                 doc_id, area, source_path = (
@@ -715,7 +722,11 @@ class SqliteStore:
                     str(row["area"]),
                     str(row["source_path"]),
                 )
-                if has_text is not None and not has_text(doc_id):
+                if (
+                    has_text is not None
+                    and bool(row["text_cached"])
+                    and not has_text(doc_id)
+                ):
                     continue
                 chosen = (
                     models_for(area, source_path)
@@ -774,6 +785,27 @@ class SqliteStore:
                 "SELECT doc_id, area, filename, source_path FROM document_sources"
             ).fetchall()
         return [self._source_row(row) for row in rows]
+
+    def text_cached_docs(self, doc_ids: Sequence[str]) -> set[str]:
+        """id документов из списка, чей текст должен лежать в кэше (D27)."""
+        if not doc_ids:
+            return set()
+        placeholders = ",".join("?" for _ in doc_ids)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM documents"
+                f" WHERE text_cached = 1 AND id IN ({placeholders})",
+                list(doc_ids),
+            ).fetchall()
+        return {str(row["id"]) for row in rows}
+
+    def set_text_cached(self, doc_id: str, cached: bool) -> None:
+        """Поднять/сбросить флаг «текст документа хранится в кэше» (D27)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE documents SET text_cached = ? WHERE id = ?",
+                (1 if cached else 0, doc_id),
+            )
 
     def sources_for_docs(self, doc_ids: list[str]) -> list[SourceRow]:
         """Источники документов (для выдачи пути в результатах поиска).

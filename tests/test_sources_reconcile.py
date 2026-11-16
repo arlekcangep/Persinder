@@ -130,9 +130,7 @@ class ReconcileTest(unittest.TestCase):
             self.area, "book.rtf", JournalEvent.SKIPPED, size=size, mtime_ns=mtime
         )
 
-        stats = reconcile(
-            (self.area,), registry, self.journal, self.store, self.texts
-        )
+        stats = reconcile((self.area,), registry, self.journal, self.store, self.texts)
 
         reason = next(iter(stats.unsupported))
         self.assertIn("striprtf", reason)
@@ -161,6 +159,35 @@ class ReconcileTest(unittest.TestCase):
 
         self.assertEqual([rel for rel, _ in stats.retried], ["note.md"])
         self.assertIn("сырой текст потерян", stats.retried[0][1])
+
+    def test_uncached_by_design_is_left_alone(self):
+        """Нет текста, потому что экстрактор его не кэширует — не перечитывать.
+
+        Иначе файл попадал бы в переиндексацию на каждом старте (D27).
+        """
+        path = self._write("note.md", "заметка без кэша")
+        size, mtime = _stat(path)
+        ingest = IngestService(self.store, self.texts, NoopStemmer())
+        outcome = ingest.ingest(
+            IngestRequest(
+                filename="note.md",
+                area=Area.PERSONAL,
+                text="заметка без кэша",
+                source_path=str(path),
+                cache_text=False,
+            )
+        )
+        doc_id = outcome.document_id
+        assert doc_id is not None
+        self.assertFalse(self.texts.exists(doc_id))
+        self.journal.record(
+            self.area, "note.md", JournalEvent.INDEXED, size=size, mtime_ns=mtime
+        )
+
+        stats = self._reconcile()
+
+        self.assertTrue(stats.empty, "текст отсутствует по замыслу")
+        self.assertEqual(stats.checked, 1)
 
     def test_consistent_index_is_left_alone(self):
         path = self._write("note.md", "пёс бежит по дороге")

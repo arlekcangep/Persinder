@@ -330,6 +330,17 @@ def _explain_doc(
             )
 
 
+def _text_expected_in_cache(conn: sqlite3.Connection, doc_id: str) -> bool:
+    """Должен ли текст документа лежать в кэше (``documents.text_cached``, D27)."""
+    try:
+        row = conn.execute(
+            "SELECT text_cached FROM documents WHERE id = ?", (doc_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return True  # старая БД без колонки — считаем как раньше
+    return True if row is None else bool(row[0])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Диагностика сайдкаров и очереди")
     parser.add_argument("--config", type=Path, default=None)
@@ -433,10 +444,17 @@ def main() -> int:
             print(f"  {model}: {int(row['n'])} задач")
             print(f"    документ: {doc_id[:16]}…")
             print(f"    источник: {path or 'путь не записан (виртуальный)'}")
-            # Воркер читает текст по doc_id; нет файла — задачи сиротские.
+            # Воркер читает текст по doc_id; нет файла — задачи сиротские,
+            # если только формат не кэшируется по замыслу (D27): тогда текст
+            # перечитывается из оригинала.
             text_file = settings.text_dir / f"{doc_id}.txt"
             if text_file.is_file():
                 print(f"    текст: есть, {text_file.stat().st_size} Б")
+            elif not _text_expected_in_cache(conn, doc_id):
+                print(
+                    "    текст: не кэшируется (is_cachable=false) — воркер"
+                    " перечитает оригинал"
+                )
             else:
                 print("    текст: НЕТ — задачи сиротские, воркер их снимет")
             sidecar = (

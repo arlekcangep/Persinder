@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import time
@@ -78,6 +79,36 @@ class PipelineTest(unittest.TestCase):
         stats = self.pipeline.process(self._scan())
         self.assertEqual(stats.indexed, 1)
         self.assertEqual(self.store.counts()["documents"], 1)
+
+    def test_uncachable_extractor_indexes_without_text_cache(self):
+        """cache_text=False: документ индексируется, но текст на диск не пишется.
+
+        Флаг едет из экстрактора через пайплайн в ingest (D27); эмбеддинги при
+        этом ставятся как обычно — воркер перечитает оригинал.
+        """
+
+        class UncachedText(TextExtractor):
+            def is_cachable(self) -> bool:
+                return False
+
+        ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
+        pipeline = IndexingPipeline(
+            ingest, ExtractorRegistry((UncachedText(),)), journal=self.journal
+        )
+        area = AreaConfig(path=self.area.path, role=Area.PERSONAL, formats=("text",))
+        path = self.area.path / "note.txt"
+        path.write_text("текст без кэша", encoding="utf-8")
+
+        stats = pipeline.process(self._scan(area))
+
+        self.assertEqual(stats.indexed, 1)
+        self.assertEqual(self._texts(), [], "копия текста на диске не нужна")
+        doc_id = self.store.find_document_by_hash(
+            hashlib.sha256("текст без кэша".encode()).hexdigest()
+        )
+        assert doc_id is not None
+        self.assertEqual(self.store.text_cached_docs([doc_id]), set())
+        self.assertNotEqual(self.store.pending_embeddings(limit=100), [])
 
     def test_area_model_overrides_global_queue(self):
         area = AreaConfig(

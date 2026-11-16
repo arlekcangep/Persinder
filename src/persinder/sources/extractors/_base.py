@@ -59,6 +59,10 @@ class BaseExtractor:
         """Расширения (нижний регистр, с точкой) — фолбэк при неразличимом контенте."""
         raise NotImplementedError
 
+    def is_cachable(self) -> bool:
+        """По умолчанию текст кэшируется (D27): формат-переключатель — T5b."""
+        return True
+
     def responds(self, extension: str, matches: tuple[ClassMatch, ...]) -> bool:
         for match in matches:
             if match.format_class != self.format_class:

@@ -38,6 +38,16 @@ class RegistryTest(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
+    def test_all_default_extractors_are_cacheable(self):
+        """D27: пока кэшируют все форматы; переключатель — T5b (в YAML)."""
+        registry = default_registry()
+        for name in sorted(registry.known_names()):
+            self.assertTrue(registry.is_cachable(name), name)
+        self.assertTrue(
+            registry.is_cachable("нет-такого"),
+            "неизвестное имя — кэшируем: лишняя копия дешевле переизвлечения",
+        )
+
     def test_recognized_classes(self):
         reg = default_registry()
         names = reg.known_names()

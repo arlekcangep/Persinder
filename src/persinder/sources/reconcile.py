@@ -107,9 +107,14 @@ def reconcile(
         if not docs:
             forget.append((root, rel))
             stats.retried.append((rel, "документа нет в базе"))
-        elif not any(textstore.exists(doc_id) for doc_id in docs):
-            forget.append((root, rel))
-            stats.retried.append((rel, "сырой текст потерян"))
+        else:
+            # «Текст потерян» — только если он вообще должен быть в кэше:
+            # у некэшируемого формата (is_cachable=false, D27) его нет по
+            # замыслу, и переиндексировать такой файл на каждом старте нельзя.
+            wanted = store.text_cached_docs(docs)
+            if wanted and not any(textstore.exists(doc_id) for doc_id in wanted):
+                forget.append((root, rel))
+                stats.retried.append((rel, "сырой текст потерян"))
     if forget:
         journal.forget(forget)
     return stats

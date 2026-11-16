@@ -191,6 +191,14 @@ class IndexingPipeline:
                     extractor=part.extractor or None,
                     container_path=part.container_path,
                     container_entries=part.container_entries,
+                    # Части контейнеров кэшируются всегда: на диске такого
+                    # файла нет — перечитывать нечего (D27). Обычный файл —
+                    # по решению экстрактора (сейчас все форматы кэшируют).
+                    cache_text=(
+                        True
+                        if part.container_entries
+                        else self._registry.is_cachable(part.extractor)
+                    ),
                     embedding_models=queue_models_for(
                         area, semantic_enabled=self._semantic
                     ),

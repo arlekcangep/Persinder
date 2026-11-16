@@ -150,6 +150,91 @@ class IngestServiceTest(unittest.TestCase):
         self.assertEqual(len(self.store.pending_embeddings(limit=1000)), result.chunks)
 
 
+class CacheTextPolicyTest(unittest.TestCase):
+    """D27: текст не всех экстракторов хранится в кэше.
+
+    ``cache_text=False`` — текст воспроизводим из оригинала: на диске не
+    дублируется, но документ индексируется и эмбеддинги ставятся как обычно
+    (воркер перечитает файл). Дубликаты делят один файл кэша, поэтому
+    кэшируемый источник «поднимает» флаг и для документа без кэша.
+    """
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.store = SqliteStore(root / "db.sqlite")
+        self.textstore = FsTextStore(root / "texts")
+        self.service = IngestService(
+            self.store,
+            self.textstore,
+            NoopStemmer(),
+            chunk_size=1000,
+            chunk_overlap=100,
+        )
+
+    def tearDown(self):
+        self.store.close()
+        self._tmp.cleanup()
+
+    def _ingest(self, filename: str, text: str, *, cache_text: bool) -> IngestResult:
+        return self.service.ingest(
+            IngestRequest(
+                filename=filename,
+                area=Area.PERSONAL,
+                text=text,
+                source_path=f"/vault/{filename}",
+                cache_text=cache_text,
+            )
+        )
+
+    def test_uncached_text_is_not_stored_but_indexed(self):
+        result = self._ingest("note.md", "заметка без кэша", cache_text=False)
+        self.assertEqual(result.status, IngestResult.INDEXED)
+        doc_id = result.document_id
+        assert doc_id is not None
+        self.assertFalse(self.textstore.exists(doc_id))
+        self.assertEqual(self.store.text_cached_docs([doc_id]), set())
+        self.assertEqual(self.store.counts()["documents"], 1)
+        # семантика не выключается: воркер перечитает оригинал (D27)
+        self.assertEqual(len(self.store.pending_embeddings()), 1)
+
+    def test_cached_by_default(self):
+        result = self._ingest("note.md", "обычная заметка", cache_text=True)
+        doc_id = result.document_id
+        assert doc_id is not None
+        self.assertTrue(self.textstore.exists(doc_id))
+        self.assertEqual(self.store.text_cached_docs([doc_id]), {doc_id})
+
+    def test_cachable_duplicate_upgrades_uncached_document(self):
+        text = "одинаковый текст в двух файлах"
+        first = self._ingest("a.md", text, cache_text=False)
+        self.assertEqual(first.status, IngestResult.INDEXED)
+        doc_id = first.document_id
+        assert doc_id is not None
+        self.assertFalse(self.textstore.exists(doc_id))
+
+        second = self._ingest("b.pdf", text, cache_text=True)
+
+        self.assertEqual(second.status, IngestResult.ALREADY)
+        self.assertEqual(second.document_id, doc_id)
+        self.assertTrue(
+            self.textstore.exists(doc_id),
+            "кэшируемому источнику текст нужен на диске",
+        )
+        self.assertEqual(self.store.text_cached_docs([doc_id]), {doc_id})
+
+    def test_uncachable_duplicate_keeps_cached_text(self):
+        text = "текст уже лежит в кэше"
+        first = self._ingest("a.pdf", text, cache_text=True)
+        doc_id = first.document_id
+        assert doc_id is not None
+
+        self._ingest("b.md", text, cache_text=False)
+
+        self.assertTrue(self.textstore.exists(doc_id))
+        self.assertEqual(self.store.text_cached_docs([doc_id]), {doc_id})
+
+
 class IngestDuplicateQueueTest(unittest.TestCase):
     """Повторная встреча файла не пересчитывает уже готовые эмбеддинги.
 
