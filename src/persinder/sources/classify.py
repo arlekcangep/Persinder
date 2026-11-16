@@ -71,8 +71,8 @@ class MagicTableClassifier:
 
     Покрывает всё, что нужно текущим классам: контейнеры (zip/7z/tar/gz/rar),
     PDF, ePub (zip с ``mimetype``), OLE2 (старые .pub/.doc), картинки и djvu/tiff
-    (класс ``ocr``). ePub проверяется до zip: это тоже PK-архив, но с особым
-    ``mimetype`` — он относится к ``pub-formats``, а не ``archive``.
+    (класс ``ocr``), CHM (ITSF). ePub проверяется до zip: это тоже PK-архив, но с
+    особым ``mimetype`` — он относится к ``pub-formats``, а не ``archive``.
     """
 
     name = "magic"
@@ -85,6 +85,13 @@ class MagicTableClassifier:
         if head.startswith(b"%PDF-"):
             found.append(ClassMatch(PUB_FORMATS, "pdf", self.name))
             return tuple(found)
+        if head.lstrip(b"\xef\xbb\xbf ").startswith(b"{\\rtf"):
+            # RTF — текстовый контейнер с управляющими последовательностями;
+            # сигнатура «{\rtf» надёжнее текстового сниффера.
+            return (ClassMatch(PUB_FORMATS, "rtf", self.name),)
+        if head.startswith(b"ITSF"):
+            # CHM (Compiled HTML Help): ITSF-контейнер, внутри — LZX-поток.
+            return (ClassMatch(PUB_FORMATS, "chm", self.name),)
         if head.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
             if _is_epub(data):
                 return (ClassMatch(PUB_FORMATS, "epub", self.name),)

@@ -21,6 +21,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from persinder import __main__ as cli
+from persinder.cli import serve as serve_mod
 from persinder.config import Settings
 from persinder.domain import Area
 from persinder.embed import (
@@ -112,12 +113,21 @@ class ModelInstallE2ETest(unittest.TestCase):
         """Один запуск полного сервиса (HTTP подменён), как ``./run.sh``."""
 
         def fake_serve(
-            ingest: Ingest, search: Search, host: str, port: int, log=None
+            ingest: Ingest,
+            search: Search,
+            host: str,
+            port: int,
+            log=None,
+            stats=None,
+            **kwargs,
         ) -> None:
             time.sleep(1.0)  # дать watcher'у и потоку эмбеддингов отработать
 
         out = io.StringIO()
-        with mock.patch.object(cli, "serve", fake_serve), redirect_stdout(out):
+        with (
+            mock.patch.object(serve_mod, "serve_fastapi", fake_serve),
+            redirect_stdout(out),
+        ):
             rc = cli.run_serve(self.config, self.settings, reindex=True)
         self.assertEqual(rc, 0)
         return out.getvalue()

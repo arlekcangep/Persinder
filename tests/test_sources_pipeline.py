@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import time
 import unittest
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from persinder.domain import Area
 from persinder.ingest import IngestService
@@ -24,6 +28,7 @@ from persinder.sources import (
     WatchConfig,
     default_registry,
 )
+from persinder.sources import extract as extract_module
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
 
@@ -74,6 +79,64 @@ class PipelineTest(unittest.TestCase):
         stats = self.pipeline.process(self._scan())
         self.assertEqual(stats.indexed, 1)
         self.assertEqual(self.store.counts()["documents"], 1)
+
+    def test_uncachable_extractor_indexes_without_text_cache(self):
+        """cache_text=False: документ индексируется, но текст на диск не пишется.
+
+        Флаг едет из экстрактора через пайплайн в ingest (D27); эмбеддинги при
+        этом ставятся как обычно — воркер перечитает оригинал.
+        """
+
+        class UncachedText(TextExtractor):
+            def is_cachable(self) -> bool:
+                return False
+
+        ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
+        pipeline = IndexingPipeline(
+            ingest, ExtractorRegistry((UncachedText(),)), journal=self.journal
+        )
+        area = AreaConfig(path=self.area.path, role=Area.PERSONAL, formats=("text",))
+        path = self.area.path / "note.txt"
+        path.write_text("текст без кэша", encoding="utf-8")
+
+        stats = pipeline.process(self._scan(area))
+
+        self.assertEqual(stats.indexed, 1)
+        self.assertEqual(self._texts(), [], "копия текста на диске не нужна")
+        doc_id = self.store.find_document_by_hash(
+            hashlib.sha256("текст без кэша".encode()).hexdigest()
+        )
+        assert doc_id is not None
+        self.assertEqual(self.store.text_cached_docs([doc_id]), set())
+        self.assertNotEqual(self.store.pending_embeddings(limit=100), [])
+
+    def test_area_no_cache_disables_only_listed_formats(self):
+        """T5b: `no_cache` области решает по формату — md кэшируется, txt нет."""
+
+        def doc_id(name: str) -> str:
+            found = self.store.source_document(Area.PERSONAL.value, name)
+            assert found is not None, name
+            return found
+
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("markdown", "text"),
+            no_cache=("text",),
+        )
+        (self.area.path / "note.txt").write_text("заметка txt", encoding="utf-8")
+        (self.area.path / "note.md").write_text("# Заметка md", encoding="utf-8")
+
+        stats = self.pipeline.process(self._scan(area))
+
+        self.assertEqual(stats.indexed, 2)
+        txt_id, md_id = doc_id("note.txt"), doc_id("note.md")
+        self.assertFalse(self.store.document_wants_cache(txt_id))
+        self.assertTrue(self.store.document_wants_cache(md_id))
+        self.assertEqual(self._texts(), [f"{md_id}.txt"])
+        # Эмбеддинги ставятся обоим: воркер перечитает txt из оригинала.
+        queued = {item["doc_id"] for item in self.store.pending_embeddings(limit=100)}
+        self.assertEqual(queued, {txt_id, md_id})
 
     def test_area_model_overrides_global_queue(self):
         area = AreaConfig(
@@ -204,6 +267,35 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(counts["documents"], 1)
         self.assertEqual(counts["chunks"], 1)
 
+    def test_too_large_archive_skipped_with_journal_reason(self):
+        """Архив больше лимита: пропуск (не ошибка), причина — в журнале."""
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("archive", "markdown", "text"),
+        )
+        ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
+        pipeline = IndexingPipeline(ingest, default_registry(), journal=self.journal)
+        archive_path = self.area.path / "huge.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("inside.md", "текст внутри большого архива")
+
+        with mock.patch.object(extract_module, "ARCHIVE_MAX_BYTES", 1):
+            stats = pipeline.process(self._scan(area))
+
+        self.assertEqual(stats.skipped, 1)
+        self.assertEqual(stats.indexed, 0)
+        self.assertEqual(self.store.counts()["documents"], 0)
+        events = [
+            json.loads(line)
+            for line in (self.data / "journal.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        final = [e for e in events if e["file"] == "huge.zip"][-1]
+        self.assertEqual(final["event"], "skipped")
+        self.assertIn("ГБ", final["detail"])
+
     def test_zip_archive_indexed_as_part_per_entry(self):
         # Область допускает zip; каждая запись архива — отдельный документ.
         area = AreaConfig(
@@ -225,6 +317,16 @@ class PipelineTest(unittest.TestCase):
         # источники — части архива, каждая со своим именем
         parts = self.store.source_filenames_under(Area.PERSONAL.value, "bundle.zip/")
         self.assertEqual(parts, ["bundle.zip/inside.md", "bundle.zip/sub/two.txt"])
+        # разбор пути сохранён явно: контейнер + цепочка записей
+        doc_id = self.store.source_document(
+            Area.PERSONAL.value, "bundle.zip/sub/two.txt"
+        )
+        assert doc_id is not None
+        source = self.store.document_source(doc_id)
+        assert source is not None
+        self.assertEqual(source["container_path"], str(archive_path))
+        self.assertEqual(source["container_entries"], ["sub/two.txt"])
+        self.assertEqual(source["source_path"], f"{archive_path}/sub/two.txt")
         stored = "".join(
             p.read_text(encoding="utf-8") for p in self.texts.glob("*.txt")
         )
@@ -240,6 +342,38 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(
             self.store.source_filenames_under(Area.PERSONAL.value, "bundle.zip/"), []
         )
+
+    def test_nested_archive_saves_full_ref_chain(self):
+        """folder/top.zip/inner.zip/sub/deep.md: контейнер и цепочка — явно."""
+        area = AreaConfig(
+            path=self.area.path,
+            role=Area.PERSONAL,
+            formats=("archive", "markdown", "text"),
+        )
+        ingest = IngestService(self.store, FsTextStore(self.texts), NoopStemmer())
+        pipeline = IndexingPipeline(ingest, default_registry(), journal=self.journal)
+
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as inner_zip:
+            inner_zip.writestr("sub/deep.md", "#deep глубокий текст")
+        archive_path = self.area.path / "top.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("inner.zip", inner.getvalue())
+
+        stats = pipeline.process(self._scan(area))
+        self.assertEqual(stats.indexed, 1)
+        filename = "top.zip/inner.zip/sub/deep.md"
+        self.assertEqual(
+            self.store.source_filenames_under(Area.PERSONAL.value, "top.zip/"),
+            [filename],
+        )
+        doc_id = self.store.source_document(Area.PERSONAL.value, filename)
+        assert doc_id is not None
+        source = self.store.document_source(doc_id)
+        assert source is not None
+        self.assertEqual(source["container_path"], str(archive_path))
+        self.assertEqual(source["container_entries"], ["inner.zip", "sub/deep.md"])
+        self.assertEqual(source["source_path"], f"{archive_path}/inner.zip/sub/deep.md")
 
 
 if __name__ == "__main__":

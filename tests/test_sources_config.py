@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 import yaml
 
 from persinder.domain import Area
-from persinder.sources import ConfigError, load_config
+from persinder.sources import DEFAULT_NO_CACHE, ConfigError, load_config
 
 
 class ConfigTest(unittest.TestCase):
@@ -191,6 +191,86 @@ areas:
         )
         with self.assertRaises(ConfigError):
             load_config(cfg_path, known_formats=frozenset({"markdown"}))
+
+    def test_no_cache_defaults(self):
+        """T5b: по умолчанию не кэшируются text, structure-text и fb2."""
+        cfg_path = self._write(
+            f"""
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+"""
+        )
+        areas, watch = load_config(cfg_path)
+        self.assertEqual(DEFAULT_NO_CACHE, ("text", "structure-text", "fb2"))
+        self.assertEqual(areas[0].no_cache, DEFAULT_NO_CACHE)
+        self.assertEqual(watch.no_cache, DEFAULT_NO_CACHE)
+
+    def test_no_cache_area_list_replaces_global(self):
+        """Список области заменяет верхний, а не дополняет его."""
+        cfg_path = self._write(
+            f"""
+no_cache: [text, pdf]
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+  - path: {self.root}
+    role: foreign
+    no_cache: [markdown]
+"""
+        )
+        areas, watch = load_config(cfg_path)
+        self.assertEqual(watch.no_cache, ("text", "pdf"))
+        self.assertEqual(areas[0].no_cache, ("text", "pdf"))
+        self.assertEqual(areas[1].no_cache, ("markdown",))
+
+    def test_no_cache_empty_area_caches_everything(self):
+        cfg_path = self._write(
+            f"""
+no_cache: [text]
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+    no_cache: []
+"""
+        )
+        areas, _ = load_config(cfg_path)
+        self.assertEqual(areas[0].no_cache, ())
+
+    def test_unknown_no_cache_rejected(self):
+        known = frozenset({"text", "markdown", "pdf"})
+        cfg_path = self._write(
+            f"""
+no_cache: [nope]
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+"""
+        )
+        with self.assertRaises(ConfigError):
+            load_config(cfg_path, known_formats=known)
+        cfg_path = self._write(
+            f"""
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+    no_cache: [nope]
+"""
+        )
+        with self.assertRaises(ConfigError):
+            load_config(cfg_path, known_formats=known)
+
+    def test_no_cache_bad_type_rejected(self):
+        cfg_path = self._write(
+            f"""
+no_cache: true
+areas:
+  - path: {self.root / "vault"}
+    role: personal
+"""
+        )
+        with self.assertRaises(ConfigError):
+            load_config(cfg_path)
 
     def test_bad_role(self):
         cfg_path = self._write(

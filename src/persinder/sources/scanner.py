@@ -120,6 +120,46 @@ class AreaScanner:
 
         return tuple(events)
 
+    def name_diff(
+        self,
+        catalog: AreaScan,
+        settled: set[str],
+        known: set[str] | None = None,
+    ) -> tuple[ChangeEvent, ...]:
+        """Сравнить каталог области с журналом **по именам файлов**.
+
+        Стартовый проход идёт от файлов, а не от журнала (D25): на диске
+        видно, что появилось и что исчезло, — без чтения файлов и без
+        хэшей. ``settled`` — имена, которые журнал считает устроенными
+        (новые из них — «появившиеся»); ``known`` — все имена, о которых
+        журнал вообще знает (исчезли те, которых нет на диске; по умолчанию
+        совпадает с ``settled``).
+
+        Файлы, тронутые только что (моложе debounce), пропускаются: их ещё
+        пишут, следующий проход сканера их подхватит.
+        """
+        now_ns = time.time_ns()
+        quiet_ns = int(self._config.debounce * 1_000_000_000)
+        seen = settled if known is None else known
+        events: list[ChangeEvent] = []
+        for rel, (size, mtime_ns) in catalog.files.items():
+            if rel in settled:
+                continue
+            if now_ns - mtime_ns < quiet_ns:
+                continue  # ещё пишется — поймает обычный скан
+            events.append(
+                ChangeEvent(
+                    ChangeKind.CREATED,
+                    catalog.area,
+                    rel,
+                    size=size,
+                    mtime_ns=mtime_ns,
+                )
+            )
+        for rel in sorted(seen - catalog.files.keys()):
+            events.append(ChangeEvent(ChangeKind.DELETED, catalog.area, rel))
+        return tuple(events)
+
     def scan(
         self, area: AreaConfig, previous: AreaScan | None = None
     ) -> tuple[AreaScan, tuple[ChangeEvent, ...]]:

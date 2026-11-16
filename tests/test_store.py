@@ -1,5 +1,6 @@
 """Тесты SQLite-метастора."""
 
+import sqlite3
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -25,7 +26,11 @@ class SqliteStoreTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _save(
-        self, doc_id: str = "d1", stemmed: str = "привет мир", filename: str = "a.txt"
+        self,
+        doc_id: str = "d1",
+        stemmed: str = "привет мир",
+        filename: str = "a.txt",
+        text_cached: bool = True,
     ) -> None:
         doc = Document(
             id=doc_id,
@@ -34,6 +39,7 @@ class SqliteStoreTest(unittest.TestCase):
             char_count=10,
             text_key=doc_id,
             created_at="2026-01-01T00:00:00+00:00",
+            text_cached=text_cached,
         )
         chunks = [Chunk(index=0, char_start=0, char_end=10, stemmed=stemmed)]
         jobs = [
@@ -84,6 +90,18 @@ class SqliteStoreTest(unittest.TestCase):
         self.store.drop_queue_model("m1")
         pending = self.store.pending_embeddings(limit=100)
         self.assertEqual([item["model"] for item in pending], ["placeholder-v1"])
+
+    def test_clear_queue(self):
+        """Полная переиндексация начинает с чистой очереди (D25)."""
+        self._save()
+        self.store.enqueue_document("d1", "personal", "b.txt", models=["m1", "m2"])
+        self.assertEqual(self.store.counts()["pending_embeddings"], 3)
+
+        cleared = self.store.clear_queue()
+
+        self.assertEqual(cleared, 3)
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+        self.assertEqual(self.store.counts()["pending_documents"], 0)
 
     def test_enqueue_all_for_models(self):
         self._save()
@@ -141,6 +159,69 @@ class SqliteStoreTest(unittest.TestCase):
         self.store.enqueue_missing(["m1"], has_sidecar)
         pending = self.store.pending_embeddings(limit=100)
         self.assertEqual([item["model"] for item in pending], ["m1"])
+
+    def test_enqueue_missing_skips_docs_without_text(self):
+        """Нет сырого текста — считать нечего: задачи не ставим.
+
+        Иначе каждый старт сервиса заново кладёт тысячи задач документа,
+        чей текст удалён, а воркер тут же снимает их как сиротские.
+        """
+        self._save("d1")
+        self._save("d2", filename="d2.txt")
+        self.store.drop_queue_model("placeholder-v1")
+
+        self.store.enqueue_missing(
+            ["placeholder-v1"],
+            lambda _model, _doc, _path: False,
+            has_text=lambda doc_id: doc_id != "d1",
+        )
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual(
+            {item["doc_id"] for item in pending},
+            {"d2"},
+            "документ без текста в очередь не попадает",
+        )
+
+    def test_text_cached_docs_and_flag_update(self):
+        self._save("cached")
+        self._save("uncached", filename="b.md", text_cached=False)
+
+        self.assertEqual(
+            self.store.text_cached_docs(["cached", "uncached"]), {"cached"}
+        )
+        self.assertEqual(self.store.text_cached_docs([]), set())
+        self.assertTrue(self.store.document_wants_cache("cached"))
+        self.assertFalse(self.store.document_wants_cache("uncached"))
+
+        # Дубликат из кэширующей области поднимает флаг у документа (T5b).
+        self.store.add_source("uncached", "foreign", "c.md", cache_text=True)
+        self.assertEqual(
+            self.store.text_cached_docs(["cached", "uncached"]),
+            {"cached", "uncached"},
+            "дубликат с кэшируемым источником поднимает флаг (D27)",
+        )
+
+        # Некэшируемый дубликат уже лежащий кэш не отменяет.
+        self.store.add_source("cached", "foreign", "d.md", cache_text=False)
+        self.assertTrue(self.store.document_wants_cache("cached"))
+
+        # Удаление единственного кэширующего источника сбрасывает флаг.
+        self.store.remove_source("foreign", "c.md")
+        self.assertFalse(self.store.document_wants_cache("uncached"))
+
+    def test_enqueue_missing_queues_uncached_doc_without_text(self):
+        """Нет текста, но он и не нужен — текст перечитается из оригинала."""
+        self._save("d1", text_cached=False)
+        self.store.drop_queue_model("placeholder-v1")
+
+        self.store.enqueue_missing(
+            ["placeholder-v1"],
+            lambda _model, _doc, _path: False,
+            has_text=lambda _doc_id: False,
+        )
+
+        pending = self.store.pending_embeddings(limit=100)
+        self.assertEqual({item["doc_id"] for item in pending}, {"d1"})
 
     def test_doc_ids_in_paths(self):
         self._save("d1")  # виртуальный источник (source_path = "")
@@ -211,6 +292,171 @@ class SqliteStoreTest(unittest.TestCase):
         self.assertEqual(rows[0]["source_path"], "/notes/a.txt")
         self.assertIn("", [row["source_path"] for row in rows])
         self.assertEqual(self.store.sources_for_docs([]), [])
+
+    def test_document_source_keeps_container_refs(self):
+        """Разбор пути части архива хранится явно: контейнер + цепочка записей."""
+        self._save()
+        self.store.add_source(
+            "d1",
+            "personal",
+            "bundle.zip/inner.zip/note.md",
+            source_path="/vault/bundle.zip/inner.zip/note.md",
+            container_path="/vault/bundle.zip",
+            container_entries=("inner.zip", "note.md"),
+        )
+        source = self.store.document_source("d1")
+        assert source is not None
+        self.assertEqual(source["container_path"], "/vault/bundle.zip")
+        self.assertEqual(source["container_entries"], ["inner.zip", "note.md"])
+        self.assertEqual(source["source_path"], "/vault/bundle.zip/inner.zip/note.md")
+
+    def test_document_source_defaults_for_plain_file(self):
+        self._save()
+        source = self.store.document_source("d1")
+        assert source is not None
+        self.assertEqual(source["container_path"], "")
+        self.assertEqual(source["container_entries"], [])
+
+    def test_migrate_adds_container_refs_to_old_db(self):
+        """Старая БД без рефов: колонки добавляются, у старых строк пустые рефы."""
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "old.sqlite"
+            conn = sqlite3.connect(str(db))
+            conn.executescript(
+                """
+                CREATE TABLE documents (
+                    id TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL UNIQUE,
+                    title TEXT,
+                    char_count INTEGER NOT NULL,
+                    text_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    extractor TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE document_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    area TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    source_path TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(doc_id, area, filename)
+                );
+                INSERT INTO documents VALUES
+                    ('d1', 'hash', 't', 3, 'hash', '2026-01-01', 'markdown');
+                INSERT INTO document_sources
+                    (doc_id, area, filename, source_path, created_at)
+                    VALUES ('d1', 'personal', 'a.txt', '/vault/a.txt', '2026-01-01');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = SqliteStore(db)
+            try:
+                source = store.document_source("d1")
+            finally:
+                store.close()
+        assert source is not None
+        self.assertEqual(source["source_path"], "/vault/a.txt")
+        self.assertEqual(source["container_path"], "")
+        self.assertEqual(source["container_entries"], [])
+
+    def test_migrate_defaults_text_cached_to_one(self):
+        """Старые документы считаются кэшируемыми — как до появления флага."""
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "old.sqlite"
+            conn = sqlite3.connect(str(db))
+            conn.executescript(
+                """
+                CREATE TABLE documents (
+                    id TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL UNIQUE,
+                    title TEXT,
+                    char_count INTEGER NOT NULL,
+                    text_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    extractor TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE document_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    area TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    source_path TEXT NOT NULL DEFAULT '',
+                    container_path TEXT NOT NULL DEFAULT '',
+                    container_entries TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(doc_id, area, filename)
+                );
+                INSERT INTO documents VALUES
+                    ('d1', 'hash', 't', 3, 'hash', '2026-01-01', 'markdown');
+                INSERT INTO document_sources
+                    (doc_id, area, filename, created_at)
+                    VALUES ('d1', 'personal', 'a.txt', '2026-01-01');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = SqliteStore(db)
+            try:
+                cached = store.text_cached_docs(["d1"])
+                wants = store.document_wants_cache("d1")
+            finally:
+                store.close()
+        self.assertEqual(cached, {"d1"})
+        self.assertTrue(
+            wants, "старый источник тоже получает cache_text=1 по умолчанию (T5b)"
+        )
+
+    def test_migrate_renames_entries_column(self):
+        """Промежуточное имя ``entries`` переименовывается, данные сохраняются."""
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "old.sqlite"
+            conn = sqlite3.connect(str(db))
+            conn.executescript(
+                """
+                CREATE TABLE documents (
+                    id TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL UNIQUE,
+                    title TEXT,
+                    char_count INTEGER NOT NULL,
+                    text_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    extractor TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE document_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    area TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    source_path TEXT NOT NULL DEFAULT '',
+                    container_path TEXT NOT NULL DEFAULT '',
+                    entries TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(doc_id, area, filename)
+                );
+                INSERT INTO documents VALUES
+                    ('d1', 'hash', 't', 3, 'hash', '2026-01-01', 'markdown');
+                INSERT INTO document_sources
+                    (doc_id, area, filename, source_path, container_path,
+                     entries, created_at)
+                    VALUES ('d1', 'personal', 'a.zip/x.md', '/vault/a.zip/x.md',
+                            '/vault/a.zip', '["x.md"]', '2026-01-01');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            store = SqliteStore(db)
+            try:
+                source = store.document_source("d1")
+            finally:
+                store.close()
+        assert source is not None
+        self.assertEqual(source["container_path"], "/vault/a.zip")
+        self.assertEqual(source["container_entries"], ["x.md"])
 
     def test_embeddings_roundtrip(self):
         self._save()

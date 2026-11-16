@@ -4,7 +4,9 @@ export interface ApiHit {
   document_id: string;
   chunk_index: number;
   score: number;
-  context: string | null;
+  /** Символьные границы чанка в документе — по ним клиент запрашивает /context. */
+  chunk_start: number | null;
+  chunk_end: number | null;
   area: string;
   source_path: string;
   filename: string;
@@ -20,21 +22,29 @@ export interface ApiSearchResponse {
 
 export interface ApiHealthResponse {
   status: string;
-  /** Появятся, когда у сервера будет эндпоинт статистики. */
+  /** Адрес, если сервер его сообщает (иначе берётся из location). */
   address?: string;
   documents?: number;
   vectors?: number;
   model?: string;
   pending_embeddings?: number;
+  /** Состояние фонового потока эмбеддингов: работает / остановлен / выключено. */
+  embedding?: string;
+  /** Причина, по которой счётчики не пришли (сервер при этом жив). */
+  stats_error?: string;
 }
 
 export type ApiLogLevel = "info" | "warning" | "error";
+
+/** Вид события: индексация файлов, эмбеддинги/сайдкары, служебные сообщения. */
+export type ApiLogKind = "index" | "embed" | "system";
 
 export interface ApiLogEvent {
   id: number;
   /** ISO-метка времени (UTC). */
   ts: string;
   level: ApiLogLevel;
+  kind: ApiLogKind;
   message: string;
 }
 

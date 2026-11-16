@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import threading
 import unittest
+import zipfile
+from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
+from persinder.api import IndexLog
 from persinder.domain import Area
 from persinder.embed import (
     EmbedWorker,
@@ -21,6 +26,7 @@ from persinder.embed import (
 from persinder.ingest import IngestRequest, IngestService
 from persinder.interfaces import Embedder
 from persinder.morphology import NoopStemmer
+from persinder.sources import ExtractorRegistry, default_registry
 from persinder.store import SqliteStore
 from persinder.textstore import FsTextStore
 from persinder.vectorindex import UsannIndex
@@ -52,6 +58,8 @@ class EmbedWorkerTest(unittest.TestCase):
         chunk_overlap: int = 200,
         embedder: Embedder | None = None,
         ann_dir: Path | None = None,
+        log: IndexLog | None = None,
+        registry: ExtractorRegistry | None = None,
     ) -> EmbedWorker:
         embedder = embedder if embedder is not None else self.embedder
 
@@ -67,13 +75,22 @@ class EmbedWorkerTest(unittest.TestCase):
             chunk_overlap=chunk_overlap,
             virtual_dir=self.virtual,
             ann_dir=ann_dir,
+            log=log,
+            registry=registry,
         )
 
     def tearDown(self):
         self.store.close()
         self._tmp.cleanup()
 
-    def _file(self, name: str, text: str) -> Path:
+    def _file(
+        self,
+        name: str,
+        text: str,
+        extractor: str | None = None,
+        *,
+        cache_text: bool = True,
+    ) -> Path:
         path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
@@ -83,6 +100,8 @@ class EmbedWorkerTest(unittest.TestCase):
                 area=Area.PERSONAL,
                 text=text,
                 source_path=str(path),
+                extractor=extractor,
+                cache_text=cache_text,
             )
         )
         return path
@@ -307,11 +326,189 @@ class EmbedWorkerTest(unittest.TestCase):
         self.assertEqual(stats.docs, 0)
         self.assertEqual(self.store.counts()["pending_embeddings"], 0)
 
+    def test_fallback_reads_original_when_text_missing(self):
+        """D26: текста нет в кэше — воркер перечитывает оригинал (хэш сходится)."""
+        text = "заметка про квантовый флакс"
+        src = self._file("books/one.md", text, extractor="markdown")
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        worker = self._worker(registry=default_registry())
+        self.assertTrue(self.textstore.exists(doc_id))
+        self.textstore.delete(doc_id)
+
+        stats = worker.run_once(limit=10)
+
+        self.assertEqual((stats.docs, stats.sidecars, stats.skipped), (1, 1, 0))
+        self.assertIsNotNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_uncached_doc_embeds_from_original(self):
+        """D27: документ без кэша всё равно получает векторы — из оригинала."""
+        text = "заметка без кэша, но с эмбеддингами"
+        src = self._file(
+            "books/uncached.md", text, extractor="markdown", cache_text=False
+        )
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        self.assertFalse(self.textstore.exists(doc_id))
+        worker = self._worker(registry=default_registry())
+
+        stats = worker.run_once(limit=10)
+
+        self.assertEqual((stats.docs, stats.sidecars, stats.skipped), (1, 1, 0))
+        self.assertIsNotNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_fallback_drops_queue_when_source_changed(self):
+        """Оригинал изменился: текст не тот, из которого нарезаны чанки, —
+        задачи снимаются, в старый ``doc_id`` ничего не пишется."""
+        text = "первая версия текста"
+        src = self._file("books/one.md", text, extractor="markdown")
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        worker = self._worker(registry=default_registry())
+        self.textstore.delete(doc_id)
+        src.write_text("совсем другой текст", encoding="utf-8")
+
+        stats = worker.run_once()
+
+        self.assertEqual((stats.docs, stats.skipped), (0, 1))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+        self.assertIsNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
+
+    def test_fallback_cannot_reread_container_part(self):
+        """Часть контейнера (``arch.zip/inner.md``) на диске не существует:
+        перечитать нельзя — задачи снимаются (такие части обязаны кэшироваться)."""
+        text = "запись внутри архива"
+        self.ingest.ingest(
+            IngestRequest(
+                filename="arch.zip/inner.md",
+                area=Area.PERSONAL,
+                text=text,
+                source_path=str(self.root / "arch.zip/inner.md"),
+                extractor="markdown",
+            )
+        )
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        worker = self._worker(registry=default_registry())
+        self.textstore.delete(doc_id)
+
+        stats = worker.run_once()
+
+        self.assertEqual((stats.docs, stats.skipped), (0, 1))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_fallback_rereads_container_part_addressably(self):
+        """D26/T4: часть контейнера с явным разбором (``container_path`` +
+        ``container_entries``) перечитывается **адресно** — без раскрытия
+        всего архива; хэш сходится, задачи отрабатывают."""
+        text = "запись внутри архива про адресное чтение"
+        container = self.root / "arch"
+        container.mkdir(parents=True, exist_ok=True)
+        zip_path = container / "bundle.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("inner.md", text)
+        self.ingest.ingest(
+            IngestRequest(
+                filename="bundle.zip/inner.md",
+                area=Area.PERSONAL,
+                text=text,
+                source_path=str(zip_path / "inner.md"),
+                extractor="markdown",
+                container_path=str(zip_path),
+                container_entries=("inner.md",),
+            )
+        )
+        doc_id = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        worker = self._worker(registry=default_registry())
+        self.textstore.delete(doc_id)
+
+        stats = worker.run_once(limit=10)
+
+        self.assertEqual((stats.docs, stats.skipped, stats.errors), (1, 0, 0))
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+
+    def test_fallback_without_registry_drops_queue(self):
+        """Без реестра (старая сборка/тесты) поведение прежнее: сироты снимаются."""
+        text = "текст без реестра"
+        src = self._file("books/one.md", text)
+        self.textstore.delete(hashlib.sha256(text.encode("utf-8")).hexdigest())
+        stats = self.worker.run_once()
+        self.assertEqual((stats.docs, stats.skipped), (0, 1))
+        self.assertIsNone(read_sidecar(file_sidecar_path(src, "placeholder-v1")))
+
     def test_second_run_is_idle(self):
         self._file("books/one.md", "текст для проверки идемпотентности")
         self.worker.run_once()
         stats = self.worker.run_once()
         self.assertEqual((stats.docs, stats.skipped), (0, 0))
+
+    def test_sidecar_creation_logged_to_index_log(self):
+        log = IndexLog()
+        log.enable_console(False)
+        worker = self._worker(log=log)
+        src = self._file("books/one.md", "текст для сайдкара в журнале")
+        worker.run_once()
+        messages = [ev.message for ev in log.entries()]
+        self.assertTrue(
+            any(f"сайдкар: {src}" in message for message in messages),
+            f"нет строки сайдкара в журнале: {messages}",
+        )
+        # старт обработки документа тоже виден
+        self.assertTrue(
+            any(f"эмбеддинг: {src}" in message for message in messages),
+            f"нет строки начала обработки: {messages}",
+        )
+
+    def test_embed_error_logged_to_index_log(self):
+        class BoomEmbedder(PlaceholderEmbedder):
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                raise RuntimeError("модель сломалась")
+
+        log = IndexLog()
+        log.enable_console(False)
+        worker = self._worker(embedder=BoomEmbedder(), log=log)
+        self._file("books/bad.md", "текст который не посчитается")
+        worker.run_once()
+        errors = [ev for ev in log.entries() if ev.level == "error"]
+        self.assertTrue(errors, "нет error-событий в журнале")
+        self.assertIn("модель сломалась", errors[0].message)
+
+    def test_embed_error_drops_queue_rows(self):
+        """Падающий документ не молотится вечно: задачи снимаются (CPU/очередь).
+
+        Иначе воркер пересчитывает его каждым проходом без снятия — очередь
+        не убывает, процесс жрёт CPU. Снятые задачи вернутся через
+        ``enqueue_missing`` на следующем старте (сайдкара нет).
+        """
+
+        class BoomEmbedder(PlaceholderEmbedder):
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                raise RuntimeError("модель сломалась")
+
+        worker = self._worker(embedder=BoomEmbedder())
+        self._file("books/bad.md", "текст который не посчитается")
+        self.assertEqual(self.store.counts()["pending_embeddings"], 1)
+        stats = worker.run_once()
+        self.assertEqual(stats.errors, 1)
+        self.assertEqual(self.store.counts()["pending_embeddings"], 0)
+        # повторный проход ничего не молотит — задача уже снята
+        idle = worker.run_once()
+        self.assertEqual((idle.docs, idle.errors, idle.skipped), (0, 0, 0))
+
+    def test_missing_text_skip_logged_to_index_log(self):
+        log = IndexLog()
+        log.enable_console(False)
+        worker = self._worker(log=log)
+        outcome = self.ingest.ingest(
+            IngestRequest(filename="gone.md", area=Area.PERSONAL, text="потом исчезнет")
+        )
+        doc_id = outcome.document_id
+        assert doc_id is not None
+        self.textstore.delete(doc_id)  # имитация сироты: задач нет, текста нет
+        worker.run_once()
+        warnings = [ev for ev in log.entries() if ev.level == "warning"]
+        self.assertTrue(
+            warnings, f"нет warning-событий: {[ev.message for ev in log.entries()]}"
+        )
+        self.assertIn("нет текста", warnings[0].message)
 
     def test_modify_replaces_sidecar(self):
         src = self.root / "note.md"
@@ -582,6 +779,281 @@ class EmbedWorkerRobustnessTest(unittest.TestCase):
             file_sidecar_path(boom, "placeholder-v1").exists(),
             "у упавшего документа сайдкара нет",
         )
+
+
+class EmbedBatchProgressTest(unittest.TestCase):
+    """Большой документ: очередь убывает по ходу, а не только в конце."""
+
+    def test_queue_shrinks_between_batches(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SqliteStore(root / "db.sqlite")
+            texts = FsTextStore(root / "pending_texts")
+            observed: list[int] = []
+
+            class Probe(PlaceholderEmbedder):
+                def embed(self, batch: list[str]) -> list[list[float]]:
+                    # сколько задач осталось к началу этой порции
+                    observed.append(store.counts()["pending_embeddings"])
+                    return super().embed(batch)
+
+            try:
+                ingest = IngestService(
+                    store, texts, NoopStemmer(), chunk_size=10, chunk_overlap=0
+                )
+                body = " ".join(f"слово{i}" for i in range(3000))
+                ingest.ingest(
+                    IngestRequest(
+                        text=body,
+                        area=Area.PERSONAL,
+                        filename="big.md",
+                        source_path=str(root / "big.md"),
+                    )
+                )
+                before = store.counts()["pending_embeddings"]
+                self.assertGreater(
+                    before, 1024, "нужно несколько порций по _CHUNK_BATCH"
+                )
+
+                worker = EmbedWorker(
+                    store,
+                    texts,
+                    lambda model: Probe(),
+                    chunk_size=10,
+                    chunk_overlap=0,
+                )
+                stats = worker.run_once(limit=10)
+
+                self.assertEqual(stats.docs, 1)
+                self.assertEqual(store.counts()["pending_embeddings"], 0)
+                self.assertEqual(observed[0], before)
+                self.assertGreater(len(observed), 1)
+                self.assertEqual(
+                    observed,
+                    sorted(observed, reverse=True),
+                    "очередь должна убывать от порции к порции",
+                )
+                self.assertLess(observed[-1], observed[0])
+            finally:
+                store.close()
+
+
+class QueueVisibilityTest(unittest.TestCase):
+    """Очередь видна в логе: сколько было, сколько стало, сколько осталось."""
+
+    def test_pass_reports_queue_before_and_after(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SqliteStore(root / "db.sqlite")
+            texts = FsTextStore(root / "pending_texts")
+            try:
+                ingest = IngestService(store, texts, NoopStemmer())
+                for name in ("a.md", "b.md"):
+                    ingest.ingest(
+                        IngestRequest(
+                            filename=name,
+                            area=Area.PERSONAL,
+                            text=f"текст документа {name}",
+                            source_path=str(root / name),
+                        )
+                    )
+                before = store.counts()["pending_embeddings"]
+                self.assertGreater(before, 0)
+                worker = EmbedWorker(store, texts, lambda model: PlaceholderEmbedder())
+                stats = worker.run_once(limit=100)
+                self.assertEqual(stats.queue_before, before)
+                self.assertEqual(stats.pending, 0)
+            finally:
+                store.close()
+
+    def test_log_shows_remaining_queue(self):
+        """В журнале (консоль + /logs + вкладка Журнал) есть остаток очереди."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SqliteStore(root / "db.sqlite")
+            texts = FsTextStore(root / "pending_texts")
+            log = IndexLog()
+            log.enable_console(False)
+            try:
+                ingest = IngestService(store, texts, NoopStemmer())
+                ingest.ingest(
+                    IngestRequest(
+                        filename="a.md",
+                        area=Area.PERSONAL,
+                        text="кот сидит на окне",
+                        source_path=str(root / "a.md"),
+                    )
+                )
+                worker = EmbedWorker(
+                    store,
+                    texts,
+                    lambda model: PlaceholderEmbedder(),
+                    log=log,
+                )
+                worker.run_once(limit=100)
+                messages = [event.message for event in log.entries()]
+                self.assertTrue(any("задач:" in m for m in messages), messages)
+                self.assertTrue(any("в очереди:" in m for m in messages), messages)
+                self.assertTrue(
+                    any(m.startswith("сайдкар:") for m in messages), messages
+                )
+            finally:
+                store.close()
+
+    def test_skip_without_text_logs_dropped_tasks(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SqliteStore(root / "db.sqlite")
+            texts = FsTextStore(root / "pending_texts")
+            log = IndexLog()
+            log.enable_console(False)
+            try:
+                ingest = IngestService(store, texts, NoopStemmer())
+                outcome = ingest.ingest(
+                    IngestRequest(
+                        filename="lost.md",
+                        area=Area.PERSONAL,
+                        text="текст, который потеряют",
+                        source_path=str(root / "lost.md"),
+                    )
+                )
+                assert outcome.document_id is not None
+                texts.delete(outcome.document_id)
+                worker = EmbedWorker(
+                    store,
+                    texts,
+                    lambda model: PlaceholderEmbedder(),
+                    log=log,
+                )
+                stats = worker.run_once(limit=100)
+                self.assertEqual(stats.skipped, 1)
+                warnings = [
+                    event.message for event in log.entries() if event.level == "warning"
+                ]
+                self.assertTrue(any("снято задач:" in m for m in warnings), warnings)
+            finally:
+                store.close()
+
+
+class EmbedLoopTest(unittest.TestCase):
+    """Цикл эмбеддингов не умирает молча из-за ошибок печати и лога."""
+
+    def test_report_includes_queue_delta(self):
+        from persinder import __main__ as cli
+        from persinder.embed import EmbedStats
+
+        text = cli.format_embed(
+            EmbedStats(docs=1, chunks=3, sidecars=1, queue_before=7926, pending=6900)
+        )
+        self.assertIn("7926 → 6900", text)
+
+    def test_loop_warns_when_queue_does_not_move(self):
+        """Очередь не уменьшается — сказать это, а не молчать минутами."""
+        from persinder import __main__ as cli
+        from persinder.embed import EmbedStats
+
+        stop = threading.Event()
+        kick = threading.Event()
+        calls: list[int] = []
+
+        def run_once(limit: int) -> EmbedStats:
+            calls.append(limit)
+            if len(calls) >= 12:
+                stop.set()
+            return EmbedStats(pending=5, queue_before=5)
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli._embed_loop(
+                mock.Mock(run_once=run_once), stop, kick, interval=0.01, log_path=None
+            )
+        self.assertIn("ничего не обработал", out.getvalue())
+
+    def test_loop_announces_empty_queue_once(self):
+        """Пустая очередь озвучивается один раз, а не молчанием и не спамом."""
+        from persinder import __main__ as cli
+        from persinder.embed import EmbedStats
+
+        stop = threading.Event()
+        kick = threading.Event()
+        calls: list[int] = []
+
+        def run_once(limit: int) -> EmbedStats:
+            calls.append(limit)
+            if len(calls) == 1:
+                return EmbedStats(docs=1, chunks=1, sidecars=1, pending=1)
+            stop.set()
+            return EmbedStats(pending=0)
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli._embed_loop(
+                mock.Mock(run_once=run_once), stop, kick, interval=0.01, log_path=None
+            )
+        self.assertEqual(out.getvalue().count("Embed: очередь пуста"), 1)
+
+    def test_loop_survives_console_encoding_error(self):
+        """UnicodeEncodeError в print не должен убивать поток эмбеддингов.
+
+        На Windows печать отчёта в консоль/файл в локальной кодировке падала
+        с UnicodeEncodeError; исключение вылетало из тела цикла и поток
+        умирал: сервис отвечал по HTTP, а очередь стояла навсегда.
+        """
+        from persinder import __main__ as cli
+        from persinder.embed import EmbedStats
+
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "embed_errors.log"
+            stop = threading.Event()
+            kick = threading.Event()
+            passes: list[int] = []
+
+            def run_once(limit: int) -> EmbedStats:
+                passes.append(limit)
+                if len(passes) >= 3:
+                    stop.set()
+                return EmbedStats(docs=1, chunks=1, sidecars=1)
+
+            worker = mock.Mock(run_once=run_once)
+            error = UnicodeEncodeError("cp1251", "→", 0, 1, "нет символа")
+            with mock.patch("builtins.print", side_effect=error):
+                cli._embed_loop(worker, stop, kick, interval=0.01, log_path=log_path)
+
+        self.assertEqual(len(passes), 3, "цикл продолжил работу после сбоя печати")
+
+    def test_loop_logs_failed_pass_and_keeps_going(self):
+        from persinder import __main__ as cli
+        from persinder.embed import EmbedStats
+
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "embed_errors.log"
+            stop = threading.Event()
+            kick = threading.Event()
+            calls: list[int] = []
+
+            def run_once(limit: int) -> EmbedStats:
+                calls.append(limit)
+                if len(calls) == 1:
+                    raise RuntimeError("база занята")
+                stop.set()
+                return EmbedStats()
+
+            worker = mock.Mock(run_once=run_once)
+            cli._embed_loop(worker, stop, kick, interval=0.01, log_path=log_path)
+            text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(len(calls), 2, "после ошибки прохода цикл продолжается")
+        self.assertIn("база занята", text)
+
+    def test_append_embed_error_never_raises(self):
+        """Лог — best-effort: путь-каталог вместо файла не роняет поток."""
+        from persinder import __main__ as cli
+
+        with TemporaryDirectory() as tmp:
+            fatal = Path(tmp) / "as_dir"
+            fatal.mkdir()
+            cli._append_embed_error(fatal, "boom")  # не должно бросить
+            cli._append_embed_error(None, "boom")
 
 
 if __name__ == "__main__":

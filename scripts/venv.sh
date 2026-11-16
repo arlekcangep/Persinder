@@ -21,6 +21,6 @@ echo ">> обновляю pip"
 "$venv/bin/pip" install --quiet --upgrade pip
 
 echo ">> ставлю проект с extras (dev + все экстракторы для тестов)"
-"$venv/bin/pip" install --quiet -e "${here}[dev,config,watch,stemming,pdf,archive7z,archiverar,http]"
+"$venv/bin/pip" install --quiet -e "${here}[dev,config,watch,stemming,pdf,rtf,archive7z,archiverar,http]"
 
 echo ">> готово. Активировать: source $venv/bin/activate"

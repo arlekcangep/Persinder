@@ -31,7 +31,7 @@ class ApiTest(unittest.TestCase):
         ingest = IngestService(
             self.store, self.texts, NoopStemmer(), chunk_size=40, chunk_overlap=0
         )
-        search = SearchService(self.store, NoopStemmer(), textstore=self.texts)
+        search = SearchService(self.store, NoopStemmer())
         self.server = make_server(ingest, search, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -58,6 +58,70 @@ class ApiTest(unittest.TestCase):
         with urllib.request.urlopen(self.base + "/health") as resp:
             self.assertEqual(resp.status, 200)
             self.assertEqual(json.load(resp)["status"], "ok")
+
+    def test_health_without_stats_has_only_status(self):
+        with urllib.request.urlopen(self.base + "/health") as resp:
+            body = json.load(resp)
+        self.assertNotIn("pending_embeddings", body)
+
+    def test_health_reports_store_counts(self):
+        """Веб-клиент показывает очередь по ``/health`` — она должна быть живой."""
+        with self._post(
+            "/ingest", {"filename": "a.md", "area": "personal", "text": "кот пёс"}
+        ):
+            pass
+
+        server = make_server(
+            self.server.ingest,
+            self.server.search,
+            host="127.0.0.1",
+            port=0,
+            stats=lambda: {
+                "documents": self.store.counts()["documents"],
+                "vectors": self.store.counts()["vectors"],
+                "model": "placeholder-v1",
+                "pending_embeddings": 7,
+            },
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            addr = server.server_address
+            with urllib.request.urlopen(f"http://{addr[0]}:{addr[1]}/health") as resp:
+                body = json.load(resp)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["documents"], 1)
+        self.assertEqual(body["vectors"], 0)
+        self.assertEqual(body["pending_embeddings"], 7)
+        self.assertEqual(body["model"], "placeholder-v1")
+
+    def test_health_survives_broken_stats(self):
+        """Сбой статистики не должен выглядеть как «сервер недоступен»."""
+
+        def boom() -> dict[str, object]:
+            raise RuntimeError("база занята")
+
+        server = make_server(
+            self.server.ingest, self.server.search, host="127.0.0.1", port=0, stats=boom
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            addr = server.server_address
+            with urllib.request.urlopen(f"http://{addr[0]}:{addr[1]}/health") as resp:
+                body = json.load(resp)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(body["status"], "ok")
+        self.assertIn("stats_error", body)
 
     def test_logs_empty_when_no_log_attached(self):
         with urllib.request.urlopen(self.base + "/logs") as resp:
@@ -123,6 +187,87 @@ class ApiTest(unittest.TestCase):
             thread.join(5)
 
         self.assertEqual([ev["id"] for ev in body["events"]], [2, 3])
+
+    def _server_with_log(self, log: Any) -> tuple[Any, str]:
+        """Поднять сервер с данным ``IndexLog``; вернуть (server, base_url)."""
+        server = make_server(
+            self.server.ingest, self.server.search, host="127.0.0.1", port=0, log=log
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        addr = server.server_address
+        return server, f"http://{addr[0]}:{addr[1]}"
+
+    def test_logs_filter_by_kind(self):
+        from persinder.api import KIND_EMBED, KIND_INDEX, IndexLog
+
+        log = IndexLog()
+        log.enable_console(False)
+        log.info("проиндексирован: a.txt", kind=KIND_INDEX)
+        log.info("сайдкар: a.txt (model, чанков: 2)", kind=KIND_EMBED)
+        log.info("проиндексирован: b.txt", kind=KIND_INDEX)
+
+        server, base = self._server_with_log(log)
+        try:
+            with urllib.request.urlopen(base + "/logs?kind=embed") as resp:
+                body = json.load(resp)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        self.assertEqual(len(body["events"]), 1)
+        self.assertEqual(body["events"][0]["kind"], "embed")
+        self.assertIn("сайдкар", body["events"][0]["message"])
+
+    def test_logs_invalid_kind_is_400(self):
+        from persinder.api import IndexLog
+
+        log = IndexLog()
+        log.enable_console(False)
+        server, base = self._server_with_log(log)
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(base + "/logs?kind=bad")
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_logs_filter_by_dates(self):
+        from persinder.api import IndexLog
+
+        log = IndexLog()
+        log.enable_console(False)
+        log.info("вчера")
+        log.info("сегодня")
+        log._events[0].ts = "2026-11-10T23:59:59+00:00"
+        log._events[1].ts = "2026-11-11T00:00:00+00:00"
+
+        server, base = self._server_with_log(log)
+        try:
+            with urllib.request.urlopen(
+                base + "/logs?from=2026-11-11&to=2026-11-11"
+            ) as resp:
+                body = json.load(resp)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        self.assertEqual([ev["message"] for ev in body["events"]], ["сегодня"])
+
+    def test_logs_invalid_date_is_400(self):
+        from persinder.api import IndexLog
+
+        log = IndexLog()
+        log.enable_console(False)
+        server, base = self._server_with_log(log)
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(base + "/logs?from=not-a-date")
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(ctx.exception.code, 400)
 
     def test_logs_invalid_limit_is_400(self):
         from persinder.api import IndexLog
@@ -295,21 +440,19 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(hit["area"], "personal")
         self.assertEqual(hit["filename"], "ctx.txt")
         self.assertEqual(hit["source_path"], "", "HTTP-вставка — виртуальный документ")
-        # Контекст — от найденного слова, по 3 предложения назад и вперёд,
-        # а не весь чанк (строки с 4-й по 7-ю не попадают).
-        self.assertEqual(
-            hit["context"],
-            "line one\nline two\nline three\nline four\n"
-            "line five\nline six\nline seven",
-        )
+        # Контекст из /search убран (шаг 3): клиент сам идёт в /context.
+        self.assertNotIn("context", hit)
+        self.assertIsInstance(hit["chunk_start"], int)
+        self.assertIsInstance(hit["chunk_end"], int)
+        self.assertGreaterEqual(hit["chunk_start"], 0)
+        self.assertLessEqual(hit["chunk_start"], hit["chunk_end"])
 
-    def test_search_hit_context_is_bounded_not_whole_chunk(self):
-        # Чанк маленький, но контекст всё равно только вокруг найденного слова:
-        # ничего дальше 3 предложений от хита не выводится.
+    def test_search_span_is_chunk_not_whole_document(self):
+        # Границы в хите — символьный охват чанка, а не всего документа:
+        # слово в конце второго чанка даёт start >= 40 (chunk_size=40).
         text = (
-            "alpha one\nalpha two\nцелевое слово\n"
-            "delta one\ndelta two\ndelta three\ndelta four\ndelta five\n"
-            "delta six\ndelta seven\ndelta eight\ndelta nine\n"
+            "строка один\nстрока два\nстрока три\nстрока четыре\n"
+            "целевое слово\n"
         )
         with self._post(
             "/ingest", {"filename": "ctx2.txt", "area": "personal", "text": text}
@@ -319,11 +462,12 @@ class ApiTest(unittest.TestCase):
         body = self._search("слово")
         self.assertTrue(body["hits"])
         hit = body["hits"][0]
-        self.assertIn("целевое слово", hit["context"])
-        self.assertNotIn("delta eight", hit["context"])
-        self.assertNotIn("delta nine", hit["context"])
+        self.assertNotIn("context", hit)
+        self.assertGreaterEqual(hit["chunk_start"], 40, "слово во втором чанке")
+        self.assertLessEqual(hit["chunk_end"], 80)
 
-    def test_search_context_is_null_without_raw_text(self):
+    def test_search_spans_survive_textstore_loss(self):
+        # Границы чанка — из БД (chunks), сырой текст хитам не нужен.
         with self._post(
             "/ingest",
             {"filename": "gone.txt", "area": "personal", "text": "исчезнувший текст"},
@@ -333,7 +477,10 @@ class ApiTest(unittest.TestCase):
 
         body = self._search("исчезнувший")
         self.assertTrue(body["hits"])
-        self.assertIsNone(body["hits"][0]["context"])
+        hit = body["hits"][0]
+        self.assertNotIn("context", hit)
+        self.assertIsInstance(hit["chunk_start"], int)
+        self.assertIsInstance(hit["chunk_end"], int)
 
 
 if __name__ == "__main__":

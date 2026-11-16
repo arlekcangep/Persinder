@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -206,6 +207,42 @@ class Journal:
                 mtime_ns if mtime_ns is not None else (prev.mtime_ns if prev else None)
             ),
         )
+
+    def records(self) -> list[tuple[str, str, JournalEvent]]:
+        """Последние состояния файлов: ``(root, rel, event)`` по всем областям."""
+        return [(root, rel, rec.event) for (root, rel), rec in self._records.items()]
+
+    def forget(self, keys: Iterable[tuple[str, str]]) -> int:
+        """Убрать записи о файлах: следующий скан снова сочтёт их новыми.
+
+        Нужно сверке при старте: журнал говорит «устроено», а в базе нет
+        документа/текста (или формат теперь поддержан) — без забывания файл
+        никогда не будет прочитан заново, потому что слепок ``(size, mtime)``
+        не менялся. Возвращает число забытых записей.
+        """
+        drop = set(keys)
+        if not drop:
+            return 0
+        try:
+            raw_lines = self._path.read_text(encoding="utf-8").splitlines()
+        except (FileNotFoundError, OSError):
+            raw_lines = []
+        keep: list[str] = []
+        removed = 0
+        for line in raw_lines:
+            entry = _parse(line)
+            if entry is not None and entry.key in drop:
+                removed += 1
+                continue
+            keep.append(line)
+        for key in drop:
+            self._records.pop(key, None)
+        if removed:
+            tmp = self._path.with_name(self._path.name + ".tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text("".join(line + "\n" for line in keep), encoding="utf-8")
+            os.replace(tmp, self._path)
+        return removed
 
     def snapshot(self, areas: tuple[AreaConfig, ...]) -> dict[Path, AreaScan]:
         """Состояние «устроенных» файлов областей — предыдущее для диффа."""

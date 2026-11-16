@@ -21,6 +21,7 @@ export default defineConfig({
       "/search": { target: API_TARGET, changeOrigin: true },
       "/health": { target: API_TARGET, changeOrigin: true },
       "/ingest": { target: API_TARGET, changeOrigin: true },
+      "/logs": { target: API_TARGET, changeOrigin: true },
     },
   },
 });

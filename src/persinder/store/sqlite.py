@@ -6,13 +6,22 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import cast
 
 from ..domain import Chunk, Document, EmbeddingJob, utcnow
-from .models import EmbeddingQueueItem, EmbeddingRow, MorphHit, SourceRow, StoreCounts
+from .models import (
+    DocumentSource,
+    EmbeddingQueueItem,
+    EmbeddingRow,
+    MorphHit,
+    SourceRow,
+    StoreCounts,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -22,7 +31,8 @@ CREATE TABLE IF NOT EXISTS documents (
     char_count   INTEGER NOT NULL,
     text_key     TEXT NOT NULL,
     created_at   TEXT NOT NULL,
-    extractor    TEXT NOT NULL DEFAULT ''
+    extractor    TEXT NOT NULL DEFAULT '',
+    text_cached  INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS document_sources (
@@ -31,6 +41,9 @@ CREATE TABLE IF NOT EXISTS document_sources (
     area        TEXT NOT NULL,
     filename    TEXT NOT NULL,
     source_path TEXT NOT NULL DEFAULT '',
+    container_path TEXT NOT NULL DEFAULT '',
+    container_entries TEXT NOT NULL DEFAULT '[]',
+    cache_text INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL,
     UNIQUE(doc_id, area, filename)
 );
@@ -86,6 +99,24 @@ CREATE TABLE IF NOT EXISTS embeddings (
 """
 
 
+def _container_entries_json(entries: Sequence[str] | None) -> str:
+    """Цепочка записей → JSON для ``document_sources.container_entries``."""
+    return json.dumps(list(entries or ()), ensure_ascii=False)
+
+
+def _parse_container_entries(raw: object) -> list[str]:
+    """JSON из ``document_sources.container_entries`` → список (битое → [])."""
+    if not raw:
+        return []
+    try:
+        value = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in cast("list[object]", value)]
+
+
 class SqliteStore:
     """Реализация MetaStore на SQLite (см. ``interfaces.MetaStore``)."""
 
@@ -100,19 +131,35 @@ class SqliteStore:
 
     def _migrate(self) -> None:
         """Добавить новые колонки в существующие базы (прототип, без версий)."""
-        for table, column in (
-            ("document_sources", "source_path"),
-            ("embedding_queue", "source_path"),
-            ("documents", "extractor"),
+        # T3: промежуточное имя колонки было ``entries`` — переименовываем.
+        source_cols = [
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(document_sources)")
+        ]
+        if "entries" in source_cols and "container_entries" not in source_cols:
+            self._conn.execute(
+                "ALTER TABLE document_sources"
+                " RENAME COLUMN entries TO container_entries"
+            )
+        for table, column, decl in (
+            ("document_sources", "source_path", "TEXT NOT NULL DEFAULT ''"),
+            ("document_sources", "container_path", "TEXT NOT NULL DEFAULT ''"),
+            ("document_sources", "container_entries", "TEXT NOT NULL DEFAULT '[]'"),
+            ("embedding_queue", "source_path", "TEXT NOT NULL DEFAULT ''"),
+            ("documents", "extractor", "TEXT NOT NULL DEFAULT ''"),
+            # D27: текст не всех форматов хранится в кэше. Старые документы
+            # считаются кэшируемыми — как и было до появления флага.
+            ("documents", "text_cached", "INTEGER NOT NULL DEFAULT 1"),
+            # T5b: решение принимается для источника (область + формат), а
+            # флаг документа — производное от источников.
+            ("document_sources", "cache_text", "INTEGER NOT NULL DEFAULT 1"),
         ):
             cols = [
                 str(row["name"])
                 for row in self._conn.execute(f"PRAGMA table_info({table})")
             ]
             if column not in cols:
-                self._conn.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
-                )
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
         self._migrate_queue_model()
         self._migrate_embeddings_id()
 
@@ -190,6 +237,36 @@ class SqliteStore:
             ).fetchone()
         return row["id"] if row else None
 
+    def document_source(self, doc_id: str) -> DocumentSource | None:
+        """Документ + его главный источник: для ``/context`` (вариант C).
+
+        Возвращает ``extractor`` (имя типа), ``content_hash`` и ``source_path``
+        главного источника. Порядок источников — реальные файлы раньше
+        виртуальных (``source_path = ''``), затем по ``id`` — как в
+        ``sources_for_docs``. ``None`` — документа нет.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT d.id, d.content_hash, d.extractor, s.source_path,"
+                " s.container_path, s.container_entries "
+                "FROM documents d "
+                "LEFT JOIN document_sources s ON s.doc_id = d.id "
+                "WHERE d.id = ? "
+                "ORDER BY CASE WHEN s.source_path = '' THEN 1 ELSE 0 END, s.id "
+                "LIMIT 1",
+                (doc_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return DocumentSource(
+            doc_id=str(row["id"]),
+            content_hash=str(row["content_hash"]),
+            extractor=str(row["extractor"]),
+            source_path=str(row["source_path"]),
+            container_path=str(row["container_path"]),
+            container_entries=_parse_container_entries(row["container_entries"]),
+        )
+
     def search_morph(self, stemmed_query: str, limit: int = 20) -> list[MorphHit]:
         """Морфологический поиск по FTS5 (запрос уже стеммирован)."""
         with self._lock:
@@ -229,13 +306,13 @@ class SqliteStore:
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, doc_id, chunk_index, area, source_path, model "
-                "FROM embedding_queue "
-                "WHERE status = 'pending' "
-                "ORDER BY (SELECT COUNT(*) FROM embedding_queue q2"
-                "          WHERE q2.status = 'pending'"
-                "          AND q2.doc_id = embedding_queue.doc_id),"
-                "         id LIMIT ?",
+                "SELECT q.id, q.doc_id, q.chunk_index, q.area, q.source_path, q.model "
+                "FROM embedding_queue q "
+                "JOIN (SELECT doc_id, COUNT(*) AS n FROM embedding_queue"
+                "      WHERE status = 'pending' GROUP BY doc_id) c"
+                "  ON c.doc_id = q.doc_id "
+                "WHERE q.status = 'pending' "
+                "ORDER BY c.n, q.id LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._queue_item(row) for row in rows]
@@ -264,10 +341,34 @@ class SqliteStore:
                 f"DELETE FROM embedding_queue WHERE id IN ({placeholders})", ids
             )
 
+    def drop_queue_doc(self, doc_id: str) -> None:
+        """Снять все задачи документа (ошибка эмбеддинга).
+
+        Падающий документ иначе молотится каждым проходом: задачи остаются в
+        очереди, воркер пересчитывает его вечно (30% CPU, очередь не убывает).
+        Снятые задачи возвращаются на следующем старте через ``enqueue_missing``
+        (сайдкара нет) — после починки причины ошибки документ досчитается.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM embedding_queue WHERE doc_id = ?", (doc_id,)
+            )
+
     def drop_queue_model(self, model: str) -> None:
         """Убрать задачи модели из очереди (модель удалена)."""
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM embedding_queue WHERE model = ?", (model,))
+
+    def clear_queue(self) -> int:
+        """Очистить очередь эмбеддингов целиком; вернуть число снятых задач.
+
+        Нужно полной переиндексации (``--reindex``, D25): задачи прошлого
+        профиля/прогона не должны разбираться вместе с новыми — очередь
+        начинается с чистого листа, а досчёт идёт из сайдкаров и файлов.
+        """
+        with self._lock, self._conn:
+            cursor = self._conn.execute("DELETE FROM embedding_queue")
+        return max(cursor.rowcount, 0)
 
     @staticmethod
     def _queue_item(row: sqlite3.Row) -> EmbeddingQueueItem:
@@ -291,15 +392,27 @@ class SqliteStore:
                 documents=one("SELECT COUNT(*) FROM documents"),
                 sources=one("SELECT COUNT(*) FROM document_sources"),
                 chunks=one("SELECT COUNT(*) FROM chunks"),
+                vectors=one("SELECT COUNT(*) FROM embeddings"),
                 pending_embeddings=one(
                     "SELECT COUNT(*) FROM embedding_queue WHERE status = 'pending'"
+                ),
+                pending_documents=one(
+                    "SELECT COUNT(DISTINCT doc_id) FROM embedding_queue"
+                    " WHERE status = 'pending'"
                 ),
             )
 
     # --- запись ---
 
     def _bind_source(
-        self, doc_id: str, area: str, filename: str, source_path: str
+        self,
+        doc_id: str,
+        area: str,
+        filename: str,
+        source_path: str,
+        container_path: str = "",
+        container_entries: Sequence[str] = (),
+        cache_text: bool = True,
     ) -> list[str]:
         """Закрепить ``(area, filename)`` за ``doc_id``, вытеснив прежний документ.
 
@@ -308,6 +421,11 @@ class SqliteStore:
         вычищается, если у него не осталось других источников. Возвращает id
         вычищенных документов — по ним вызывающий удаляет сырой текст и
         сайдкары. Нужен открытый ``with`` (вызывается внутри транзакции).
+
+        ``cache_text`` — решение области/формата (T5b, D31): флаг живёт на
+        источнике, потому что дубликаты из разных областей могут расходиться.
+        После записи флаг документа пересчитывается: он равен «хотя бы один
+        источник хочет кэш».
         """
         stale = self._conn.execute(
             "SELECT DISTINCT doc_id FROM document_sources"
@@ -330,20 +448,68 @@ class SqliteStore:
                 evicted.append(old_id)
         self._conn.execute(
             "INSERT INTO document_sources"
-            "(doc_id, area, filename, source_path, created_at) VALUES (?, ?, ?, ?, ?)"
-            " ON CONFLICT(doc_id, area, filename) DO UPDATE SET source_path ="
-            " CASE WHEN excluded.source_path != '' THEN excluded.source_path"
-            " ELSE document_sources.source_path END",
-            (doc_id, area, filename, source_path, utcnow()),
+            "(doc_id, area, filename, source_path, container_path,"
+            " container_entries, cache_text, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(doc_id, area, filename) DO UPDATE SET"
+            " source_path = CASE WHEN excluded.source_path != ''"
+            "   THEN excluded.source_path ELSE document_sources.source_path END,"
+            " container_path = CASE WHEN excluded.container_path != ''"
+            "   THEN excluded.container_path ELSE document_sources.container_path END,"
+            " container_entries = CASE WHEN excluded.container_entries != '[]'"
+            "   THEN excluded.container_entries"
+            "   ELSE document_sources.container_entries END,"
+            " cache_text = excluded.cache_text",
+            (
+                doc_id,
+                area,
+                filename,
+                source_path,
+                container_path,
+                _container_entries_json(container_entries),
+                1 if cache_text else 0,
+                utcnow(),
+            ),
         )
+        self._refresh_text_cached(doc_id)
         return evicted
 
+    def _refresh_text_cached(self, doc_id: str) -> None:
+        """Пересчитать ``documents.text_cached`` по источникам (T5b, D31).
+
+        Нужен открытый ``with``. Текст кэшируется, если его хочет хотя бы один
+        источник: файл кэша общий (``doc_id`` = хэш содержимого), и порядок
+        обхода областей не должен решать его судьбу.
+        """
+        self._conn.execute(
+            "UPDATE documents SET text_cached = CASE WHEN EXISTS("
+            "  SELECT 1 FROM document_sources"
+            "  WHERE doc_id = ? AND cache_text = 1"
+            ") THEN 1 ELSE 0 END WHERE id = ?",
+            (doc_id, doc_id),
+        )
+
     def add_source(
-        self, doc_id: str, area: str, filename: str, source_path: str = ""
+        self,
+        doc_id: str,
+        area: str,
+        filename: str,
+        source_path: str = "",
+        container_path: str = "",
+        container_entries: Sequence[str] = (),
+        cache_text: bool = True,
     ) -> list[str]:
         """Закрепить источник; вернуть id вытесненных документов (для чистки текста)."""
         with self._lock, self._conn:
-            return self._bind_source(doc_id, area, filename, source_path)
+            return self._bind_source(
+                doc_id,
+                area,
+                filename,
+                source_path,
+                container_path,
+                container_entries,
+                cache_text,
+            )
 
     def has_source(self, area: str, filename: str) -> bool:
         """Есть ли в индексе источник ``(area, filename)``."""
@@ -419,6 +585,9 @@ class SqliteStore:
             if int(left) == 0:
                 self._purge_document(doc_id)
                 return doc_id
+            # Источник мог быть единственным, кому нужен кэш (T5b, D31):
+            # документ остаётся, а флаг — по оставшимся источникам.
+            self._refresh_text_cached(doc_id)
             return None
 
     def delete_document(self, doc_id: str) -> None:
@@ -434,19 +603,25 @@ class SqliteStore:
         chunks: list[Chunk],
         jobs: list[EmbeddingJob],
         source_path: str = "",
+        container_path: str = "",
+        container_entries: Sequence[str] = (),
     ) -> list[str]:
         """Атомарно записать документ, источник, чанки (с FTS5) и очередь.
 
         Прежний документ того же файла ``(area, filename)`` вытесняется
-        (см. ``_bind_source``). Возвращает id вытесненных документов, чтобы
-        вызывающий удалил их сырой текст и сайдкары.
+        (см. ``_bind_source``). ``container_path`` + ``container_entries`` —
+        явный разбор пути для части архива. Решение о кэше едет в
+        ``Document.text_cached`` (T5b, D31): новый документ — это ровно один
+        источник, поэтому флаг документа и есть флаг источника; после привязки
+        он пересчитывается по всем источникам. Возвращает id вытесненных
+        документов, чтобы вызывающий удалил их сырой текст и сайдкары.
         """
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO documents"
                 "(id, content_hash, title, char_count, text_key, created_at, "
-                " extractor) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " extractor, text_cached) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     doc.id,
                     doc.content_hash,
@@ -455,9 +630,18 @@ class SqliteStore:
                     doc.text_key,
                     doc.created_at,
                     doc.extractor,
+                    1 if doc.text_cached else 0,
                 ),
             )
-            evicted = self._bind_source(doc.id, area, filename, source_path)
+            evicted = self._bind_source(
+                doc.id,
+                area,
+                filename,
+                source_path,
+                container_path,
+                container_entries,
+                doc.text_cached,
+            )
             for chunk in chunks:
                 cur = self._conn.execute(
                     "INSERT INTO chunks(doc_id, chunk_index, char_start, char_end) "
@@ -543,26 +727,37 @@ class SqliteStore:
         models: list[str],
         has_sidecar: Callable[[str, str, str], bool],
         models_for: Callable[[str, str], tuple[str, ...]] | None = None,
-    ) -> None:
+        has_text: Callable[[str], bool] | None = None,
+    ) -> int:
         """Поставить задачи только для источников без сайдкара под моделью.
 
-        То же, что ``enqueue_all``, но уже отработанные источники (сайдкар на
-        месте **и** векторы в таблице есть) в очередь не возвращает. Нужно
-        ``--reindex``: рестарт не должен перезаполнять очередь всем подряд —
-        только тем, чего реально нет.
-
-        Сайдкар без векторов в таблице «отработанным» не считается: так
-        восстанавливается профиль, где БД новая/потерянная, а сайдкары
-        приехали из синка — иначе документ был бы невидим для семантики.
+        Нужно на старте сервиса: рестарт не должен заново ставить в очередь всё
+        подряд — только то, чего реально нет. Сайдкар без векторов в таблице
+        «отработанным» не считается: так восстанавливается профиль, где БД
+        новая/потерянная, а сайдкары приехали из синка — иначе документ был бы
+        невидим для семантики.
 
         ``models_for(area, source_path)`` — модели конкретного источника по
         конфигу (своя модель папки, выключенная семантика); ``None`` — брать
         общий список ``models``. Пустой результат — источник не индексируется
         семантически.
+
+        ``has_text(doc_id)`` — есть ли у документа сырой текст. Нет текста —
+        считать нечего, **если** он вообще должен там быть
+        (``documents.text_cached``, D27): для некэшируемого формата текст
+        перечитывается из оригинала, поэтому такие задачи ставим (иначе
+        каждый старт заново кладёт тысячи задач документа, который воркер тут
+        же снимет как сироту, и «очередь при старте» выглядит огромной без
+        причины).
+
+        Возвращает число **добавленных** задач (уже стоявшие не в счёт).
         """
+        added = 0
         with self._lock, self._conn:
             rows = self._conn.execute(
-                "SELECT DISTINCT doc_id, area, source_path FROM document_sources"
+                "SELECT DISTINCT s.doc_id, s.area, s.source_path, d.text_cached"
+                " FROM document_sources s"
+                " JOIN documents d ON d.id = s.doc_id"
             ).fetchall()
             for row in rows:
                 doc_id, area, source_path = (
@@ -570,6 +765,12 @@ class SqliteStore:
                     str(row["area"]),
                     str(row["source_path"]),
                 )
+                if (
+                    has_text is not None
+                    and bool(row["text_cached"])
+                    and not has_text(doc_id)
+                ):
+                    continue
                 chosen = (
                     models_for(area, source_path)
                     if models_for is not None
@@ -580,7 +781,7 @@ class SqliteStore:
                         self.embeddings_complete(model, doc_id)
                     ):
                         continue
-                    self._conn.execute(
+                    cursor = self._conn.execute(
                         "INSERT OR IGNORE INTO embedding_queue"
                         "(doc_id, chunk_index, area, source_path, model, "
                         "status, created_at) "
@@ -588,6 +789,8 @@ class SqliteStore:
                         " FROM chunks WHERE doc_id = ?",
                         (area, source_path, model, utcnow(), doc_id),
                     )
+                    added += max(cursor.rowcount, 0)
+        return added
 
     def doc_ids_in_paths(
         self, prefixes: list[str], *, include_virtual: bool = False
@@ -625,6 +828,33 @@ class SqliteStore:
                 "SELECT doc_id, area, filename, source_path FROM document_sources"
             ).fetchall()
         return [self._source_row(row) for row in rows]
+
+    def text_cached_docs(self, doc_ids: Sequence[str]) -> set[str]:
+        """id документов из списка, чей текст должен лежать в кэше (D27)."""
+        if not doc_ids:
+            return set()
+        placeholders = ",".join("?" for _ in doc_ids)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM documents"
+                f" WHERE text_cached = 1 AND id IN ({placeholders})",
+                list(doc_ids),
+            ).fetchall()
+        return {str(row["id"]) for row in rows}
+
+    def document_wants_cache(self, doc_id: str) -> bool:
+        """Нужен ли текст документа в кэше хотя бы одному источнику (T5b).
+
+        Флаг ``documents.text_cached`` — производное от
+        ``document_sources.cache_text`` и пересчитывается при каждой привязке
+        источника. ``False`` — текст можно удалить с диска: он воспроизводим
+        из оригиналов (``/context`` и воркер перечитают файл).
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT text_cached FROM documents WHERE id = ?", (doc_id,)
+            ).fetchone()
+        return bool(row["text_cached"]) if row is not None else False
 
     def sources_for_docs(self, doc_ids: list[str]) -> list[SourceRow]:
         """Источники документов (для выдачи пути в результатах поиска).

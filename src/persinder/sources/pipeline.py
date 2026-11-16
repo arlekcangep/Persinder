@@ -19,7 +19,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 
-from ..api.index_log import IndexLog
+from ..api.index_log import KIND_INDEX, IndexLog
 from ..ingest import IngestRequest, IngestResult
 from ..interfaces import Ingest
 from .extract import Extracted, ExtractorRegistry
@@ -50,6 +50,7 @@ class IndexingPipeline:
         journal: Journal | None = None,
         semantic: bool = True,
         log: IndexLog | None = None,
+        quiet_unchanged: bool = False,
     ) -> None:
         self._ingest = ingest
         self._registry = registry
@@ -58,11 +59,15 @@ class IndexingPipeline:
         # область не ставит эмбеддинги в очередь.
         self._semantic = semantic
         self._log = log
+        # Сверка reindex прогоняет все файлы подряд; неизменённые (дубликат
+        # по хэшу) не должны писать в журнал и консоль — иначе каждый старт
+        # добавлял бы по три строки на каждый файл библиотеки.
+        self._quiet_unchanged = quiet_unchanged
 
     def _outcome(self, level: str, message: str) -> None:
         """Дописать событие в ``IndexLog`` (консоль + веб-журнал)."""
         if self._log is not None:
-            self._log.add(level, message)
+            self._log.add(level, message, kind=KIND_INDEX)
 
     def _record(
         self,
@@ -121,24 +126,27 @@ class IndexingPipeline:
             stats.deleted += 1
             return
 
-        self._record(
-            area,
-            rel_path,
-            JournalEvent.DISCOVERED,
-            size=event.size,
-            mtime_ns=event.mtime_ns,
-        )
-        self._outcome("info", f"открыт: {rel_path}")
+        if not self._quiet_unchanged:
+            # В сверке reindex эти пометки не нужны: файл и так устроен, а
+            # строка журнала на каждый неизменённый файл — лишний мусор.
+            self._record(
+                area,
+                rel_path,
+                JournalEvent.DISCOVERED,
+                size=event.size,
+                mtime_ns=event.mtime_ns,
+            )
+            self._outcome("info", f"открыт: {rel_path}")
         parts = self._registry.extract(area.path / rel_path, area)
         if parts is None:
-            self._record(
-                area, rel_path, JournalEvent.SKIPPED, detail="формат не обслуживается"
-            )
-            self._outcome("warning", f"пропущен: {rel_path} (формат не обслуживается)")
+            reason = self._registry.explain_miss(area.path / rel_path, area)
+            self._record(area, rel_path, JournalEvent.SKIPPED, detail=reason)
+            self._outcome("warning", f"пропущен: {rel_path} ({reason})")
             stats.skipped += 1
             return
 
-        errored = [p for p in parts if p.error]
+        errored = [p for p in parts if p.error and not p.skipped]
+        skipped = [p for p in parts if p.skipped]
         usable = [p for p in parts if not p.error and p.text.strip()]
         if not usable:
             if errored:
@@ -146,13 +154,20 @@ class IndexingPipeline:
                 self._record(area, rel_path, JournalEvent.ERROR, detail=detail)
                 self._outcome("error", f"ошибка: {rel_path} — {detail}")
                 self._fail(stats, rel_path, detail)
+            elif skipped:
+                # Намеренный пропуск (архив больше лимита, лимит temp): это не
+                # сбой — в журнал пишем причину как пропуск.
+                detail = "; ".join(p.error or "пропущен" for p in skipped)
+                self._record(area, rel_path, JournalEvent.SKIPPED, detail=detail)
+                self._outcome("warning", f"пропущен: {rel_path} ({detail})")
             else:
                 self._record(area, rel_path, JournalEvent.SKIPPED, detail="нет текста")
                 self._outcome("warning", f"пропущен: {rel_path} (нет текста)")
             stats.skipped += 1
             return
 
-        self._record(area, rel_path, JournalEvent.SENT)
+        if not self._quiet_unchanged:
+            self._record(area, rel_path, JournalEvent.SENT)
         indexed = duplicates = rejected = 0
         chunks = 0
         doc_ids: list[str] = []
@@ -162,7 +177,9 @@ class IndexingPipeline:
             # архив — часть пути, поэтому source_path = полный виртуальный путь с
             # архивом как каталогом (в т.ч. для вложенных архивов). Сайдкар затем
             # идёт в .persinder/<модель>/<архив>/... (см. sidecar_path).
-            source_path = str(area.path / rel_path)
+            # Сам разбор пути (контейнер + цепочка записей) едет в IngestRequest
+            # отдельно: source_path — человекочитаемый, но не источник истины.
+            source_path = part.container_path or str(area.path / rel_path)
             if part.name:
                 source_path = f"{source_path}/{part.name}"
             outcome = self._ingest.ingest(
@@ -172,6 +189,18 @@ class IndexingPipeline:
                     text=part.text,
                     source_path=source_path,
                     extractor=part.extractor or None,
+                    container_path=part.container_path,
+                    container_entries=part.container_entries,
+                    # Части контейнеров кэшируются всегда: на диске такого
+                    # файла нет — перечитывать нечего (D27). Обычный файл —
+                    # по конфигу области (no_cache, T5b) и решению экстрактора.
+                    cache_text=(
+                        True
+                        if part.container_entries
+                        else self._registry.is_cachable(
+                            part.extractor, area.no_cache or ()
+                        )
+                    ),
                     embedding_models=queue_models_for(
                         area, semantic_enabled=self._semantic
                     ),
@@ -200,8 +229,9 @@ class IndexingPipeline:
             self._record(area, rel_path, JournalEvent.INDEXED, detail=detail)
             self._outcome("info", f"проиндексирован: {rel_path} ({detail})")
         elif duplicates:
-            self._record(area, rel_path, JournalEvent.DUPLICATE)
-            self._outcome("info", f"дубликат: {rel_path}")
+            if not self._quiet_unchanged:
+                self._record(area, rel_path, JournalEvent.DUPLICATE)
+                self._outcome("info", f"дубликат: {rel_path}")
         else:
             self._record(
                 area,

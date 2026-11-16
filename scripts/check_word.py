@@ -130,10 +130,10 @@ def main() -> int:
             print(f"  конфиг не прочитан: {exc}")
 
     print("\n2. Локальный поиск по этой базе:")
-    ingest, search, store = build_service(
+    _ingest, search, store, _recovery = build_service(
         settings, areas=areas, semantic=semantic, min_score=config_min_score
     )
-    del ingest
+    del _ingest
     try:
         result = search.search(SearchQuery(text=args.word, limit=args.limit))
         _print_result(result)

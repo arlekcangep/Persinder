@@ -136,6 +136,8 @@ class IngestService:
         text = request.text or ""
         area = request.area.value
         source_path = request.source_path or ""
+        container_path = request.container_path or ""
+        container_entries = tuple(request.container_entries)
         # Модели этой записи: область могла выбрать свою или выключить семантику;
         # None — глобальные модели профиля (старое поведение).
         models = (
@@ -169,8 +171,22 @@ class IngestService:
                 filename=request.filename,
             )
             evicted = self._store.add_source(
-                existing, area, request.filename, source_path=source_path
+                existing,
+                area,
+                request.filename,
+                source_path=source_path,
+                container_path=container_path,
+                container_entries=container_entries,
+                cache_text=request.cache_text,
             )
+            # Файл кэша один на документ (id = хэш), источники могут расходиться
+            # в решении (T5b, D31): текст держим, пока его хочет хотя бы один
+            # источник. Все отказались — удаляем: он воспроизводим из оригиналов
+            # (потерянный кэш кэширующего документа так же восстанавливается).
+            if self._store.document_wants_cache(existing):
+                self._textstore.put(existing, text)
+            else:
+                self._textstore.delete(existing)
             self._drop_texts(evicted)
             self._drop_sidecars(evicted, previous, source_path, existing)
             # У нового источника свои сайдкары — ставим его задачи под каждой
@@ -202,7 +218,8 @@ class IngestService:
             area=area,
             filename=request.filename,
         )
-        self._textstore.put(doc_id, text)
+        if request.cache_text:
+            self._textstore.put(doc_id, text)
 
         spans = chunk_text(text, self._chunk_size, self._chunk_overlap)
         chunks = [
@@ -224,6 +241,7 @@ class IngestService:
             text_key=doc_id,
             created_at=now,
             extractor=request.extractor or "",
+            text_cached=request.cache_text,
         )
         jobs = [
             EmbeddingJob(
@@ -245,6 +263,8 @@ class IngestService:
             chunks,
             jobs,
             source_path=source_path,
+            container_path=container_path,
+            container_entries=container_entries,
         )
         self._drop_texts(evicted)
         self._drop_sidecars(evicted, previous, source_path, doc_id)
@@ -270,6 +290,10 @@ class IngestService:
         purged = self._store.remove_source(area_name, filename)
         if purged is not None:
             self._textstore.delete(purged)
+        elif not self._store.document_wants_cache(doc_id):
+            # Документ остаётся у других источников, но кэш им не нужен
+            # (T5b, D31): текст воспроизводим из оригинала.
+            self._textstore.delete(doc_id)
         if source_path:
             delete_file_sidecars(source_path)
         elif purged is not None and self._virtual_dir is not None:

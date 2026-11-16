@@ -1,5 +1,6 @@
 """Модуль `sources`: watcher областей, классификаторы, экстракторы, конфиг, конвейер."""
 
+from .catalog import CatalogStats, sync_catalog
 from .classify import (
     ARCHIVE,
     CODE,
@@ -17,6 +18,7 @@ from .config import ConfigError, load_config
 from .extract import (
     CLASS_ALIASES,
     ArchiveExtractor,
+    ChmExtractor,
     ContainerExtractor,
     EpubExtractor,
     Extracted,
@@ -27,12 +29,14 @@ from .extract import (
     MarkdownExtractor,
     MhtmlExtractor,
     PdfExtractor,
+    RtfExtractor,
     TextExtractor,
     default_registry,
     extract_html,
 )
 from .journal import JOURNAL_RETENTION_DAYS, Journal, JournalEvent
 from .models import (
+    DEFAULT_NO_CACHE,
     AreaConfig,
     AreaScan,
     ChangeEvent,
@@ -42,6 +46,7 @@ from .models import (
     queue_models_for,
 )
 from .pipeline import IndexingPipeline, PipelineStats
+from .reconcile import ReconcileStats, reconcile
 from .scanner import BUILTIN_IGNORES, AreaScanner
 from .watcher import Watcher
 
@@ -54,13 +59,16 @@ __all__ = [
     "BUILTIN_IGNORES",
     "CLASS_ALIASES",
     "CODE",
+    "CatalogStats",
     "ChangeEvent",
     "ChangeKind",
+    "ChmExtractor",
     "ConfigError",
     "ContainerExtractor",
     "ClassMatch",
     "Classifier",
     "ClassifierSet",
+    "DEFAULT_NO_CACHE",
     "EpubExtractor",
     "Extractor",
     "Extracted",
@@ -77,6 +85,8 @@ __all__ = [
     "PUB_FORMATS",
     "PdfExtractor",
     "PipelineStats",
+    "ReconcileStats",
+    "RtfExtractor",
     "STRUCTURE_TEXT",
     "SCIENCE",
     "ScanResult",
@@ -89,4 +99,6 @@ __all__ = [
     "extract_html",
     "load_config",
     "queue_models_for",
+    "reconcile",
+    "sync_catalog",
 ]

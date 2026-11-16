@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from .ingest.models import IngestRequest, IngestResult, RemoveResult
     from .search.models import SearchQuery, SearchResult
     from .store.models import (
+        DocumentSource,
         EmbeddingQueueItem,
         EmbeddingRow,
         MorphHit,
@@ -74,8 +75,23 @@ class MetaStore(Protocol):
 
     def find_document_by_hash(self, content_hash: str) -> str | None: ...
 
+    def document_source(self, doc_id: str) -> DocumentSource | None:
+        """Документ + главный источник: extractor, content_hash, source_path.
+
+        Нужно для ``/context`` (вариант C): endpoint сам запрашивает, как
+        перечитать оригинал. ``None`` — документа нет в базе.
+        """
+        ...
+
     def add_source(
-        self, doc_id: str, area: str, filename: str, source_path: str = ""
+        self,
+        doc_id: str,
+        area: str,
+        filename: str,
+        source_path: str = "",
+        container_path: str = "",
+        container_entries: Sequence[str] = (),
+        cache_text: bool = True,
     ) -> list[str]:
         """Закрепить источник; вернуть id вытесненных документов."""
         ...
@@ -102,6 +118,8 @@ class MetaStore(Protocol):
         chunks: list[Chunk],
         jobs: list[EmbeddingJob],
         source_path: str = "",
+        container_path: str = "",
+        container_entries: Sequence[str] = (),
     ) -> list[str]:
         """Записать документ; вернуть id вытесненных документов."""
         ...
@@ -127,12 +145,16 @@ class MetaStore(Protocol):
         models: list[str],
         has_sidecar: Callable[[str, str, str], bool],
         models_for: Callable[[str, str], tuple[str, ...]] | None = None,
-    ) -> None:
+        has_text: Callable[[str], bool] | None = None,
+    ) -> int:
         """Поставить задачи только для источников без сайдкара под моделью
         (``--reindex``: уже отработанное заново в очередь не возвращается).
+        Возвращает число добавленных задач.
 
         ``models_for(area, source_path)`` — модели конкретного источника по
         конфигу; ``None`` — общий список ``models``.
+        ``has_text(doc_id)`` — есть ли у документа сырой текст; без текста
+        задачи не ставятся (их нечем считать).
         """
         ...
 
@@ -146,8 +168,25 @@ class MetaStore(Protocol):
         """Убрать задачи модели из очереди (модель удалена)."""
         ...
 
+    def clear_queue(self) -> int:
+        """Очистить очередь эмбеддингов целиком; вернуть число снятых задач."""
+        ...
+
     def all_sources(self) -> list[SourceRow]:
         """Все источники (для удаления сайдкаров модели)."""
+        ...
+
+    def text_cached_docs(self, doc_ids: Sequence[str]) -> set[str]:
+        """id документов из списка, чей текст **должен** лежать в кэше.
+
+        Флаг ``documents.text_cached`` (D27) отличает «текст потерян» (надо
+        переиндексировать) от «текст не кэшируется по замыслу»; он
+        пересчитывается по источникам (``cache_text``, T5b, D31).
+        """
+        ...
+
+    def document_wants_cache(self, doc_id: str) -> bool:
+        """Нужен ли текст документа в кэше хотя бы одному источнику (T5b)."""
         ...
 
     def sources_for_docs(self, doc_ids: list[str]) -> list[SourceRow]:
@@ -208,6 +247,10 @@ class MetaStore(Protocol):
     def pending_for_docs(self, doc_ids: list[str]) -> list[EmbeddingQueueItem]: ...
 
     def drop_queue_rows(self, ids: list[int]) -> None: ...
+
+    def drop_queue_doc(self, doc_id: str) -> None:
+        """Снять все задачи документа (ошибка эмбеддинга: вечный re-embed)."""
+        ...
 
     def counts(self) -> StoreCounts: ...
 

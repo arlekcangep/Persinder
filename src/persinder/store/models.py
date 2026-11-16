@@ -37,6 +37,24 @@ class SourceRow(TypedDict):
     source_path: str
 
 
+class DocumentSource(TypedDict):
+    """Документ + его главный источник (для ``/context``, вариант C).
+
+    ``extractor`` — имя типа экстрактора (``"markdown"``, ``"pdf"`` …),
+    по которому перечитывается оригинал при отсутствии текста в textstore.
+    ``container_path`` и ``container_entries`` — разбор пути для части архива:
+    какой файл-контейнер открыть и какие записи в нём пройти. У обычного
+    файла ``container_path == ""``, ``container_entries == []``.
+    """
+
+    doc_id: str
+    content_hash: str
+    extractor: str
+    source_path: str
+    container_path: str
+    container_entries: list[str]
+
+
 class EmbeddingRow(TypedDict):
     """Строка таблицы эмбеддингов (локальное производное, §8).
 
@@ -59,4 +77,6 @@ class StoreCounts(TypedDict):
     documents: int
     sources: int
     chunks: int
+    vectors: int
     pending_embeddings: int
+    pending_documents: int

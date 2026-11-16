@@ -62,7 +62,6 @@ class RealModelSearchTest(unittest.TestCase):
                 search_model=MODEL,
                 ann_dir=self.settings.ann_dir,
             ),
-            textstore=FsTextStore(self.settings.text_dir),
         )
 
     def tearDown(self):

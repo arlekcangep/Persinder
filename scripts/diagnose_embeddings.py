@@ -25,7 +25,7 @@ from pathlib import Path
 
 from persinder.__main__ import search_scopes
 from persinder.config import Settings
-from persinder.embed import installed_keys, load, models_root
+from persinder.embed import PLACEHOLDER, installed_keys, load, models_root
 from persinder.embed.sidecar import (
     file_sidecar_path,
     read_sidecar,
@@ -85,6 +85,25 @@ def _count_pdr(folder: Path) -> int:
     if not folder.is_dir():
         return 0
     return sum(1 for _ in folder.rglob("*.pdr"))
+
+
+def _sidecar_counts(root: Path) -> dict[str, int]:
+    """Сайдкары под корнем: ``<любая папка>/.persinder/<модель>/*.pdr``.
+
+    Считаем рекурсивно: у файлов в подпапках свои ``.persinder`` (рядом с
+    файлом), поэтому подсчёт только по ``<root>/.persinder`` занижал цифры и
+    «документы без сайдкара» выглядели как потерянные.
+    """
+    counts: dict[str, int] = {}
+    for base in root.rglob(".persinder"):
+        if not base.is_dir():
+            continue
+        for model_dir in base.iterdir():
+            if model_dir.is_dir():
+                counts[model_dir.name] = counts.get(model_dir.name, 0) + _count_pdr(
+                    model_dir
+                )
+    return counts
 
 
 def _find_docs(conn: sqlite3.Connection, needle: str) -> list[sqlite3.Row]:
@@ -311,6 +330,17 @@ def _explain_doc(
             )
 
 
+def _text_expected_in_cache(conn: sqlite3.Connection, doc_id: str) -> bool:
+    """Должен ли текст документа лежать в кэше (``documents.text_cached``, D27)."""
+    try:
+        row = conn.execute(
+            "SELECT text_cached FROM documents WHERE id = ?", (doc_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return True  # старая БД без колонки — считаем как раньше
+    return True if row is None else bool(row[0])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Диагностика сайдкаров и очереди")
     parser.add_argument("--config", type=Path, default=None)
@@ -385,21 +415,121 @@ def main() -> int:
                 print(f"    [{area}] {row['filename']} -> {where}")
 
         print()
-        print("Очередь эмбеддингов (pending):")
+        print("Очередь эмбеддингов (pending) по документам:")
         try:
-            rows = conn.execute(
-                "SELECT model, source_path = '' AS no_path, COUNT(*) AS n"
+            queue_rows = conn.execute(
+                "SELECT doc_id, model, COUNT(*) AS n, MAX(source_path) AS path"
                 " FROM embedding_queue WHERE status = 'pending'"
-                " GROUP BY model, no_path ORDER BY model"
+                " GROUP BY doc_id, model ORDER BY n, doc_id LIMIT 20"
             ).fetchall()
+            queue_total = _scalar(
+                conn,
+                "SELECT COUNT(*) FROM embedding_queue WHERE status = 'pending'",
+            )
         except sqlite3.OperationalError as exc:
             print(f"  (нет таблицы очереди: {exc})")
-            rows = []
-        if not rows:
+            queue_rows = []
+            queue_total = 0
+        if not queue_rows:
             print("  пусто")
-        for row in rows:
-            kind = "без пути (virtual)" if row["no_path"] else "с путём"
-            print(f"  {row['model']}: {row['n']} задач, {kind}")
+        else:
+            print(
+                f"  всего задач: {queue_total}, документов показано: {len(queue_rows)}"
+            )
+        for row in queue_rows:
+            doc_id = str(row["doc_id"])
+            model = str(row["model"])
+            path = str(row["path"] or "")
+            print()
+            print(f"  {model}: {int(row['n'])} задач")
+            print(f"    документ: {doc_id[:16]}…")
+            print(f"    источник: {path or 'путь не записан (виртуальный)'}")
+            # Воркер читает текст по doc_id; нет файла — задачи сиротские,
+            # если только формат не кэшируется по замыслу (D27): тогда текст
+            # перечитывается из оригинала.
+            text_file = settings.text_dir / f"{doc_id}.txt"
+            if text_file.is_file():
+                print(f"    текст: есть, {text_file.stat().st_size} Б")
+            elif not _text_expected_in_cache(conn, doc_id):
+                print(
+                    "    текст: не кэшируется (is_cachable=false) — воркер"
+                    " перечитает оригинал"
+                )
+            else:
+                print("    текст: НЕТ — задачи сиротские, воркер их снимет")
+            sidecar = (
+                file_sidecar_path(path, model)
+                if path
+                else virtual_sidecar_path(settings.virtual_dir, doc_id, model)
+            )
+            print(f"    сайдкар: {'есть' if sidecar.is_file() else 'НЕТ'}")
+            if model != PLACEHOLDER and model not in installed:
+                print(
+                    f"    ВНИМАНИЕ: модель {model} не установлена — задачи не"
+                    " посчитаются, пока её не поставить"
+                )
+            elif model not in (models.embedding, models.search):
+                print(f"    модель {model} не активна в профиле (embedding/search)")
+
+        # Сырой текст — не очередь: после эмбеддинга он остаётся на диске как
+        # источник сниппетов и досчёта. Путать эти две вещи — классическая
+        # ошибка («в text_cache 22 файла, значит 22 задачи»).
+        texts = (
+            sorted(settings.text_dir.glob("*.txt"))
+            if settings.text_dir.is_dir()
+            else []
+        )
+        text_bytes = sum(p.stat().st_size for p in texts)
+        print()
+        print(f"Сырые тексты ({settings.text_dir}):")
+        print(
+            f"  {len(texts)} файлов, {text_bytes} Б — это НЕ очередь: текст"
+            " остаётся после эмбеддинга (сниппеты, досчёт), а задач в очереди:"
+            f" {queue_total}"
+        )
+
+        model = models.search
+        print()
+        print(f"Документы без сайдкара {model} (источник → чанков/векторов):")
+        try:
+            doc_rows = conn.execute(
+                "SELECT s.doc_id, s.area, s.filename, s.source_path,"
+                " (SELECT COUNT(*) FROM chunks c WHERE c.doc_id = s.doc_id)"
+                "   AS chunks,"
+                " (SELECT COUNT(*) FROM embeddings e"
+                "   WHERE e.doc_id = s.doc_id AND e.model = ?) AS vectors"
+                " FROM document_sources s ORDER BY s.area, s.filename",
+                (model,),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            print(f"  (нет таблиц документов: {exc})")
+            doc_rows = []
+        missing_sidecars: list[sqlite3.Row] = []
+        for row in doc_rows:
+            doc_id = str(row["doc_id"])
+            path = str(row["source_path"] or "")
+            sidecar = (
+                file_sidecar_path(path, model)
+                if path
+                else virtual_sidecar_path(settings.virtual_dir, doc_id, model)
+            )
+            if not sidecar.is_file():
+                missing_sidecars.append(row)
+        if not missing_sidecars:
+            print(f"  нет: у всех источников ({len(doc_rows)}) сайдкар на месте")
+        else:
+            print(f"  {len(missing_sidecars)} из {len(doc_rows)}")
+        for row in missing_sidecars:
+            doc_id = str(row["doc_id"])
+            has_text = (settings.text_dir / f"{doc_id}.txt").is_file()
+            print(f"  [{row['area']}] {row['filename']}")
+            print(f"    {row['source_path'] or 'путь не записан (виртуальный)'}")
+            print(
+                f"    чанков {int(row['chunks'])}, векторов {int(row['vectors'])},"
+                f" текст {'есть' if has_text else 'НЕТ'}"
+            )
+            if not has_text:
+                print("    → текст удалён: посчитать нельзя, нужна переиндексация")
 
         print()
         print("Векторы в БД (таблица embeddings):")
@@ -419,20 +549,18 @@ def main() -> int:
             print(f"  {row['model']}: {row['n']}")
 
         print()
-        print("Сайдкары рядом с файлами:")
+        print("Сайдкары рядом с файлами (по всем подпапкам):")
         for roots in roots_by_role.values():
             for root in roots:
-                base = root / ".persinder"
-                if not base.is_dir():
-                    print(f"  {root}: папки .persinder нет")
+                counts = _sidecar_counts(root)
+                if not counts:
+                    print(f"  {root}: сайдкаров нет")
                     continue
-                model_dirs = sorted(p.name for p in base.iterdir() if p.is_dir())
-                if not model_dirs:
-                    print(f"  {root}: .persinder пуст")
-                for name in model_dirs:
-                    print(
-                        f"  {root}: .persinder/{name} — {_count_pdr(base / name)} pdr"
-                    )
+                summary = ", ".join(
+                    f"{model_name} — {n} pdr"
+                    for model_name, n in sorted(counts.items())
+                )
+                print(f"  {root}: {summary}")
 
         virtual = home / "virtual"
         print()
@@ -481,22 +609,41 @@ def main() -> int:
         print()
         print("Диагноз:")
         e5 = models.embedding
-        e5_sidecars = any(
-            (root / ".persinder" / e5).is_dir()
-            for roots in roots_by_role.values()
-            for root in roots
-        )
-        if e5 not in installed and e5 != "placeholder-v1":
+        if e5 not in installed and e5 != PLACEHOLDER:
             print(f"  модель {e5} НЕ установлена в {models_root(home)} —")
             print("  веса не скачаны, эмбеддинги этой моделью не считаются.")
-        if vectors_by_model.get(e5, 0) and not e5_sidecars:
+        no_text = [
+            row
+            for row in missing_sidecars
+            if not (settings.text_dir / f"{str(row['doc_id'])}.txt").is_file()
+        ]
+        if missing_sidecars:
+            print(f"  документов без сайдкара {e5}: {len(missing_sidecars)} —")
+            print("  в семантике их нет, пока они не посчитаны.")
+            if no_text:
+                print(
+                    f"  у {len(no_text)} из них НЕТ сырого текста: считать нечего,"
+                    " нужна переиндексация источника"
+                )
+                print("  (`persinder serve --reindex` перечитает файлы с диска).")
+        elif queue_total:
+            print(f"  в очереди {queue_total} задач — их разбирает воркер сервиса.")
             print(
-                f"  векторы {e5} в БД есть ({vectors_by_model.get(e5, 0)}), а"
-                " сайдкаров нет:"
+                "  Если число не меняется: проверь модель (выше), наличие текстов"
+                " и последние строки лога ошибок."
             )
-            print("  документы не завершались на шаге после векторов (ANN/сайдкар).")
-            print("  Обнови сервис, перезапусти его и пришли вывод и")
-            print(f"  {log_path} — там будет настоящая причина.")
+        else:
+            print(
+                f"  всё посчитано: очередь пуста, сайдкары {e5} на месте у всех"
+                " источников."
+            )
+            print(
+                "  Файлы в text_cache — не задачи: сырой текст остаётся на"
+                " диске для сниппетов и досчёта. Это норма."
+            )
+        if empty_paths:
+            print("  есть пустые source_path — запусти scripts/fix_source_paths.py")
+
         if args.doc:
             _explain_doc(
                 conn,
@@ -508,13 +655,6 @@ def main() -> int:
                 settings.ann_dir,
                 args.query,
             )
-        if empty_paths and models.embedding != "placeholder-v1":
-            print("  есть пустые source_path — запусти scripts/fix_source_paths.py")
-        if not empty_paths and models.embedding != "placeholder-v1":
-            print("  пустых путей нет: скрипт починки ничего не изменит.")
-        print("  Если очередь пуста и векторов нет — эмбеддинги не считались:")
-        print("  запусти `persinder embed` (доберёт очередь), полная")
-        print("  переиндексация корпуса для этого не нужна.")
     finally:
         conn.close()
     return 0

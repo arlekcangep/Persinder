@@ -1,10 +1,19 @@
 """Воркер эмбеддингов: очередь → векторы → сайдкары (+ ANN-индекс).
 
 ``EmbedWorker`` разбирает ``embedding_queue``: берёт порцию задач, группирует
-по документу, читает сырой текст из ``TextStore``, нарезает теми же чанками,
-что и ``ingest``, считает векторы через эмбеддер нужной модели и пишет сайдкар
-(§7) атомарно. Сайдкар — кэш: его отсутствие не страшно, векторы просто
-считаются снова.
+по документу, читает сырой текст из ``TextStore`` (``text_cache`` — это и
+есть кэш поиска, D26; отдельного «временного» хранилища нет), нарезает теми же
+чанками, что и ``ingest``, считает векторы через эмбеддер нужной модели и
+пишет сайдкар (§7) атомарно. Сайдкар — кэш: его отсутствие не страшно, векторы
+просто считаются снова.
+
+Текст берётся из кэша; если файла там нет (крэш, ручная чистка, старый
+профиль — или экстрактор не кэширует формат, ``is_cachable``, D27) — фолбэк:
+перечитать оригинал тем же резолвером, что и ``/context``
+(``sources/textresolver.py``: файл или адресно прочитанная часть контейнера),
+и сверить `sha256` с ``documents.content_hash``. Не сошлось или перечитать
+нельзя (виртуальный документ) — задачи снимаются с предупреждением в журнале:
+индексировать изменившийся файл в старый ``doc_id`` нельзя.
 
 Задачи привязаны к модели (``embedding_queue.model``): у файла могут
 одновременно жить сайдкары нескольких моделей (D24). Эмбеддер подбирается
@@ -25,9 +34,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..api.index_log import KIND_EMBED, IndexLog
 from ..domain import chunk_text
 from ..interfaces import Embedder, MetaStore, TextStore
 from ..morphology import tokenize
+from ..sources.textresolver import DocumentText, TextResolver
 from ..vectorindex import UsannIndex
 from .models import ChunkParams, EmbedFingerprint, EmbedStats
 from .sidecar import (
@@ -38,6 +49,7 @@ from .sidecar import (
 )
 
 if TYPE_CHECKING:
+    from ..sources.extract import ExtractorRegistry
     from ..store.models import EmbeddingQueueItem
 
 # Сколько недостающих чанков документа считаем и пишем за одну порцию. Весь
@@ -93,14 +105,21 @@ class EmbedWorker:
         chunk_overlap: int = 200,
         virtual_dir: Path | None = None,
         ann_dir: Path | None = None,
+        log: IndexLog | None = None,
+        registry: ExtractorRegistry | None = None,
     ) -> None:
         self._store = store
-        self._textstore = textstore
         self._embedder_factory = embedder_factory
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._virtual_dir = Path(virtual_dir) if virtual_dir else None
         self._ann_dir = Path(ann_dir) if ann_dir else None
+        self._log = log
+        # Текст берётся там же, где его берёт ``/context``: один резолвер на
+        # «кэш → оригинал», без копии разбора источника в воркере. Реестр нужен
+        # только для фолбэка (перечитать оригинал, D26); без него — сироты
+        # снимаются, как раньше.
+        self._texts = TextResolver(store, textstore, registry)
         self._indices: dict[str, UsannIndex] = {}
         # Эмбеддеры кэшируются по модели: ONNX-сессия (веса ~100 МБ) создаётся
         # один раз, а не на каждый документ/проход. Иначе пересчёт сотен файлов
@@ -125,33 +144,78 @@ class EmbedWorker:
             self._indices[model] = index
         return index
 
+    # --- текст документа: кэш → оригинал (D26) ---
+
+    def _trusted_text(self, document: DocumentText) -> tuple[str | None, str | None]:
+        """Текст документа, если он совпадает с тем, из которого построены чанки.
+
+        Разбор источника (файл / адресно прочитанная часть контейнера) —
+        в ``TextResolver`` (общий с ``/context``); здесь только политика
+        воркера: перечитанный текст должен побайтно (по ``utf-8``) совпасть с
+        ``documents.content_hash`` — ``doc_id`` это ``sha256`` текста. Не
+        сошлось — файл изменился (или экстрактор другой версии); такие задачи
+        снимаются, документ переиндексирует watcher. Текст из кэша доверяем:
+        ключ кэша и есть этот хэш.
+        """
+        if document.text is None:
+            return None, document.detail or document.code
+        if document.from_cache:
+            return document.text, None
+        digest = hashlib.sha256(document.text.encode("utf-8")).hexdigest()
+        if digest != document.content_hash:
+            return None, (
+                "оригинал изменился (хэш текста не совпал с документом) — "
+                "нужна переиндексация"
+            )
+        return document.text, None
+
     def run_once(self, limit: int = 100) -> EmbedStats:
         """Обработать до ``limit`` задач очереди; вернуть итоги.
 
         Документ обрабатывается целиком: если среди порции есть его задачи,
         берутся все его незавершённые задачи (их может быть больше ``limit``).
-        Ошибки не валят проход: задачи остаются в очереди и уйдут в следующий.
-        В конце прохода ANN-индексы реконсилируются с таблицей ``embeddings``.
+        Ошибки не валят проход: задачи падающего документа снимаются, чтобы
+        воркер не молотил его каждым проходом (вечный re-embed), а прочие
+        документы посчитаются. В конце прохода ANN-индексы реконсилируются с
+        таблицей ``embeddings``.
         """
         stats = EmbedStats()
         self._indices.clear()
         try:
+            stats.queue_before = self._store.counts()["pending_embeddings"]
             rows = self._store.pending_embeddings(limit)
+            paths: dict[str, str] = {
+                str(row["doc_id"]): str(row["source_path"])
+                for row in rows
+                if row["source_path"]
+            }
             doc_ids = list(dict.fromkeys(str(row["doc_id"]) for row in rows))
             for doc_id in doc_ids:
                 try:
                     self._process_doc(doc_id, stats)
                 except Exception as exc:  # noqa: BLE001 — одна задача не валит проход
                     # Ошибка одного документа (OOM, битый файл, нет модели) не
-                    # должна блокировать остальные: задачи остаются в очереди и
-                    # уйдут следующим проходом, а прочие документы посчитаются.
+                    # должна блокировать остальные: задачи снимаются (иначе
+                    # падающий документ молотится каждым проходом вечно — CPU
+                    # горит, очередь не убывает), а без сайдкара они вернутся
+                    # на следующем старте через enqueue_missing. Прочие документы
+                    # посчитаются в этом же проходе.
                     stats.errors += 1
                     stats.messages.append(f"{doc_id}: {exc}")
+                    if self._log is not None:
+                        name = paths.get(doc_id) or f"документ {doc_id[:8]}"
+                        self._log.error(
+                            f"эмбеддинг: {name} — {exc} (задачи сняты, "
+                            "вернутся при переиндексации)",
+                            kind=KIND_EMBED,
+                        )
+                    self._store.drop_queue_doc(doc_id)
             for model, index in self._indices.items():
                 live = [
                     row["id"] for row in self._store.embeddings_ids_for_model(model)
                 ]
                 index.sync(live)
+            stats.pending = self._store.counts()["pending_embeddings"]
         finally:
             self._indices.clear()
         return stats
@@ -160,13 +224,38 @@ class EmbedWorker:
         rows = self._store.pending_for_docs([doc_id])
         if not rows:
             return
+        # Человекочитаемое имя для журнала: путь источника, иначе короткий id.
+        label = next(
+            (str(row["source_path"]) for row in rows if row["source_path"]),
+            f"документ {doc_id[:8]}",
+        )
+        if self._log is not None:
+            # Сколько задач у документа и под какими моделями — чтобы по
+            # журналу было видно, за что взялся воркер и чем это кончилось.
+            models = ", ".join(sorted({str(row["model"]) for row in rows}))
+            self._log.info(
+                f"эмбеддинг: {label} — задач: {len(rows)} ({models})",
+                kind=KIND_EMBED,
+            )
 
-        try:
-            text = self._textstore.read(doc_id)
-        except FileNotFoundError:
-            # Документа нет (удалён/вытеснен), а задачи остались — это сироты.
+        document = self._texts.document_text(doc_id)
+        text, source_error = self._trusted_text(document)
+        if text is not None and not document.from_cache and self._log is not None:
+            self._log.info(
+                f"эмбеддинг: {label} — нет текста в кэше, перечитан оригинал",
+                kind=KIND_EMBED,
+            )
+        if text is None:
             self._store.drop_queue_rows([int(row["id"]) for row in rows])
             stats.skipped += 1
+            if self._log is not None:
+                left = self._store.counts()["pending_embeddings"]
+                reason = f"; {source_error}" if source_error else ""
+                self._log.warning(
+                    f"пропущен: {label} (нет текста{reason}, снято задач:"
+                    f" {len(rows)}, в очереди: {left})",
+                    kind=KIND_EMBED,
+                )
             return
 
         spans = chunk_text(text, self._chunk_size, self._chunk_overlap)
@@ -204,6 +293,12 @@ class EmbedWorker:
                 for index, (start, end) in enumerate(spans)
                 if index in existing
             ]
+            # id задач очереди по номеру чанка: снимаем задачи по мере записи
+            # порций, чтобы у большого документа очередь убывала по ходу
+            # (иначе счётчик «стоит» минутами и кажется, что воркер встал).
+            queue_ids: dict[int, int] = {
+                int(row["chunk_index"]): int(row["id"]) for row in model_rows
+            }
             index_obj: UsannIndex | None = None
 
             def _ann_add(
@@ -237,6 +332,15 @@ class EmbedWorker:
                     rows_for_db.append((doc_id, index, blob))
                 ids = self._store.put_embeddings(model, rows_for_db)
                 _ann_add(ids, computed, model, embedder)
+                done = [queue_ids.pop(index, None) for index, _, _ in part]
+                self._store.drop_queue_rows([i for i in done if i is not None])
+                if len(spans) > _CHUNK_BATCH and self._log is not None:
+                    left = self._store.counts()["pending_embeddings"]
+                    self._log.info(
+                        f"эмбеддинг: {label} ({model}) — {len(packed)}"
+                        f" из {len(spans)} чанков, в очереди: {left}",
+                        kind=KIND_EMBED,
+                    )
 
             fingerprint = EmbedFingerprint(
                 model=embedder.name, dim=embedder.dim, quant="f16"
@@ -258,8 +362,17 @@ class EmbedWorker:
                 write_sidecar_packed(path, fingerprint, params, packed)
                 stats.sidecars += 1
             stats.chunks += len(packed)
-            self._store.drop_queue_rows([int(row["id"]) for row in model_rows])
+            # Остались задачи чанков, уже лежавших в БД (existing), и задач,
+            # которых нет в текущей нарезке (файл пересобрали) — снимаем их.
+            self._store.drop_queue_rows(list(queue_ids.values()))
             counted = True
+            if self._log is not None:
+                left = self._store.counts()["pending_embeddings"]
+                self._log.info(
+                    f"сайдкар: {label} ({model}, чанков: {len(packed)},"
+                    f" в очереди: {left})",
+                    kind=KIND_EMBED,
+                )
 
         if counted:
             stats.docs += 1

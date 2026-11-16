@@ -1,7 +1,7 @@
 import { computed, reactive } from "vue";
 
-import { ApiError, isAbortError, search } from "@/api/client";
-import { groupHits, type ResultItem } from "@/domain/results";
+import { ApiError, fetchContext, isAbortError, search } from "@/api/client";
+import { groupHits, makeSnippet, type ResultItem } from "@/domain/results";
 
 import { useSearchFilters } from "./useSearchFilters";
 
@@ -53,6 +53,37 @@ function resetResults(): void {
   state.searched = false;
 }
 
+/**
+ * Постепенное наполнение сниппетов: по каждому результату запрашивается
+ * ``/context`` по границам чанка, текст встаёт в карточку по мере прихода.
+ * Прерывается новой выдачей (``requestId``) или ``AbortController``.
+ */
+async function fillContexts(
+  items: ResultItem[],
+  id: number,
+  signal: AbortSignal,
+): Promise<void> {
+  for (const item of items) {
+    if (item.chunkStart === null || item.chunkEnd === null) continue;
+    try {
+      const text = await fetchContext(
+        {
+          docId: item.documentId,
+          start: item.chunkStart,
+          end: item.chunkEnd,
+        },
+        signal,
+      );
+      if (id !== requestId) return;
+      item.snippetLoading = false;
+      if (text) item.snippet = makeSnippet(text);
+    } catch (error) {
+      if (id !== requestId || isAbortError(error)) return;
+      item.snippetLoading = false; // контекст недоступен — карточка без сниппета
+    }
+  }
+}
+
 async function runNow(): Promise<void> {
   clearTimer();
   abortRequest();
@@ -85,9 +116,12 @@ async function runNow(): Promise<void> {
       controller.signal,
     );
     if (id !== requestId) return;
-    state.semantic = groupHits(response.semantic_hits);
-    state.morph = groupHits(response.hits, "lower");
+    const semantic = groupHits(response.semantic_hits);
+    const morph = groupHits(response.hits, "lower");
+    state.semantic = semantic;
+    state.morph = morph;
     state.searched = true;
+    void fillContexts([...semantic, ...morph], id, controller.signal);
   } catch (error) {
     if (id !== requestId || isAbortError(error)) return;
     state.semantic = [];

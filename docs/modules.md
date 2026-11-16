@@ -23,7 +23,7 @@
 | `domain` | ядро: доменные модели (Area, Document, Chunk, EmbeddingJob) | реализован |
 | `interfaces` | протоколы/порты (Stemmer, TextStore, MetaStore…) | реализован |
 | `morphology` | нормализация, токенизация, стемминг | реализован |
-| `textstore` | временное хранение сырого текста | реализован |
+| `textstore` | кэш сырого текста (`text_cache`, D26) | реализован |
 | `store` | пакет: `models` (модели БД) + `sqlite` (SQLite: документы, FTS5, очередь) | реализован |
 | `ingest` | пакет: `models` (вход/выход) + `service` (морфоиндекс + очередь + удаление) + `journal` (журнал вызовов) | реализован |
 | `api` | пакет: `models` (DTO) + `http` (HTTP-обёртка над `ingest`) | реализован |
@@ -31,6 +31,7 @@
 | `vectorindex` | пакет: `service` (VectorSearch: ANN USearch + фолбэк-скан) + `index` (обёртка USearch) | реализован (USearch) |
 | `sources` | watcher'ы, журнал статусов и экстракторы областей | реализован |
 | `search` | фасад запроса (три группы, порядок) | реализован |
+| `cli` | консоль: `__main__` (точка входа) + `Cli`, `ServeRunner`, `WatchRunner`, `EmbedRunner`, `ModelManager` | реализован |
 
 Заглушки — это модули с зафиксированным интерфейсом и пустой/минимальной логикой,
 чтобы очертить границы.
@@ -41,6 +42,8 @@
 
 ```
 src/persinder/
+  config.py          # Settings: home + пути хранилищ (<home>/settings.json:
+                     # text_dir, virtual_dir; D30)
   domain/
     models.py        # Area, Document, Chunk, EmbeddingJob — ядро, без зависимостей
     chunking.py      # chunk_text — нарезка текста на чанки (общая для ingest и embed)
@@ -62,18 +65,46 @@ src/persinder/
   api/
     models.py        # IngestPayload, IngestResponse, PayloadError — DTO транспорта
     http.py          # IngestHTTPServer, make_server, serve
+  cli/
+    parser.py        # Cli: парсер аргументов и выбор команды
+    serve.py         # ServeRunner: HTTP + watcher + эмбеддинги + старт/стоп
+    watch.py         # WatchRunner: только watcher
+    embedding.py     # EmbedRunner: проход по очереди и фоновый цикл
+    models.py        # ModelManager: install/use/remove/list (D24)
+    search.py        # поиск из консоли: HTTP-first, локальный fallback
+    service.py       # сборка сервисов, скоупы моделей, воркер эмбеддингов
+    report.py        # отчёты и безопасная печать для консоли/логов
+    ann.py           # пересборка ANN-индексов
   sources/
     models.py        # AreaConfig, WatchConfig, AreaScan, ChangeEvent, ScanResult
-    config.py        # загрузка YAML-конфига областей и watcher'а
+    config.py        # загрузка переносимого YAML-конфига областей и watcher'а
+                     # (пути кэшей — не здесь, а в <home>/settings.json, D30)
     scanner.py       # polling-скан (snapshot + diff + debounce)
     watcher.py       # цикл скана, запуск по требованию
     journal.py       # журнал статусов файлов (JSONL) — состояние watcher'а (D21),
                      # обрезка истории переходов
-    extract.py       # экстракторы (markdown/text/html/mht/pdf), контейнер
-                     # archive (zip/7z/tar/gz/rar), фабрика и реестр
-                     # (ExtractorFactory, ContainerExtractor)
+    extract.py       # публичная точка входа экстракторов (реэкспорт пакета
+                     # extractors/, совместимость импортов)
+    interfaces.py    # порты: Extractor, ContainerExtractor, EntryResolver
+    extractors/      # пакет экстракторов: по одному модулю на формат
+      _base.py       #   Extracted (результат извлечения), BaseExtractor
+      _common.py     #   общие помощники (HTML→текст, тэги, суффиксы архивов)
+      registry.py    #   ExtractorRegistry + фабрика default_registry
+      markdown.py / text.py / html.py / mhtml.py / rtf.py / pdf.py /
+      fb2.py / chm.py / epub.py / archive.py   # конкретные экстракторы
     pipeline.py      # события → экстракция (файл или части контейнера) →
                      # ingest (документ на каждую часть) → журнал
+    textresolver.py  # текст документа: кэш text_cache → оригинал (файл или
+                     # адресно прочитанная часть архива); срез для /context,
+                     # тот же резолвер использует воркер эмбеддингов (D26)
+    reconcile.py     # сверка журнала с базой при старте: пропущенный формат,
+                     # потерянный текст, документ не из этой базы — забыть
+                     # запись и прочитать файл заново (D21)
+    catalog.py       # стартовый обход: полные каталоги областей сверяются с
+                     # журналом по именам — новые индексируются, исчезнувшие
+                     # убираются (D25)
+    reindex.py       # фоновая переиндексация при --reindex: все файлы через
+                     # обычный конвейер (хэш сверяет ingest), не более 5% CPU (D25)
 ```
 
 Переход между слоями — только через явные мапперы (`IngestPayload.to_request`,
@@ -88,7 +119,7 @@ src/persinder/
       ▼                                  ▼                          │
  [sources] ──текст+метаданные──▶ [ingest] ──▶ [store] (FTS5) ───────┘
       │                                  │
-      │                                  ├──▶ [textstore] (временный каталог)
+      │                                  ├──▶ [textstore] (кэш текста, D26)
       │                                  └──▶ [store].embedding_queue
       │                                                │
       │                                                ▼
@@ -98,8 +129,8 @@ src/persinder/
 ## Модуль 1: `ingest` (первый реализуемый)
 
 **Назначение.** Принимает уже извлечённый текст и метаданные, делает первый (быстрый)
-морфологический слой индексации, кладёт текст во временный каталог и ставит задачу на
-фоновую индексацию по эмбеддингам.
+морфологический слой индексации, кладёт текст в кэш (`text_cache`) и ставит
+задачу на фоновую индексацию по эмбеддингам.
 
 **Вход:**
 
@@ -123,7 +154,12 @@ src/persinder/
 1. Проверяет вход и нормализует `area`.
 2. Считает хэш содержимого — он же `document_id` (дедупликация, решение D12).
 3. Дубликат → добавляет источник и отвечает `already_indexed`, не индексируя заново.
-4. Кладёт сырой текст во **временный каталог** (`textstore`).
+4. Кладёт сырой текст в **кэш** (`textstore`, `text_cache`; D26) — он же
+   нужен воркеру эмбеддингов и `/context`. Если формат/область решили не
+   кэшировать (`no_cache` в конфиге, T5b, D31), копия не пишется, а
+   `document_sources.cache_text=0`; флаг документа — «хотя бы один источник
+   хочет кэш». `reconcile` не сочтёт отсутствие текста потерей, воркер
+   перечитает файл.
 5. Режет текст на чанки (размер и перекрытие — из настроек).
 6. Для каждого чанка считает стеммированный текст и **синхронно** пишет в FTS5
    (морфологический слой).
@@ -256,8 +292,10 @@ HTTP-сервис слушает только локальный интерфе�
   API/CLI не ломаются. Объединение в единый рейтинг (D16) — следующий шаг.
   `SearchService` обогащает каждый хит источником (`area`, `source_path`,
   `filename` из `document_sources`; у дубликата берётся реальный файл, а не
-  виртуальная запись) и, если есть `TextStore`, полем `context` — текст
-  чанка плюс три строки до и три после (`search/context.py`).
+  виртуальная запись) и границами чанка (`chunk_start`/`chunk_end` из
+  `chunks`). Текст сервис не читает: сниппет клиент запрашивает сам через
+  `/context` (`sources/textresolver.py`) — сначала из `TextStore`, иначе
+  перечитыванием оригинала экстрактором.
 - **CLI/API.** `persinder search <text> [--limit N] [--morph-limit N]
   [--semantic-limit N] [--min-score S] [--home …] [--host …] [--port …]` —
   HTTP-first: если запущенный `serve` отвечает, CLI делает `GET /search` и

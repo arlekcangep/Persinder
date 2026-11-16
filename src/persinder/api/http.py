@@ -9,6 +9,7 @@ import json
 import math
 import mimetypes
 import sys
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
@@ -17,7 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 from ..ingest import IngestResult
 from ..interfaces import Ingest, Search
 from ..search import SearchQuery
-from .index_log import IndexLog
+from .index_log import LOG_KINDS, IndexLog, parse_time_bound
 from .models import IngestPayload, IngestResponse, PayloadError, SearchResponse
 
 MAX_BODY_BYTES = 32 * 1024 * 1024  # 32 МБ
@@ -48,6 +49,7 @@ class PersinderHTTPServer(ThreadingHTTPServer):
     ingest: Ingest
     search: Search
     log: IndexLog | None
+    stats: Callable[[], dict[str, object]] | None
 
     def __init__(
         self,
@@ -55,11 +57,16 @@ class PersinderHTTPServer(ThreadingHTTPServer):
         ingest: Ingest,
         search: Search,
         log: IndexLog | None = None,
+        stats: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         super().__init__(address, _Handler)
         self.ingest = ingest
         self.search = search
         self.log = log
+        # Счётчики метастора для ``/health``: провайдер, а не готовый словарь —
+        # очередь эмбеддингов меняется постоянно, веб-клиент опрашивает
+        # ``/health`` раз в 20 с и показывает живой прогресс.
+        self.stats = stats
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         """Клиент мог разорвать соединение (например, отменил запрос при
@@ -93,13 +100,29 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (имя задано базовым классом)
         parsed = urlsplit(self.path)
         if parsed.path == "/health":
-            self._send_json(200, {"status": "ok"})
+            self._handle_health()
         elif parsed.path == "/search":
             self._handle_search(parsed.query)
         elif parsed.path == "/logs":
             self._handle_logs(parsed.query)
         else:
             self._handle_static(parsed.path)
+
+    def _handle_health(self) -> None:
+        """Состояние сервера + счётчики метастора (документы, векторы, очередь).
+
+        Счётчики необязательны: без провайдера отдаём только ``status``.
+        Ошибка статистики не должна превращать «сервер жив» в «нет связи»,
+        поэтому причина пишется в ``stats_error``, а ``status`` остаётся ``ok``.
+        """
+        payload: dict[str, object] = {"status": "ok"}
+        provider = self._services().stats
+        if provider is not None:
+            try:
+                payload.update(provider())
+            except Exception as exc:  # noqa: BLE001 — /health важнее статистики
+                payload["stats_error"] = f"{exc.__class__.__name__}: {exc}"
+        self._send_json(200, payload)
 
     def _handle_static(self, path: str) -> None:
         """Отдать собранный веб-клиент; неизвестные маршруты — на index.html (SPA)."""
@@ -194,7 +217,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(200, SearchResponse.from_result(result).to_dict())
 
     def _handle_logs(self, raw_query: str) -> None:
-        """Последние события индексации: ``GET /logs?limit=200&after=N``."""
+        """Последние события индексации.
+
+        ``GET /logs?limit=200&after=N&kind=embed&from=2026-11-10&to=2026-11-10``
+        — фильтры необязательны: ``kind`` (вид события), ``from``/``to`` (даты
+        или ISO-дата-время; ``to`` включает весь указанный день).
+        """
         params = parse_qs(raw_query)
         try:
             limit = int((params.get("limit") or ["200"])[0])
@@ -212,12 +240,32 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "invalid after"})
                 return
 
+        kind = (params.get("kind") or [""])[0].strip()
+        if kind and kind not in LOG_KINDS:
+            self._send_json(400, {"error": "invalid kind"})
+            return
+        try:
+            since = parse_time_bound((params.get("from") or [""])[0])
+            until = parse_time_bound((params.get("to") or [""])[0], end_of_day=True)
+        except ValueError:
+            self._send_json(400, {"error": "invalid date"})
+            return
+
         log = self._services().log
         if log is None:
             self._send_json(200, {"events": [], "last_id": 0})
             return
 
-        events = [ev.to_dict() for ev in log.entries(limit=limit, after_id=after)]
+        events = [
+            ev.to_dict()
+            for ev in log.entries(
+                limit=limit,
+                after_id=after,
+                kind=kind or None,
+                since=since,
+                until=until,
+            )
+        ]
         self._send_json(200, {"events": events, "last_id": log.last_id})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -259,9 +307,10 @@ def make_server(
     host: str,
     port: int,
     log: IndexLog | None = None,
+    stats: Callable[[], dict[str, object]] | None = None,
 ) -> PersinderHTTPServer:
     """Создать HTTP-сервер (без запуска). ``port=0`` выберет свободный порт."""
-    return PersinderHTTPServer((host, port), ingest, search, log)
+    return PersinderHTTPServer((host, port), ingest, search, log, stats)
 
 
 def serve(
@@ -270,9 +319,10 @@ def serve(
     host: str,
     port: int,
     log: IndexLog | None = None,
+    stats: Callable[[], dict[str, object]] | None = None,
 ) -> None:
     """Запустить сервер и работать до остановки."""
-    server = make_server(ingest, search, host, port, log)
+    server = make_server(ingest, search, host, port, log, stats)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

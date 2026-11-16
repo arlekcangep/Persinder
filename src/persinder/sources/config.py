@@ -14,7 +14,7 @@ from typing import cast
 import yaml
 
 from ..domain import Area
-from .models import AreaConfig, WatchConfig
+from .models import DEFAULT_NO_CACHE, AreaConfig, WatchConfig
 
 
 class ConfigError(ValueError):
@@ -49,6 +49,28 @@ def _search_min_score(raw: object) -> float | None:
     return score
 
 
+def _no_cache_names(
+    raw: object,
+    *,
+    where: str,
+    known_formats: frozenset[str] | None,
+) -> tuple[str, ...]:
+    """Разобрать список ``no_cache``: имена классов или форматов (T5b, D31)."""
+    if not isinstance(raw, list) or not all(
+        isinstance(name, str) and name.strip() for name in cast("list[object]", raw)
+    ):
+        raise ConfigError(f"{where}: список непустых строк")
+    names = tuple(name.strip() for name in cast("list[str]", raw))
+    if known_formats is not None:
+        unknown = set(names) - set(known_formats)
+        if unknown:
+            raise ConfigError(
+                f"{where}: неизвестные форматы {sorted(unknown)} "
+                f"(доступно: {sorted(known_formats)})"
+            )
+    return names
+
+
 def load_config(
     path: Path,
     known_formats: frozenset[str] | None = None,
@@ -59,12 +81,14 @@ def load_config(
     Формат:
 
         semantic: true            # false — полностью выключить семантику
+        no_cache: [text, structure-text, fb2]   # чей текст не хранить в кэше
         search:
           min_score: 0.85         # порог косинуса семантического слоя
         areas:
           - path: ~/Obsidian/Personal
             role: personal
             formats: [text, structure-text]   # классы / конкретные форматы
+            no_cache: [text]                  # заменяет верхний список
             embedding_model: e5-small-int8-v1 # модель именно для папки
             semantic: true                    # false — папка без эмбеддингов
         watch:
@@ -87,6 +111,12 @@ def load_config(
     установленные модели (ключи + заглушка). Если заданы, неизвестное имя —
     ошибка конфига.
 
+    ``no_cache`` — имена форматов/классов, чей текст **не** хранится в кэше
+    (T5b, D31). Верхний уровень — значение по умолчанию
+    (``DEFAULT_NO_CACHE``: ``text``, ``structure-text``, ``fb2``); список
+    области **заменяет** его, а не дополняет: ``no_cache: []`` возвращает
+    кэш всей области.
+
     Относительные пути ``path`` считаются от каталога, где лежит конфиг, —
     профиль переносим между машинами.
     """
@@ -105,6 +135,14 @@ def load_config(
     if not isinstance(semantic_raw, bool):
         raise ConfigError("semantic: ожидается bool")
     semantic_enabled = semantic_raw
+    no_cache_raw = top.get("no_cache")
+    global_no_cache = (
+        DEFAULT_NO_CACHE
+        if no_cache_raw is None
+        else _no_cache_names(
+            no_cache_raw, where="no_cache", known_formats=known_formats
+        )
+    )
     areas_raw = top.get("areas", [])
     if not isinstance(areas_raw, list):
         raise ConfigError("areas: ожидается список")
@@ -158,6 +196,16 @@ def load_config(
                 f"areas[{i}].embedding_model: модель не установлена "
                 f"{embedding_model!r} (доступно: {sorted(known_models)})"
             )
+        area_no_cache_raw = entry.get("no_cache")
+        area_no_cache = (
+            global_no_cache
+            if area_no_cache_raw is None
+            else _no_cache_names(
+                area_no_cache_raw,
+                where=f"areas[{i}].no_cache",
+                known_formats=known_formats,
+            )
+        )
         # Имена не нормализуются: класс включает весь класс, конкретный формат —
         # только себя (разбор — в ExtractorRegistry._is_enabled).
         area = AreaConfig(
@@ -167,6 +215,7 @@ def load_config(
             formats=formats,
             embedding_model=embedding_model,
             semantic=area_semantic,
+            no_cache=area_no_cache,
         )
         if not area.path.is_absolute():
             # относительный путь — от каталога конфига, не от CWD процесса
@@ -177,6 +226,7 @@ def load_config(
                 formats=area.formats,
                 embedding_model=area.embedding_model,
                 semantic=area.semantic,
+                no_cache=area.no_cache,
             )
         if not area.path.is_dir():
             raise ConfigError(f"areas[{i}]: каталог не существует: {area.path}")
@@ -186,6 +236,7 @@ def load_config(
         WatchConfig.from_dict(top.get("watch")),
         semantic=semantic_enabled,
         min_score=_search_min_score(top.get("search")),
+        no_cache=global_no_cache,
     )
     if not areas:
         raise ConfigError("areas: пустой список — нечего индексировать")

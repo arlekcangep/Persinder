@@ -36,7 +36,7 @@ class EndToEndTest(unittest.TestCase):
         self.data_dir = root / "data"
         settings = Settings(home=self.data_dir)
         self.settings = settings
-        self.ingest, self.search, self.store = build_service(settings)
+        self.ingest, self.search, self.store, _recovery = build_service(settings)
         self.server = make_server(self.ingest, self.search, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -75,7 +75,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertGreater(body["chunks"], 0)
 
         # 2. Файл сырого текста лежит на диске.
-        text_files = list((self.data_dir / "pending_texts").iterdir())
+        text_files = list(self.settings.text_dir.iterdir())
         self.assertEqual(len(text_files), 1)
         self.assertEqual(text_files[0].read_text(encoding="utf-8"), TEXT)
 
@@ -173,7 +173,7 @@ class EndToEndTest(unittest.TestCase):
         new_hits = self._get("/search?q=" + urllib.parse.quote("флакс"))["hits"]
         self.assertEqual(new_hits[0]["document_id"], second)
         # у вытесненного старого документа удалён и сырой текст
-        self.assertEqual(len(list((self.data_dir / "pending_texts").iterdir())), 1)
+        self.assertEqual(len(list(self.settings.text_dir.iterdir())), 1)
 
     def test_deletion_through_pipeline(self):
         # Индексируем через HTTP, затем удаляем источник через ingest-сервис —
@@ -190,7 +190,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(result.document_id, doc_id)
         self.assertEqual(self.store.counts()["documents"], 0)
         # сырой текст удалён вместе с документом
-        self.assertEqual(list((self.data_dir / "pending_texts").iterdir()), [])
+        self.assertEqual(list(self.settings.text_dir.iterdir()), [])
 
         with self._post(
             "/ingest", {"filename": "note.md", "area": "personal", "text": TEXT}
