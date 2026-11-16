@@ -30,6 +30,10 @@ persinder = "persinder.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Собранный веб-клиент едет внутри пакета: `persinder serve` раздаёт его сам.
+[tool.setuptools.package-data]
+"persinder.api" = ["static/*", "static/assets/*"]
+
 [tool.pyright]
 include = ["src", "tests"]
 exclude = ["**/__pycache__"]

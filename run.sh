@@ -28,14 +28,13 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="$REPO/.venv"
-if [ -f "$VENV/Scripts/python.exe" ]; then
-    PY="$VENV/Scripts/python.exe"     # Windows (Git Bash)
-elif [ -f "$VENV/bin/python" ]; then
-    PY="$VENV/bin/python"             # Linux/macOS
-else
-    echo "ОШИБКА: venv не найден: $VENV" >&2
-    echo "Сначала запусти ./setup.sh" >&2
+
+# Общий выбор python (см. scripts/py.sh): задаёт PY и PY_FROM_VENV.
+# shellcheck source=scripts/py.sh
+source "$REPO/scripts/py.sh"
+if [ "$PY_FROM_VENV" != "1" ]; then
+    echo "ОШИБКА: venv проекта не найден (проверены .venv и PERSINDER_VENV)." >&2
+    echo "Сначала запусти ./setup.sh (или scripts/venv.sh)" >&2
     exit 1
 fi
 

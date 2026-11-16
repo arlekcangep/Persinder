@@ -1,16 +1,20 @@
 """Тесты HTTP-сервиса приёма."""
 
+import io
 import json
+import re
 import threading
 import unittest
 import urllib.error
 import urllib.request
+from contextlib import redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import urlencode
 
 from persinder.api import make_server
+from persinder.api.http import STATIC_DIR, _Handler
 from persinder.ingest import IngestService
 from persinder.morphology import NoopStemmer
 from persinder.search import SearchService
@@ -55,6 +59,51 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             self.assertEqual(json.load(resp)["status"], "ok")
 
+    def _handler_with_wfile(self, wfile: Any) -> _Handler:
+        """Минимальный обработчик без сокета: только то, что нужно отправке."""
+        handler = object.__new__(_Handler)
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = "GET /search HTTP/1.1"
+        handler.client_address = ("127.0.0.1", 1)
+        handler.wfile = wfile
+        return handler
+
+    def test_send_json_silences_aborted_connection(self):
+        """Разрыв соединения при записи ответа — не ошибка (WinError 10053)."""
+
+        class AbortedWFile:
+            def write(self, data: bytes) -> int:
+                raise ConnectionAbortedError(10053, "соединение разорвано")
+
+        handler = self._handler_with_wfile(AbortedWFile())
+        handler._send_json(200, {"status": "ok"})  # не должно упасть
+
+    def test_send_file_silences_aborted_connection(self):
+        class AbortedWFile:
+            def write(self, data: bytes) -> int:
+                raise ConnectionResetError(10054, "соединение разорвано")
+
+        handler = self._handler_with_wfile(AbortedWFile())
+        handler._send_file(STATIC_DIR / "index.html", "no-cache")  # не должно упасть
+
+    def test_handle_error_ignores_connection_errors(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            try:
+                raise ConnectionAbortedError(10053, "aborted")
+            except ConnectionAbortedError:
+                self.server.handle_error(None, ("127.0.0.1", 1))
+        self.assertEqual(
+            err.getvalue(), "", "traceback разрыва соединения не печатается"
+        )
+
+        with redirect_stderr(err):
+            try:
+                raise ValueError("boom")
+            except ValueError:
+                self.server.handle_error(None, ("127.0.0.1", 1))
+        self.assertIn("ValueError: boom", err.getvalue())
+
     def test_ingest_ok(self):
         with self._post(
             "/ingest", {"filename": "a.txt", "area": "personal", "text": "Привет мир"}
@@ -62,6 +111,42 @@ class ApiTest(unittest.TestCase):
             body = json.load(resp)
         self.assertEqual(body["status"], "indexed")
         self.assertEqual(body["chunks"], 1)
+
+    def test_serves_built_ui(self):
+        with urllib.request.urlopen(self.base + "/") as resp:
+            body = resp.read().decode("utf-8")
+            self.assertEqual(resp.status, 200)
+            self.assertIn("text/html", resp.headers["Content-Type"])
+            self.assertEqual(resp.headers["Cache-Control"], "no-cache")
+        self.assertIn('id="app"', body)
+
+    def test_spa_route_returns_index(self):
+        with urllib.request.urlopen(self.base + "/settings?q=test") as resp:
+            body = resp.read().decode("utf-8")
+            self.assertEqual(resp.status, 200)
+            self.assertIn("text/html", resp.headers["Content-Type"])
+        self.assertIn('id="app"', body)
+
+    def test_serves_hashed_asset_with_long_cache(self):
+        index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        match = re.search(r'/assets/[^"]+\.js', index)
+        self.assertIsNotNone(match, "в index.html нет ссылки на собранный JS")
+        assert match is not None
+        with urllib.request.urlopen(self.base + match.group(0)) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("javascript", resp.headers["Content-Type"])
+            self.assertIn("immutable", resp.headers["Cache-Control"])
+            self.assertGreater(len(resp.read()), 1000)
+
+    def test_missing_static_file_is_404(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(self.base + "/assets/nope.js")
+        self.assertEqual(ctx.exception.code, 404)
+
+    def test_static_path_traversal_is_rejected(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(self.base + "/assets/../http.py")
+        self.assertEqual(ctx.exception.code, 404)
 
     def test_ingest_bad_area(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:

@@ -117,4 +117,7 @@ cat <<'EOF'
 
     persinder serve --config ../test-content/persinder.yaml
     persinder search "история поиска видео"
+
+Веб-интерфейс: http://127.0.0.1:8756/ — уже собран и раздаётся сервером,
+Node.js и npm не нужны.
 EOF

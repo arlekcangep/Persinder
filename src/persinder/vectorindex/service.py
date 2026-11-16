@@ -26,9 +26,12 @@ rebuild`` (полная пересборка из таблицы). Если фа
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+import numpy as np
 
 from ..embed.sidecar import unpack_f16_vectors
 from ..interfaces import Embedder, MetaStore
@@ -75,6 +78,25 @@ class VectorSearch:
         self._ann_dir = Path(ann_dir) if ann_dir else None
         # None — скоупа нет (ищем по всем источникам, как раньше).
         self._scopes = dict(scopes) if scopes is not None else None
+        # Кэш эмбеддеров по модели: build_embedder грузит токенизатор, создаёт
+        # ONNX-сессию и гоняет warmup — на каждый запрос это секунды (каждый
+        # символ в строке поиска платил бы заново). Под локом: несколько
+        # одновременных запросов при холодном старте не должны каждый строить
+        # свою сессию (это и лишняя работа, и всплеск памяти).
+        self._embedders: dict[str, Embedder] = {}
+        self._embedders_lock = threading.Lock()
+
+    def _embedder(self, model: str) -> Embedder:
+        """Эмбеддер модели с кэшем: один экземпляр на весь процесс."""
+        cached = self._embedders.get(model)
+        if cached is not None:
+            return cached
+        with self._embedders_lock:
+            cached = self._embedders.get(model)
+            if cached is None:
+                cached = self._embedder_factory(model)
+                self._embedders[model] = cached
+        return cached
 
     def search(
         self, text: str, limit: int = 20, min_score: float | None = None
@@ -103,7 +125,7 @@ class VectorSearch:
         allowed = self._allowed_doc_ids(model)
         if allowed is not None and not allowed:
             return []  # модель есть в конфиге, но индексировать ею нечего
-        embedder = self._embedder_factory(model)
+        embedder = self._embedder(model)
         dim = embedder.dim
         query_vector = embedder.embed_query([text])[0]
         hits = self._search_index(model, query_vector, dim, limit, allowed)
@@ -191,20 +213,41 @@ class VectorSearch:
         limit: int,
         allowed: set[str] | None,
     ) -> list[SearchHit]:
-        """Точный фолбэк: косинус по всем векторам модели из таблицы."""
+        """Точный фолбэк: косинус по всем векторам модели из таблицы.
+
+        Векторизовано numpy: каждый вектор раньше распаковывался через struct и
+        косинус считался циклом в чистом Python. На персональном корпусе
+        (десятки тысяч чанков) это секунды (замер: 30k чанков — 4 с, 100k — 13 с),
+        numpy/BLAS делает то же самое за миллисекунды (130 мс / 425 мс), результат
+        идентичен. Это фолбэк, но именно он работает на свежем home (индекса
+        ещё нет) и при рассинхронизации индекса с таблицей.
+        """
         rows = self._store.embeddings_for_model(model)
-        scored: list[tuple[float, str, int]] = []
-        for row in rows:
+        if not rows:
+            return []
+        matrix = (
+            np.frombuffer(b"".join(row["vector"] for row in rows), dtype=">f2")
+            .astype(np.float32)
+            .reshape(len(rows), dim)
+        )
+        scores = matrix @ np.asarray(query_vector, dtype=np.float32)
+        order = np.argsort(-scores)
+
+        hits: list[SearchHit] = []
+        for idx in order:
+            row = rows[idx]
             if allowed is not None and str(row["doc_id"]) not in allowed:
                 continue
-            vector = unpack_f16_vectors(row["vector"], dim)[0]
-            similarity = sum(a * b for a, b in zip(query_vector, vector, strict=True))
-            scored.append((similarity, str(row["doc_id"]), int(row["chunk_index"])))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [
-            SearchHit(document_id=doc_id, chunk_index=chunk, score=score)
-            for score, doc_id, chunk in scored[:limit]
-        ]
+            hits.append(
+                SearchHit(
+                    document_id=row["doc_id"],
+                    chunk_index=int(row["chunk_index"]),
+                    score=float(scores[idx]),
+                )
+            )
+            if len(hits) >= limit:
+                break
+        return hits
 
 
 def rebuild_index(

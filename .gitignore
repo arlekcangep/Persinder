@@ -22,11 +22,20 @@ models/
 *.onnx
 *.litertlm
 
+# --- Сборка (deploy.py build) ---
+build/
+dist/
+
 # --- Редакторы / ОС ---
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# --- Веб-клиент (Vue + Vite) ---
+web/node_modules/
+web/dist/
+web/.vite/
 
 # --- Syncthing ---
 .stfolder/

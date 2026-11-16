@@ -35,6 +35,8 @@ Persinder ведёт автоматическое каталогизирован
 - [Архитектура](docs/architecture.md) — слои данных, сайдкары эмбеддингов, конвейер
   индексации, модель репликации и риски.
 - [Модули](docs/modules.md) — декомпозиция на модули, интерфейсы и поток данных.
+- [Производительность](docs/performance.md) — конкурентность поиска, безопасность
+  при одновременных запросах и замеры нагрузки.
 
 ## Разработка
 
@@ -100,6 +102,42 @@ curl -s -X POST localhost:8756/ingest \
 USearch-индексу (mmap-файл на модель, `persinder ann rebuild` пересобирает);
 единое ранжирование (D16) — следующий шаг. Карта и интерфейсы — в
 `docs/modules.md`.
+
+## Сценарии deploy
+
+Проверка и сборка одной командой — `./deploy.sh` (обёртка над
+`deploy/deploy.py`, подробности в `--list`):
+
+```bash
+./deploy.sh test    # все тесты: pytest (tests/) + vitest (web/)
+./deploy.sh build   # веб-клиент (npm run build:static) + wheel в dist/
+```
+
+Python для тестов/сборки скрипт выбирает сам: venv проекта (`.venv`), иначе
+системный `python3` (можно переопределить: `PERSINDER_DEPLOY_PYTHON=...`).
+
+## Веб-интерфейс
+
+Собранный клиент лежит в `src/persinder/api/static/` и раздаётся тем же
+`persinder serve`; Node.js на машине пользователя не нужен:
+
+```bash
+./run.sh        # или: persinder serve --config persinder.yaml
+# открыть http://127.0.0.1:8756/
+```
+
+Сервер отдаёт `/`, `/assets/…` и маршруты приложения (`/settings`), а API
+(`/search`, `/health`, `/ingest`) работает как раньше.
+
+Пересборка интерфейса — только для разработчиков, в `web/`:
+
+```bash
+cd web
+npm install --no-bin-links
+npm run build:static   # соберёт и заменит src/persinder/api/static/
+```
+
+Подробности — в [`web/README.md`](web/README.md).
 
 ## Статус
 
