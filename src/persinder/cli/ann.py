@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 
 from ..config import Settings
@@ -17,10 +16,7 @@ def run_ann_rebuild(home: Path | None, model: str | None) -> int:
     Нужно после холодного старта устройства (таблица есть, индекса нет) и при
     рассинхронизации. По умолчанию — все модели, у которых есть векторы.
     """
-    settings = Settings.default()
-    if home:
-        settings = replace(settings, home=home)
-    settings.ensure()
+    settings = Settings.load(home).ensure()
     store = SqliteStore(settings.db_path)
     try:
         keys = [model] if model else store.embedding_models()

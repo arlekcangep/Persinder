@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import replace
 from pathlib import Path
 
 from ..api import IndexLog
@@ -128,10 +127,7 @@ def run_embed(
     home: Path | None, limit: int, all_: bool, model: str | None, background: bool
 ) -> int:
     """Эмбеддинги: очередь → векторы → сайдкары (§7)."""
-    settings = Settings.default()
-    if home:
-        settings = replace(settings, home=home)
-    settings.ensure()
+    settings = Settings.load(home).ensure()
     if all_:
         key = model or load(settings.models_state_path).embedding
         store = SqliteStore(settings.db_path)

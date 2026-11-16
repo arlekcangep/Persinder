@@ -23,7 +23,7 @@
 | `domain` | ядро: доменные модели (Area, Document, Chunk, EmbeddingJob) | реализован |
 | `interfaces` | протоколы/порты (Stemmer, TextStore, MetaStore…) | реализован |
 | `morphology` | нормализация, токенизация, стемминг | реализован |
-| `textstore` | кэш сырого текста (`pending_texts`, D26) | реализован |
+| `textstore` | кэш сырого текста (`text_cache`, D26) | реализован |
 | `store` | пакет: `models` (модели БД) + `sqlite` (SQLite: документы, FTS5, очередь) | реализован |
 | `ingest` | пакет: `models` (вход/выход) + `service` (морфоиндекс + очередь + удаление) + `journal` (журнал вызовов) | реализован |
 | `api` | пакет: `models` (DTO) + `http` (HTTP-обёртка над `ingest`) | реализован |
@@ -42,6 +42,8 @@
 
 ```
 src/persinder/
+  config.py          # Settings: home + пути хранилищ (<home>/settings.json:
+                     # text_dir, virtual_dir; D30)
   domain/
     models.py        # Area, Document, Chunk, EmbeddingJob — ядро, без зависимостей
     chunking.py      # chunk_text — нарезка текста на чанки (общая для ingest и embed)
@@ -75,7 +77,8 @@ src/persinder/
     ann.py           # пересборка ANN-индексов
   sources/
     models.py        # AreaConfig, WatchConfig, AreaScan, ChangeEvent, ScanResult
-    config.py        # загрузка YAML-конфига областей и watcher'а
+    config.py        # загрузка переносимого YAML-конфига областей и watcher'а
+                     # (пути кэшей — не здесь, а в <home>/settings.json, D30)
     scanner.py       # polling-скан (snapshot + diff + debounce)
     watcher.py       # цикл скана, запуск по требованию
     journal.py       # журнал статусов файлов (JSONL) — состояние watcher'а (D21),
@@ -91,7 +94,7 @@ src/persinder/
       fb2.py / chm.py / epub.py / archive.py   # конкретные экстракторы
     pipeline.py      # события → экстракция (файл или части контейнера) →
                      # ingest (документ на каждую часть) → журнал
-    textresolver.py  # текст документа: кэш pending_texts → оригинал (файл или
+    textresolver.py  # текст документа: кэш text_cache → оригинал (файл или
                      # адресно прочитанная часть архива); срез для /context,
                      # тот же резолвер использует воркер эмбеддингов (D26)
     reconcile.py     # сверка журнала с базой при старте: пропущенный формат,
@@ -126,7 +129,7 @@ src/persinder/
 ## Модуль 1: `ingest` (первый реализуемый)
 
 **Назначение.** Принимает уже извлечённый текст и метаданные, делает первый (быстрый)
-морфологический слой индексации, кладёт текст в кэш (`pending_texts`) и ставит
+морфологический слой индексации, кладёт текст в кэш (`text_cache`) и ставит
 задачу на фоновую индексацию по эмбеддингам.
 
 **Вход:**
@@ -151,7 +154,7 @@ src/persinder/
 1. Проверяет вход и нормализует `area`.
 2. Считает хэш содержимого — он же `document_id` (дедупликация, решение D12).
 3. Дубликат → добавляет источник и отвечает `already_indexed`, не индексируя заново.
-4. Кладёт сырой текст в **кэш** (`textstore`, `pending_texts`; D26) — он же
+4. Кладёт сырой текст в **кэш** (`textstore`, `text_cache`; D26) — он же
    нужен воркеру эмбеддингов и `/context`.
 5. Режет текст на чанки (размер и перекрытие — из настроек).
 6. Для каждого чанка считает стеммированный текст и **синхронно** пишет в FTS5

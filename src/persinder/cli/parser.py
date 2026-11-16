@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from ..api import IndexLog, serve_fastapi
-from ..config import Settings
+from ..config import Settings, default_home
 from ..sources import default_registry, load_config
 from ..textstore import FsTextStore
 from .ann import run_ann_rebuild
@@ -26,7 +26,7 @@ class Cli:
 
     def __init__(self, argv: list[str] | None = None) -> None:
         self.argv = argv
-        self.default_home = Settings.default().home
+        self.default_home = default_home()
 
     # --- парсер ---
 
@@ -212,9 +212,7 @@ class Cli:
 
     @staticmethod
     def _model_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-        settings = Settings.default()
-        if getattr(args, "home", None):
-            settings = replace(settings, home=args.home)
+        settings = Settings.load(getattr(args, "home", None))
         if args.model_command is None:
             parser.parse_args([args.command, "--help"])
             return 1
@@ -223,9 +221,7 @@ class Cli:
         )
 
     def _serve_main(self, args: argparse.Namespace) -> int:
-        settings = Settings.default()
-        if getattr(args, "home", None):
-            settings = replace(settings, home=args.home)
+        settings = Settings.load(getattr(args, "home", None))
         if getattr(args, "host", None):
             settings = replace(settings, host=args.host)
         if getattr(args, "port", None):

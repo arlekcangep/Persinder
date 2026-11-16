@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import signal
 import time
-from dataclasses import replace
 from pathlib import Path
 
 from ..api import IndexLog
@@ -27,9 +26,7 @@ class WatchRunner:
 
     def __init__(self, config_path: Path, home: Path | None) -> None:
         self._config_path = config_path
-        self._settings = Settings.default()
-        if home:
-            self._settings = replace(self._settings, home=home)
+        self._settings = Settings.load(home)
 
     def run(self) -> int:
         settings = self._settings

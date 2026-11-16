@@ -10,7 +10,7 @@
 
 Порядок источников:
 
-1. ``TextStore`` (кэш ``pending_texts``) — если текст ещё там, берём оттуда:
+1. ``TextStore`` (кэш ``text_cache``) — если текст ещё там, берём оттуда:
    быстро, без перечитывания.
 2. Иначе — перечитываем оригинал: ``MetaStore.document_source(doc_id)`` даёт
    ``source_path``, ``extractor`` и, для части архива, ``container_path`` +

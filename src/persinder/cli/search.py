@@ -268,9 +268,7 @@ def run_search(
     сервера. ``min_score`` — порог косинуса семантического слоя;
     ``morph_limit``/``semantic_limit`` — отдельные лимиты слоёв.
     """
-    settings = Settings.default()
-    if home:
-        settings = replace(settings, home=home)
+    settings = Settings.load(home)
     if host:
         settings = replace(settings, host=host)
     if port is not None:
